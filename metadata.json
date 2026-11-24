@@ -1,0 +1,8 @@
+{
+  "name": "特定技能FB相談者管理CRM",
+  "description": "特定技能人材紹介向けのFB相談者・留学生・面談・求人・履歴書・PT提携一元管理CRM",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
