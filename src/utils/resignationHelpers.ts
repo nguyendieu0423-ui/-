@@ -395,14 +395,33 @@ export function mergeResignationWithGasProtection(
     ? existing.paperworkDeadline
     : incomingDeadline || existing.paperworkDeadline;
 
+  const autoMergedResigDate = isProtected('resignationDate')
+    ? existing.resignationDate
+    : incomingResigDate ||
+      existing.resignationDate ||
+      extractResignationDateFromText(
+        String(incomingRaw.handoverNotes || existing.handoverNotes || '')
+      );
+
+  const rawMergedDeadline = isProtected('paperworkDeadline')
+    ? existing.paperworkDeadline
+    : incomingDeadline || existing.paperworkDeadline;
+
+  const autoMergedDeadline =
+    autoMergedResigDate &&
+    (!rawMergedDeadline || rawMergedDeadline === autoMergedResigDate) &&
+    !isProtected('paperworkDeadline')
+      ? subtractDaysFromYmd(autoMergedResigDate, 3)
+      : rawMergedDeadline;
+
   return {
     ...existing,
     id: existing.id,
     fullName: String(incomingRaw.fullName || existing.fullName).trim(),
     previousCompany: String(incomingRaw.previousCompany || existing.previousCompany).trim(),
     nationality: nextNationality,
-    resignationDate: nextResigDate,
-    paperworkDeadline: nextDeadline,
+    resignationDate: autoMergedResigDate,
+    paperworkDeadline: autoMergedDeadline,
     paperworkStatus: incomingRaw.paperworkStatus
       ? normalizePaperworkStatus(incomingRaw.paperworkStatus)
       : existing.paperworkStatus,
@@ -431,6 +450,141 @@ export function mergeResignationWithGasProtection(
 
 export function getJstTodayYmd(): string {
   return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+export function subtractDaysFromYmd(rawYmd?: string, days = 3): string {
+  const ymd = normalizeFlexibleDateToYmd(rawYmd);
+  if (!ymd) return '';
+  const [y, m, d] = ymd.split('-').map(Number);
+  if (!y || !m || !d) return '';
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (
+    dt.getUTCFullYear() !== y ||
+    dt.getUTCMonth() !== m - 1 ||
+    dt.getUTCDate() !== d
+  ) {
+    return '';
+  }
+  const shifted = new Date(dt.getTime() - days * 86400000);
+  return shifted.toISOString().slice(0, 10);
+}
+
+export function extractResignationDateFromText(text?: string): string {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+
+  const todayYmd = getJstTodayYmd();
+  const currentYear = Number(todayYmd.slice(0, 4));
+  const currentMonth = Number(todayYmd.slice(5, 7));
+  const pad = (n: number) => String(n).padStart(2, '0');
+
+  const isValidYmd = (y: number, m: number, d: number) => {
+    if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    return (
+      dt.getUTCFullYear() === y &&
+      dt.getUTCMonth() === m - 1 &&
+      dt.getUTCDate() === d
+    );
+  };
+
+  // 1. Explicit YYYY-MM-DD / YYYY/MM/DD / YYYY年M月D日
+  const fullMatch = raw.match(/(\d{4})\s*[年\/.\-]\s*(\d{1,2})\s*[月\/.\-]\s*(\d{1,2})/);
+  if (fullMatch) {
+    const y = Number(fullMatch[1]);
+    const m = Number(fullMatch[2]);
+    const d = Number(fullMatch[3]);
+    if (isValidYmd(y, m, d)) {
+      return `${y}-${pad(m)}-${pad(d)}`;
+    }
+  }
+
+  // 2. End of month: "2026年12月末", "12月末", "11月末", "cuối tháng 12"
+  const monthEndMatch =
+    raw.match(/(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*末/) ||
+    raw.match(/cuối\s*tháng\s*(\d{1,2})(?:\s*[\/\-]\s*(\d{4}))?/i);
+  if (monthEndMatch) {
+    const isCuoiThang = /^cuối/i.test(monthEndMatch[0]);
+    const m = Number(isCuoiThang ? monthEndMatch[1] : monthEndMatch[2]);
+    const explicitYear = isCuoiThang ? monthEndMatch[2] : monthEndMatch[1];
+    if (m >= 1 && m <= 12) {
+      const y = explicitYear
+        ? Number(explicitYear)
+        : m < currentMonth - 2
+        ? currentYear + 1
+        : currentYear;
+      const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      return `${y}-${pad(m)}-${pad(lastDay)}`;
+    }
+  }
+
+  // 3. Japanese M月D日 (e.g. "11月30日")
+  const jpShortMatch = raw.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+  if (jpShortMatch) {
+    const m = Number(jpShortMatch[1]);
+    const d = Number(jpShortMatch[2]);
+    const y = m < currentMonth - 2 ? currentYear + 1 : currentYear;
+    if (isValidYmd(y, m, d)) {
+      return `${y}-${pad(m)}-${pad(d)}`;
+    }
+  }
+
+  // 4. Numeric DD/MM or MM/DD near context ("nghỉ 30/11", "退職 11/30")
+  const slashMatch = raw.match(
+    /(?:nghỉ(?:\s*việc)?|退職|ngày|date)\s*[:：]?\s*(\d{1,2})\s*[\/.\-]\s*(\d{1,2})/i
+  );
+  if (slashMatch) {
+    const a = Number(slashMatch[1]);
+    const b = Number(slashMatch[2]);
+    let m = a;
+    let d = b;
+    if (a > 12 && b <= 12) {
+      d = a;
+      m = b;
+    } else if (b > 12 && a <= 12) {
+      m = a;
+      d = b;
+    } else {
+      // Vietnamese DD/MM convention by default for slash
+      d = a;
+      m = b;
+    }
+    const y = m < currentMonth - 2 ? currentYear + 1 : currentYear;
+    if (isValidYmd(y, m, d)) {
+      return `${y}-${pad(m)}-${pad(d)}`;
+    }
+  }
+
+  return '';
+}
+
+export function normalizeAndAutoComputeResignationDates(
+  record: ResignationRecord
+): ResignationRecord {
+  const normalizedResig =
+    normalizeFlexibleDateToYmd(record.resignationDate) ||
+    extractResignationDateFromText(record.handoverNotes);
+  let normalizedDeadline = normalizeFlexibleDateToYmd(record.paperworkDeadline);
+
+  if (
+    normalizedResig &&
+    (!normalizedDeadline || normalizedDeadline === normalizedResig)
+  ) {
+    normalizedDeadline = subtractDaysFromYmd(normalizedResig, 3);
+  }
+
+  if (
+    normalizedResig === (record.resignationDate || '') &&
+    normalizedDeadline === (record.paperworkDeadline || '')
+  ) {
+    return record;
+  }
+
+  return {
+    ...record,
+    resignationDate: normalizedResig,
+    paperworkDeadline: normalizedDeadline,
+  };
 }
 
 export function normalizeFlexibleDateToYmd(raw: unknown): string {
@@ -506,17 +660,17 @@ export function assessResignationDeadline(
     return {
       daysLeft,
       urgency: 'overdue',
-      label: `Quá hạn ${Math.abs(daysLeft)} ngày (${ymd})`,
+      label: `⚠️ Quá hạn nộp giấy tờ ${Math.abs(daysLeft)} ngày (${ymd})`,
     };
   }
   if (daysLeft === 0) {
-    return { daysLeft: 0, urgency: 'urgent3', label: `Hạn hôm nay (${ymd})` };
+    return { daysLeft: 0, urgency: 'urgent3', label: `⚠️ Hạn nộp giấy tờ HÔM NAY (${ymd})` };
   }
   if (daysLeft <= 3) {
     return {
       daysLeft,
       urgency: 'urgent3',
-      label: `Còn ${daysLeft} ngày (${ymd})`,
+      label: `⚠️ Sắp đến hạn nộp giấy tờ trong ${daysLeft} ngày (${ymd})`,
     };
   }
   if (daysLeft <= 7) {
@@ -633,12 +787,20 @@ export async function parseResignationSpreadsheetFile(
     const previousCompany = String(getCell(row, 'previousCompany') || '').trim();
     const rawNationality = getCell(row, 'nationality');
     const nationality = normalizeResignationNationality(rawNationality);
-    const resignationDate = normalizeFlexibleDateToYmd(getCell(row, 'resignationDate'));
-    const paperworkDeadline = normalizeFlexibleDateToYmd(
+    const handoverNotes = String(getCell(row, 'handoverNotes') || '').trim();
+    const resignationDate =
+      normalizeFlexibleDateToYmd(getCell(row, 'resignationDate')) ||
+      extractResignationDateFromText(handoverNotes);
+    let paperworkDeadline = normalizeFlexibleDateToYmd(
       getCell(row, 'paperworkDeadline')
     );
+    if (
+      resignationDate &&
+      (!paperworkDeadline || paperworkDeadline === resignationDate)
+    ) {
+      paperworkDeadline = subtractDaysFromYmd(resignationDate, 3);
+    }
     const paperworkStatus = normalizePaperworkStatus(getCell(row, 'paperworkStatus'));
-    const handoverNotes = String(getCell(row, 'handoverNotes') || '').trim();
     const newJobNeed = String(getCell(row, 'newJobNeed') || '').trim();
     const phone = String(getCell(row, 'phone') || '').trim();
     const fbName = String(getCell(row, 'fbName') || '').trim();

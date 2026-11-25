@@ -3,6 +3,7 @@ import {
   extractNormalizedMendanInfo,
   getEffectiveProposedCompany,
 } from './crmHelpers';
+import { normalizeAndAutoComputeResignationDates } from './resignationHelpers';
 
 export interface ParsedScheduleJst {
   dateIso: string;
@@ -212,59 +213,112 @@ export function buildResignationCalendarEventDraft(
     return null;
   }
 
-  // Priority order: 1. Hạn giấy tờ (提出期限) -> 2. Ngày nghỉ việc (退職日)
-  const parsedDeadline = parseScheduleDateTimeJst(record.paperworkDeadline, 9);
-  const parsedResignation = parseScheduleDateTimeJst(record.resignationDate, 9);
+  const normalized = normalizeAndAutoComputeResignationDates(record);
+
+  // Priority order: 1. Hạn giấy tờ (提出期限 = Ngày nghỉ việc - 3 ngày) -> 2. Ngày nghỉ việc (退職日)
+  const parsedDeadline = parseScheduleDateTimeJst(normalized.paperworkDeadline, 9);
+  const parsedResignation = parseScheduleDateTimeJst(normalized.resignationDate, 9);
   const parsedTarget = parsedDeadline || parsedResignation;
   if (!parsedTarget) {
     return null;
   }
 
+  const resigDateDisplay =
+    parsedResignation?.dateIso || normalized.resignationDate || 'Chưa rõ';
   const dateSourceLabel = parsedDeadline
-    ? 'Hạn nộp giấy tờ (提出期限)'
-    : 'Ngày nghỉ việc (退職日 — tạm lấy do chưa đặt hạn giấy tờ)';
+    ? 'Hạn nộp giấy tờ (提出期限 — trước ngày nghỉ việc 3 ngày)'
+    : 'Ngày nghỉ việc (退職日)';
 
-  const eventTitle = `[Nghỉ việc / Giấy tờ] ${record.fullName || 'Ứng viên'} - ${
-    record.previousCompany || 'Công ty cũ'
-  }`;
+  const eventTitle = `[Hạn nộp giấy tờ nghỉ việc] ${
+    normalized.fullName || 'Ứng viên'
+  } - Nghỉ việc ngày ${resigDateDisplay}`;
 
   const descriptionLines = [
-    `Họ tên: ${record.fullName || 'Chưa rõ'}`,
-    `Quốc tịch: ${record.nationality || 'Chưa cập nhật'}`,
-    `Trình độ tiếng Nhật: ${record.jlpt || 'Chưa cập nhật'}`,
-    `Công ty cũ: ${record.previousCompany || 'Chưa cập nhật'}`,
-    `Ngày nghỉ việc (退職日): ${parsedResignation?.dateIso || record.resignationDate || 'Chưa cập nhật'}`,
+    `Họ tên: ${normalized.fullName || 'Chưa rõ'}`,
+    `Quốc tịch: ${normalized.nationality || 'Chưa cập nhật'}`,
+    `Trình độ tiếng Nhật: ${normalized.jlpt || 'Chưa cập nhật'}`,
+    `Công ty cũ: ${normalized.previousCompany || 'Chưa cập nhật'}`,
+    `Ngày nghỉ việc (退職日): ${resigDateDisplay}`,
     `Hạn nộp giấy tờ (提出期限 - 退職証明書・源泉徴収票): ${
-      parsedDeadline?.dateIso || record.paperworkDeadline || 'Chưa đặt hạn'
+      parsedDeadline?.dateIso || normalized.paperworkDeadline || 'Chưa đặt hạn'
     }`,
     `Mốc lịch đang theo dõi: ${dateSourceLabel}`,
-    `Trạng thái giấy tờ: ${record.paperworkStatus || 'Chưa làm'}`,
-    record.phone ? `SĐT / Liên hệ: ${record.phone}` : '',
-    record.fbName ? `Tên Facebook: ${record.fbName}` : '',
-    record.newJobNeed ? `Nhu cầu chuyển việc mới: ${record.newJobNeed}` : '',
+    `Trạng thái giấy tờ: ${normalized.paperworkStatus || 'Chưa làm'}`,
+    normalized.phone ? `SĐT / Liên hệ: ${normalized.phone}` : '',
+    normalized.fbName ? `Tên Facebook: ${normalized.fbName}` : '',
+    normalized.newJobNeed ? `Nhu cầu chuyển việc mới: ${normalized.newJobNeed}` : '',
     '',
     'Ghi chú bàn giao:',
-    record.handoverNotes ? record.handoverNotes.trim() : 'Không có ghi chú bàn giao',
+    normalized.handoverNotes ? normalized.handoverNotes.trim() : 'Không có ghi chú bàn giao',
+    '',
+    '⏰ Nhắc nhở khuyến nghị: trước 1 ngày (24h) và trước 2 giờ.',
   ].filter((line, idx, arr) => {
     if (line !== '') return true;
     return idx > 0 && arr[idx - 1] !== '';
   });
 
   return {
-    candidateId: record.id,
+    candidateId: normalized.id,
     entityType: 'resignation',
-    candidateName: record.fullName,
+    candidateName: normalized.fullName,
     eventTitle,
     description: descriptionLines.join('\n'),
     dateIso: parsedTarget.dateIso,
     startIso: parsedTarget.startIso,
     endIso: parsedTarget.endIso,
     displayDateTime: parsedTarget.displayDateTime,
-    existingEventId: record.googleCalendarEventId,
+    existingEventId: normalized.googleCalendarEventId,
     appointmentType: 'resignation_deadline',
-    reminderMinutes: [4320, 1440, 120], // 3 ngày, 1 ngày, 2 giờ trước hạn
+    reminderMinutes: [1440, 120], // Nhắc nhở trước 1 ngày (24h) và trước 2 giờ
   };
 }
+
+function formatGoogleTemplateTimestamp(isoOrYmd: string, fallbackHour = '090000'): string {
+  const m = String(isoOrYmd || '').match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?/
+  );
+  if (!m) return '';
+  const datePart = `${m[1]}${m[2]}${m[3]}`;
+  if (m[4] && m[5]) {
+    return `${datePart}T${m[4]}${m[5]}${m[6] || '00'}`;
+  }
+  return `${datePart}T${fallbackHour}`;
+}
+
+export function buildGoogleCalendarTemplateUrl(draft: CalendarEventDraft): string {
+  const startCompact = formatGoogleTemplateTimestamp(
+    draft.startIso || draft.dateIso || '',
+    '090000'
+  );
+  const endCompact = formatGoogleTemplateTimestamp(
+    draft.endIso || draft.dateIso || '',
+    '100000'
+  );
+
+  const url = new URL('https://calendar.google.com/calendar/render');
+  url.searchParams.set('action', 'TEMPLATE');
+  url.searchParams.set('text', draft.eventTitle);
+  if (startCompact && endCompact) {
+    url.searchParams.set('dates', `${startCompact}/${endCompact}`);
+  }
+  url.searchParams.set('ctz', 'Asia/Tokyo');
+  url.searchParams.set('details', draft.description);
+  return url.toString();
+}
+
+export const GAS_CALENDAR_APP_SNIPPET = `// Thêm vào hàm doPost(e) trong Google Apps Script để tự động tạo lịch bằng CalendarApp:
+if (data.action === 'createCalendarEvent' || data.action === 'createBulkCalendarEvents') {
+  var items = data.action === 'createBulkCalendarEvents' ? (data.items || []) : [data];
+  var cal = CalendarApp.getDefaultCalendar();
+  items.forEach(function(item) {
+    var start = new Date(item.startIso || (item.date + 'T09:00:00+09:00'));
+    var end = new Date(item.endIso || (item.date + 'T10:00:00+09:00'));
+    var ev = cal.createEvent(item.title || item.eventTitle, start, end, { description: item.description || '' });
+    var mins = Array.isArray(item.reminderMinutes) ? item.reminderMinutes : [1440, 120];
+    mins.forEach(function(m) { ev.addPopupReminder(Number(m)); });
+  });
+  return ContentService.createTextOutput(JSON.stringify({ ok: true, count: items.length })).setMimeType(ContentService.MimeType.JSON);
+}`;
 
 export function isValidGoogleCalendarUrl(url?: string): boolean {
   if (!url) return false;

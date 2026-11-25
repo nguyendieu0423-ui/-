@@ -399,7 +399,7 @@ export const INITIAL_RESIGNATIONS: ResignationRecord[] = [
     nationality: 'ベトナム',
     previousCompany: '医療法人社団 〇〇会（特養）',
     resignationDate: '2026-11-30',
-    paperworkDeadline: '2026-11-26',
+    paperworkDeadline: '2026-11-27',
     paperworkStatus: 'Đang thu thập',
     handoverNotes: 'Đang xin 退職証明書 và 源泉徴収票 bản gốc từ công ty cũ. Cần gửi trước khi nộp hồ sơ đổi tư cách cư trú.',
     newJobNeed: 'Tìm công ty mới chuyển đổi visa Tokutei ngành Kaigo tại Tochigi / Saitama / Gunma.',

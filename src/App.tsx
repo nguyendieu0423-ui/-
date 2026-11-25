@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
+  AlertTriangle,
+  Bell,
   Calendar,
   CheckSquare,
   ClipboardPaste,
@@ -17,6 +19,7 @@ import {
   Square,
   Upload,
   UserPlus,
+  X,
 } from 'lucide-react';
 import {
   auth,
@@ -92,7 +95,9 @@ import {
 } from './utils/crmHelpers';
 import {
   buildCandidateCalendarEventDraft,
+  buildGoogleCalendarTemplateUrl,
   buildResignationCalendarEventDraft,
+  GAS_CALENDAR_APP_SNIPPET,
   getSafeFacebookMessengerUrl,
   isValidGoogleCalendarUrl,
   normalizeFacebookPageTargetUrl,
@@ -109,6 +114,7 @@ import {
   convertResignationToCandidate,
   getJstTodayYmd,
   mergeResignationWithGasProtection,
+  normalizeAndAutoComputeResignationDates,
   normalizeResignationNationality,
 } from './utils/resignationHelpers';
 
@@ -175,16 +181,18 @@ function readFallbackResignations(): ResignationRecord[] {
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed)) {
-        return parsed.map((item) => ({
-          ...item,
-          nationality: normalizeResignationNationality(item?.nationality),
-        }));
+        return parsed.map((item) =>
+          normalizeAndAutoComputeResignationDates({
+            ...item,
+            nationality: normalizeResignationNationality(item?.nationality),
+          })
+        );
       }
     }
   } catch {
     // ignore storage parse errors
   }
-  return INITIAL_RESIGNATIONS;
+  return INITIAL_RESIGNATIONS.map((item) => normalizeAndAutoComputeResignationDates(item));
 }
 
 function readFallbackDailyFocus(): DailyFocusCompletionMap {
@@ -265,6 +273,24 @@ export default function App() {
   const [isExtractingFbChatAi, setIsExtractingFbChatAi] = useState(false);
   const [resignationReminderModal, setResignationReminderModal] =
     useState<ResignationRecord | null>(null);
+  const [resignationCalendarModal, setResignationCalendarModal] = useState<{
+    mode: 'single' | 'bulk';
+    gasAttempted: boolean;
+    items: Array<{
+      record: ResignationRecord;
+      draft: CalendarEventDraft;
+      templateUrl: string;
+    }>;
+  } | null>(null);
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
+    return window.Notification.permission;
+  });
+  const [dismissedUrgentBannerSig, setDismissedUrgentBannerSig] = useState('');
+  const [periodicScanTick, setPeriodicScanTick] = useState(0);
+  const notifiedResignationSigRef = useRef('');
   const [syncingResignationCalIds, setSyncingResignationCalIds] = useState<
     Record<string, boolean>
   >({});
@@ -812,13 +838,40 @@ export default function App() {
     return '';
   }, [webhookStatus, liveMessengerWebhookUrl]);
 
+  const isValidSafeGasUrl = (rawUrl: string): boolean => {
+    try {
+      const parsed = new URL(rawUrl.trim());
+      return parsed.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  };
+
+  const triggerSafeGoogleCalendarAnchor = (url: string) => {
+    if (!isValidGoogleCalendarUrl(url) || typeof document === 'undefined') return;
+    try {
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch {
+      // ignore sandbox click restrictions; modal 1-click link remains visible
+    }
+  };
+
   const handleSyncResignationCalendarSingle = useCallback(
     async (record: ResignationRecord) => {
       if (record.paperworkStatus === 'Hoàn tất') {
         showToast('ℹ️ Hồ sơ này đã hoàn tất giấy tờ nên không cần đồng bộ lịch nhắc.');
         return;
       }
-      const draft = buildResignationCalendarEventDraft(record);
+
+      const normalized = normalizeAndAutoComputeResignationDates(record);
+      const draft = buildResignationCalendarEventDraft(normalized);
       if (!draft) {
         showToast(
           '⚠️ Vui lòng cập nhật Ngày nghỉ việc hoặc Hạn giấy tờ trước khi đồng bộ lịch.'
@@ -826,28 +879,73 @@ export default function App() {
         return;
       }
 
-      const isUpdate = Boolean(draft.existingEventId);
-      setConfirmDialog({
-        title: isUpdate
-          ? 'Cập nhật lịch nhắc giấy tờ trên Google Calendar'
-          : 'Đồng bộ lịch nhắc giấy tờ lên Google Calendar',
-        message: `${
-          isUpdate
-            ? 'Cập nhật lại sự kiện hiện có (tránh tạo trùng)'
-            : 'Tạo mới sự kiện nhắc hạn trên Google Calendar'
-        }:\n• Tiêu đề: ${draft.eventTitle}\n• Thời gian (Asia/Tokyo): ${
-          draft.displayDateTime
-        }\n• Nhắc nhở tự động: 3 ngày, 1 ngày và 2 giờ trước hạn.`,
-        confirmLabel: isUpdate ? 'Cập nhật Calendar' : 'Đồng bộ ngay',
-        cancelLabel: 'Hủy',
-        tone: 'accent',
-        onConfirm: () => {
-          setConfirmDialog(null);
-          void executeCalendarSyncForDraft(draft);
-        },
-      });
+      const templateUrl = buildGoogleCalendarTemplateUrl(draft);
+      const trimmedGasUrl = gasWebAppUrl.trim();
+
+      setSyncingResignationCalIds((prev) => ({ ...prev, [normalized.id]: true }));
+      try {
+        // Save auto-computed deadline + direct 1-click Calendar link onto the record
+        setResignations((prev) =>
+          prev.map((r) =>
+            r.id === normalized.id
+              ? {
+                  ...normalized,
+                  googleCalendarEventLink: templateUrl,
+                  updatedAt: new Date().toISOString(),
+                }
+              : r
+          )
+        );
+
+        if (trimmedGasUrl && isValidSafeGasUrl(trimmedGasUrl)) {
+          await fetch(trimmedGasUrl, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'createCalendarEvent',
+              useCalendarApp: true,
+              entityType: 'resignation',
+              recordId: normalized.id,
+              title: draft.eventTitle,
+              eventTitle: draft.eventTitle,
+              date: draft.dateIso,
+              startIso: draft.startIso,
+              endIso: draft.endIso,
+              timeZone: 'Asia/Tokyo',
+              description: draft.description,
+              reminderMinutes: [1440, 120],
+            }),
+          });
+          showToast(
+            `✅ Đã đẩy lịch "${draft.eventTitle}" qua GAS CalendarApp (ngày ${draft.dateIso}, nhắc 1 ngày & 2 giờ trước)`
+          );
+          return;
+        }
+
+        triggerSafeGoogleCalendarAnchor(templateUrl);
+        setResignationCalendarModal({
+          mode: 'single',
+          gasAttempted: false,
+          items: [{ record: normalized, draft, templateUrl }],
+        });
+        showToast(
+          `📅 Đã tạo sẵn lịch Google Calendar (${draft.dateIso}) — bấm "Lưu lên Google Calendar" để hoàn tất trong 1 click!`
+        );
+      } catch {
+        setResignationCalendarModal({
+          mode: 'single',
+          gasAttempted: Boolean(trimmedGasUrl),
+          items: [{ record: normalized, draft, templateUrl }],
+        });
+        showToast(
+          '📅 Đã chuyển sang link tạo lịch Google Calendar 1-click (không bị chặn OAuth).'
+        );
+      } finally {
+        setSyncingResignationCalIds((prev) => ({ ...prev, [normalized.id]: false }));
+      }
     },
-    [executeCalendarSyncForDraft, showToast]
+    [gasWebAppUrl, showToast]
   );
 
   const handleBulkSyncResignationsCalendar = useCallback(async () => {
@@ -857,130 +955,114 @@ export default function App() {
       return;
     }
 
-    const drafts = activeRecords
-      .map((r) => buildResignationCalendarEventDraft(r))
-      .filter((d): d is CalendarEventDraft => Boolean(d));
+    const prepared = activeRecords
+      .map((rec) => {
+        const normalized = normalizeAndAutoComputeResignationDates(rec);
+        const draft = buildResignationCalendarEventDraft(normalized);
+        if (!draft) return null;
+        return {
+          record: normalized,
+          draft,
+          templateUrl: buildGoogleCalendarTemplateUrl(draft),
+        };
+      })
+      .filter(
+        (
+          item
+        ): item is {
+          record: ResignationRecord;
+          draft: CalendarEventDraft;
+          templateUrl: string;
+        } => Boolean(item)
+      );
 
-    if (drafts.length === 0) {
+    if (prepared.length === 0) {
       showToast(
         '⚠️ Vui lòng cập nhật Ngày nghỉ việc hoặc Hạn giấy tờ trước khi đồng bộ lịch.'
       );
       return;
     }
 
-    const skippedCount = activeRecords.length - drafts.length;
-    const previewNames = drafts
-      .slice(0, 6)
-      .map((d) => `• ${d.eventTitle} (${d.displayDateTime})`)
-      .join('\n');
-    const extraCount =
-      drafts.length > 6 ? `\n...và ${drafts.length - 6} hồ sơ khác.` : '';
-    const skippedNote =
-      skippedCount > 0
-        ? `\n(Bỏ qua ${skippedCount} hồ sơ chưa có Ngày nghỉ việc và Hạn giấy tờ)`
-        : '';
+    const trimmedGasUrl = gasWebAppUrl.trim();
+    setIsBulkSyncingResignationsCal(true);
+    try {
+      const preparedById = new Map(prepared.map((p) => [p.record.id, p]));
+      setResignations((prev) =>
+        prev.map((r) => {
+          const hit = preparedById.get(r.id);
+          return hit
+            ? {
+                ...hit.record,
+                googleCalendarEventLink: hit.templateUrl,
+                updatedAt: new Date().toISOString(),
+              }
+            : r;
+        })
+      );
 
-    setConfirmDialog({
-      title: `Đồng bộ ${drafts.length} lịch nghỉ việc lên Google Calendar`,
-      message: `Xác nhận tạo mới hoặc cập nhật ${drafts.length} sự kiện (múi giờ Asia/Tokyo, nhắc trước 3 ngày / 1 ngày / 2 giờ):\n${previewNames}${extraCount}${skippedNote}`,
-      confirmLabel: `Đồng bộ ${drafts.length} lịch`,
-      cancelLabel: 'Hủy',
-      tone: 'accent',
-      onConfirm: async () => {
-        setConfirmDialog(null);
-        setIsBulkSyncingResignationsCal(true);
-        try {
-          let googleToken = await ensureGoogleCalendarToken(false);
-          if (!googleToken) return;
+      if (trimmedGasUrl && isValidSafeGasUrl(trimmedGasUrl)) {
+        await fetch(trimmedGasUrl, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'createBulkCalendarEvents',
+            useCalendarApp: true,
+            timeZone: 'Asia/Tokyo',
+            reminderMinutes: [1440, 120],
+            items: prepared.map(({ record, draft }) => ({
+              entityType: 'resignation',
+              recordId: record.id,
+              title: draft.eventTitle,
+              eventTitle: draft.eventTitle,
+              date: draft.dateIso,
+              startIso: draft.startIso,
+              endIso: draft.endIso,
+              description: draft.description,
+              reminderMinutes: [1440, 120],
+            })),
+          }),
+        });
+        showToast(
+          `✅ Đã đẩy toàn bộ ${prepared.length} lịch hạn giấy tờ qua GAS CalendarApp (nhắc trước 1 ngày & 2 giờ)!`
+        );
+        return;
+      }
 
-          let firebaseToken = await getFirebaseIdToken();
-          if (!firebaseToken) {
-            googleToken = await ensureGoogleCalendarToken(true);
-            if (!googleToken) return;
-            firebaseToken = await getFirebaseIdToken();
-            if (!firebaseToken) {
-              showToast('⚠️ Vui lòng đăng nhập Google để đồng bộ Google Calendar');
-              return;
-            }
-          }
-
-          const callBulk = (gToken: string, fbToken: string) =>
-            fetch('/api/calendar/sync-bulk', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${fbToken}`,
-                'X-Google-Access-Token': gToken,
-              },
-              body: JSON.stringify({ items: drafts }),
-            });
-
-          let resp = await callBulk(googleToken, firebaseToken);
-          if (resp.status === 401) {
-            clearCachedCalendarAccessToken();
-            setHasCalendarToken(false);
-            const refreshedGoogle = await ensureGoogleCalendarToken(true);
-            if (!refreshedGoogle) return;
-            const refreshedFb = (await getFirebaseIdToken()) || firebaseToken;
-            resp = await callBulk(refreshedGoogle, refreshedFb);
-          }
-
-          const data = (await resp.json().catch(() => ({}))) as {
-            synced?: Array<{ candidateId: string; eventId: string; htmlLink: string }>;
-            failed?: Array<{ candidateId: string; error: string }>;
-            error?: string;
-          };
-          if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-
-          const syncedList = Array.isArray(data.synced) ? data.synced : [];
-          const failedList = Array.isArray(data.failed) ? data.failed : [];
-          const syncedMap = new Map(syncedList.map((s) => [s.candidateId, s]));
-
-          if (syncedList.length > 0) {
-            setResignations((prev) =>
-              prev.map((r) => {
-                const hit = syncedMap.get(r.id);
-                return hit
-                  ? {
-                      ...r,
-                      googleCalendarEventId: hit.eventId,
-                      googleCalendarEventLink: hit.htmlLink,
-                    }
-                  : r;
-              })
-            );
-          }
-
-          if (syncedList.length === 0 && failedList.length > 0) {
-            showToast(`❌ Lỗi đồng bộ Calendar nghỉ việc: ${failedList[0].error}`);
-          } else if (failedList.length > 0) {
-            showToast(
-              `⚠️ Đã đồng bộ ${syncedList.length} hồ sơ (${failedList.length} hồ sơ lỗi: ${failedList[0].error})`
-            );
-          } else {
-            showToast(
-              `✅ Đã đồng bộ ${syncedList.length} hạn giấy tờ nghỉ việc lên Google Calendar (nhắc 3 ngày / 1 ngày / 2 giờ)`
-            );
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : 'Đồng bộ thất bại';
-          showToast(`❌ Lỗi đồng bộ Calendar nghỉ việc: ${msg}`);
-        } finally {
-          setIsBulkSyncingResignationsCal(false);
-        }
-      },
-    });
-  }, [resignations, ensureGoogleCalendarToken, getFirebaseIdToken, showToast]);
+      setResignationCalendarModal({
+        mode: 'bulk',
+        gasAttempted: false,
+        items: prepared,
+      });
+      showToast(
+        `📅 Đã chuẩn bị ${prepared.length} link tạo lịch Google Calendar 1-click (nhắc trước 1 ngày & 2 giờ)!`
+      );
+    } catch {
+      setResignationCalendarModal({
+        mode: 'bulk',
+        gasAttempted: Boolean(trimmedGasUrl),
+        items: prepared,
+      });
+      showToast(
+        `📅 Đã mở danh sách ${prepared.length} link Google Calendar 1-click.`
+      );
+    } finally {
+      setIsBulkSyncingResignationsCal(false);
+    }
+  }, [resignations, gasWebAppUrl, showToast]);
 
   const handleSaveResignation = useCallback(
     async (record: ResignationRecord, isNew: boolean) => {
-      let protectedRec: ResignationRecord = record;
+      let protectedRec: ResignationRecord = normalizeAndAutoComputeResignationDates(record);
       setResignations((prev) => {
         const existing = prev.find((r) => r.id === record.id) || null;
-        protectedRec = applyManualProtectionOnResignationSave(existing, {
-          ...record,
-          updatedAt: new Date().toISOString(),
-        });
+        protectedRec = applyManualProtectionOnResignationSave(
+          existing,
+          normalizeAndAutoComputeResignationDates({
+            ...record,
+            updatedAt: new Date().toISOString(),
+          })
+        );
         return isNew
           ? [protectedRec, ...prev]
           : prev.map((r) => (r.id === protectedRec.id ? protectedRec : r));
@@ -990,25 +1072,6 @@ export default function App() {
           ? '✅ Đã thêm hồ sơ nghỉ việc mới'
           : `✅ Đã cập nhật hồ sơ (đã bật bảo vệ chống ghi đè GAS): ${protectedRec.fullName}`
       );
-
-      if (protectedRec.paperworkStatus === 'Hoàn tất' && protectedRec.googleCalendarEventId) {
-        void executeCalendarDelete(
-          protectedRec.id,
-          protectedRec.googleCalendarEventId,
-          true,
-          'resignation'
-        );
-      } else if (
-        (protectedRec.paperworkDeadline || protectedRec.resignationDate) &&
-        protectedRec.paperworkStatus !== 'Hoàn tất' &&
-        auth.currentUser &&
-        getCachedCalendarAccessToken()
-      ) {
-        const draft = buildResignationCalendarEventDraft(protectedRec);
-        if (draft) {
-          void executeCalendarSyncForDraft(draft);
-        }
-      }
     },
     [executeCalendarDelete, executeCalendarSyncForDraft, showToast]
   );
@@ -1296,17 +1359,19 @@ export default function App() {
                 const existingTs = existing.updatedAt ? Date.parse(existing.updatedAt) : 0;
                 const incomingTs = incoming.updatedAt ? Date.parse(incoming.updatedAt) : 0;
                 if (existingTs > incomingTs) {
-                  return mergeResignationWithGasProtection(
-                    existing,
-                    incoming as ResignationRecord & Record<string, unknown>,
-                    true
+                  return normalizeAndAutoComputeResignationDates(
+                    mergeResignationWithGasProtection(
+                      existing,
+                      incoming as ResignationRecord & Record<string, unknown>,
+                      true
+                    )
                   );
                 }
               }
-              return {
+              return normalizeAndAutoComputeResignationDates({
                 ...incoming,
                 nationality: normalizeResignationNationality(incoming.nationality),
-              };
+              });
             });
             const nextJson = JSON.stringify(merged);
             if (JSON.stringify(prev) === nextJson) return prev;
@@ -1395,10 +1460,12 @@ export default function App() {
           setPtPartners(Array.isArray(data.ptPartners) ? data.ptPartners : []);
           if (Array.isArray(data.resignations) && data.resignations.length > 0) {
             setResignations(
-              data.resignations.map((r) => ({
-                ...r,
-                nationality: normalizeResignationNationality(r.nationality),
-              }))
+              data.resignations.map((r) =>
+                normalizeAndAutoComputeResignationDates({
+                  ...r,
+                  nationality: normalizeResignationNationality(r.nationality),
+                })
+              )
             );
           }
         } else {
@@ -1948,10 +2015,12 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           const prevById = new Map(prev.map((item) => [item.id, item]));
           return parsed.resignations.map(
             (rawRow: Partial<ResignationRecord> & Record<string, unknown>) =>
-              mergeResignationWithGasProtection(
-                rawRow.id ? prevById.get(String(rawRow.id)) : undefined,
-                rawRow,
-                gasWriteLocked
+              normalizeAndAutoComputeResignationDates(
+                mergeResignationWithGasProtection(
+                  rawRow.id ? prevById.get(String(rawRow.id)) : undefined,
+                  rawRow,
+                  gasWriteLocked
+                )
               )
           );
         });
@@ -2077,14 +2146,18 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
   }, [allPeopleCombined]);
 
   const resignationAlerts = useMemo(() => {
+    void periodicScanTick;
     return resignations
-      .map((record) => ({
-        record,
-        assessment: assessResignationDeadline(
-          record.paperworkDeadline,
-          record.paperworkStatus
-        ),
-      }))
+      .map((rawRecord) => {
+        const record = normalizeAndAutoComputeResignationDates(rawRecord);
+        return {
+          record,
+          assessment: assessResignationDeadline(
+            record.paperworkDeadline,
+            record.paperworkStatus
+          ),
+        };
+      })
       .filter(
         ({ assessment }) =>
           assessment.urgency === 'overdue' ||
@@ -2092,13 +2165,108 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           assessment.urgency === 'warn7'
       )
       .sort((a, b) => (a.assessment.daysLeft ?? 999) - (b.assessment.daysLeft ?? 999));
-  }, [resignations]);
+  }, [resignations, periodicScanTick]);
+
+  const urgentResignationAlerts = useMemo(
+    () =>
+      resignationAlerts.filter(
+        ({ assessment }) =>
+          assessment.urgency === 'overdue' || assessment.urgency === 'urgent3'
+      ),
+    [resignationAlerts]
+  );
+
+  const urgentResignationSignature = useMemo(
+    () =>
+      urgentResignationAlerts
+        .map(
+          ({ record, assessment }) =>
+            `${record.id}:${record.paperworkDeadline}:${assessment.daysLeft}`
+        )
+        .join('|'),
+    [urgentResignationAlerts]
+  );
+
+  // Periodic scan every 5 minutes + automatic browser notification for deadlines <= 3 days
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setPeriodicScanTick((t) => t + 1);
+    }, 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!urgentResignationSignature || urgentResignationAlerts.length === 0) return;
+    if (
+      typeof window !== 'undefined' &&
+      'Notification' in window &&
+      window.Notification.permission === 'granted' &&
+      notifiedResignationSigRef.current !== urgentResignationSignature
+    ) {
+      notifiedResignationSigRef.current = urgentResignationSignature;
+      const lines = urgentResignationAlerts.slice(0, 3).map(({ record, assessment }) => {
+        if (assessment.daysLeft !== null && assessment.daysLeft < 0) {
+          return `• ${record.fullName}: quá hạn ${Math.abs(assessment.daysLeft)} ngày`;
+        }
+        if (assessment.daysLeft === 0) {
+          return `• ${record.fullName}: hạn nộp giấy tờ HÔM NAY`;
+        }
+        return `• ${record.fullName}: còn ${assessment.daysLeft} ngày (${record.paperworkDeadline})`;
+      });
+      try {
+        new window.Notification(
+          `⚠️ Nhắc hạn giấy tờ nghỉ việc (${urgentResignationAlerts.length} hồ sơ)`,
+          { body: lines.join('\n') }
+        );
+      } catch {
+        // ignore unsupported Notification constructor contexts
+      }
+    }
+  }, [urgentResignationAlerts, urgentResignationSignature]);
+
+  const handleRequestBrowserNotifications = useCallback(async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setNotificationPermission('unsupported');
+      showToast('ℹ️ Trình duyệt hiện tại không hỗ trợ Web Notification.');
+      return;
+    }
+    try {
+      const perm = await window.Notification.requestPermission();
+      setNotificationPermission(perm);
+      if (perm === 'granted') {
+        showToast('✅ Đã bật thông báo trình duyệt cho nhắc lịch giấy tờ nghỉ việc!');
+      } else {
+        showToast('ℹ️ Bạn chưa cấp quyền thông báo trình duyệt (vẫn có cảnh báo góc màn hình).');
+      }
+    } catch {
+      showToast('⚠️ Không thể yêu cầu quyền thông báo trên trình duyệt này.');
+    }
+  }, [showToast]);
 
   const dailyFocusItems = useMemo<DailyFocusItem[]>(() => {
     const items: DailyFocusItem[] = [];
     const todayYmd = getJstTodayYmd();
     const [ty, tm, td] = todayYmd.split('-').map(Number);
     const todayUtc = Date.UTC(ty, tm - 1, td);
+
+    // 0. URGENT (<= 3 days or overdue) Resignation paperwork deadlines pinned at VERY TOP
+    urgentResignationAlerts.forEach(({ record, assessment }) => {
+      const urgentTitle =
+        assessment.daysLeft !== null && assessment.daysLeft < 0
+          ? `⚠️ Quá hạn nộp giấy tờ ${Math.abs(assessment.daysLeft)} ngày: ${record.fullName}`
+          : assessment.daysLeft === 0
+          ? `⚠️ Hạn nộp giấy tờ HÔM NAY: ${record.fullName}`
+          : `⚠️ Sắp đến hạn nộp giấy tờ trong ${assessment.daysLeft} ngày: ${record.fullName}`;
+      items.push({
+        id: `focus_resig_${record.id}`,
+        category: 'resignation',
+        title: urgentTitle,
+        subtitle: `Hạn ${record.paperworkDeadline || '-'} (Nghỉ ${record.resignationDate || '-'}) · ${record.previousCompany}`,
+        urgency: 'critical',
+        targetTab: 'resignation',
+        entityId: record.id,
+      });
+    });
 
     // 1. Mendan / Interview today or tomorrow
     allPeopleCombined.forEach((p) => {
@@ -2124,21 +2292,20 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       }
     });
 
-    // 2. Resignation paperwork deadlines <= 7 days
-    resignationAlerts.forEach(({ record, assessment }) => {
-      items.push({
-        id: `focus_resig_${record.id}`,
-        category: 'resignation',
-        title: `Giấy tờ nghỉ việc: ${record.fullName}`,
-        subtitle: `${assessment.label} · ${record.previousCompany}`,
-        urgency:
-          assessment.urgency === 'overdue' || assessment.urgency === 'urgent3'
-            ? 'critical'
-            : 'warning',
-        targetTab: 'resignation',
-        entityId: record.id,
+    // 2. Remaining Resignation paperwork deadlines (4..7 days)
+    resignationAlerts
+      .filter(({ assessment }) => assessment.urgency === 'warn7')
+      .forEach(({ record, assessment }) => {
+        items.push({
+          id: `focus_resig_${record.id}`,
+          category: 'resignation',
+          title: `Giấy tờ nghỉ việc: ${record.fullName}`,
+          subtitle: `${assessment.label} · ${record.previousCompany}`,
+          urgency: 'warning',
+          targetTab: 'resignation',
+          entityId: record.id,
+        });
       });
-    });
 
     // 3. Uncontacted > 3 days
     urgentFollowUpList.slice(0, 5).forEach(({ person, reason }) => {
@@ -2177,7 +2344,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     });
 
     return items.slice(0, 14);
-  }, [allPeopleCombined, resignationAlerts, urgentFollowUpList]);
+  }, [allPeopleCombined, resignationAlerts, urgentResignationAlerts, urgentFollowUpList]);
 
   const toggleDailyFocusItem = useCallback((id: string) => {
     setDailyFocusCompleted((prev) => ({
@@ -4805,6 +4972,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 syncingCalendarIds={syncingResignationCalIds}
                 isBulkCalendarSyncing={isBulkSyncingResignationsCal}
                 onNotify={(msg) => showToast(msg)}
+                hasGasUrl={Boolean(gasWebAppUrl.trim())}
+                notificationPermission={notificationPermission}
+                onRequestBrowserNotifications={() => void handleRequestBrowserNotifications()}
               />
             )}
 
@@ -5388,11 +5558,28 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     </div>
 
                     <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
-                      <h3 className="text-sm font-bold text-[#edeeef]">
-                        Google Apps Script (GAS) 連携設定
-                      </h3>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-bold text-[#edeeef]">
+                          Google Apps Script (GAS) 連携設定
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const ok = await copyTextSafely(GAS_CALENDAR_APP_SNIPPET);
+                            showToast(
+                              ok
+                                ? '📋 Đã sao chép đoạn mã GAS CalendarApp!'
+                                : '⚠️ Không thể sao chép tự động'
+                            );
+                          }}
+                          className="inline-flex items-center gap-1 rounded border border-[#38bdf8]/40 bg-[#38bdf8]/10 px-2.5 py-1 text-[11px] font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 cursor-pointer"
+                        >
+                          <Copy className="h-3 w-3" aria-hidden="true" />
+                          Sao chép mã GAS CalendarApp
+                        </button>
+                      </div>
                       <p className="mt-1 text-xs text-[#94949e]">
-                        誤上書き防止のため初期状態は「GAS上書き保護中」になっています。同期が必要な場合のみヘッダーの保護ボタンを解除して送信してください。
+                        誤上書き防止のため初期状態は「GAS上書き保護中」になっています。同期が必要な場合のみヘッダーの保護ボタンを解除して送信してください（nút Đồng bộ Lịch Google ở tab Nghỉ việc sẽ ưu tiên dùng URL này để gọi CalendarApp không cần OAuth).
                       </p>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <input
@@ -7817,6 +8004,116 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </div>
         </div>
       )}
+
+      {/* MODAL 11: 1-CLICK GOOGLE CALENDAR TEMPLATE LINK MODAL (ZERO OAUTH / 403) */}
+      {resignationCalendarModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 p-4">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#27272a] bg-[#141417] p-5 text-xs text-[#edeeef] shadow-2xl">
+            <div className="mb-3 flex items-center justify-between border-b border-[#27272a] pb-2.5">
+              <div className="flex items-center gap-2">
+                <Calendar className="h-4 w-4 text-[#38bdf8]" aria-hidden="true" />
+                <h3 className="text-base font-bold text-[#edeeef]">
+                  {resignationCalendarModal.mode === 'bulk'
+                    ? `Lưu ${resignationCalendarModal.items.length} hạn giấy tờ lên Google Calendar (1-click)`
+                    : 'Lưu hạn nộp giấy tờ lên Google Calendar (1-click)'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setResignationCalendarModal(null)}
+                className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1 text-xs font-semibold text-[#94949e] hover:text-[#edeeef] cursor-pointer"
+              >
+                Đóng
+              </button>
+            </div>
+
+            <p className="mb-3 text-[11px] leading-relaxed text-[#94949e]">
+              Đã điền sẵn tiêu đề, ngày <strong className="text-[#edeeef]">Hạn nộp giấy tờ (trước ngày nghỉ việc 3 ngày)</strong> theo múi giờ <strong className="text-[#edeeef]">Asia/Tokyo</strong> và hướng dẫn nhắc nhở trước <strong className="text-[#22c55e]">1 ngày &amp; 2 giờ</strong>. Bấm nút bên dưới để lưu trực tiếp vào Google Calendar mà không bị lỗi OAuth/403.
+            </p>
+
+            <div className="space-y-2.5">
+              {resignationCalendarModal.items.map(({ record, draft, templateUrl }) => (
+                <div
+                  key={record.id}
+                  className="flex flex-col gap-2 rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="font-semibold text-[#edeeef]">{draft.eventTitle}</div>
+                    <div className="text-[11px] text-[#f59e0b]">
+                      Ngày hẹn trên lịch: {draft.dateIso} (09:00–10:00 JST) · Công ty cũ: {record.previousCompany}
+                    </div>
+                  </div>
+                  <a
+                    href={templateUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md bg-[#22c55e] px-3.5 py-2 text-[11px] font-semibold text-[#0c0c0e] hover:opacity-90 whitespace-nowrap"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                    Lưu lên Google Calendar
+                  </a>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Prominent Corner Reminder Toast Banner for Urgent Resignation Deadlines (<= 3 days / overdue) */}
+      {urgentResignationAlerts.length > 0 &&
+        dismissedUrgentBannerSig !== urgentResignationSignature && (
+          <div className="fixed bottom-20 right-5 z-40 w-[calc(100vw-2.5rem)] max-w-sm rounded-xl border border-rose-500/60 bg-[#181115]/95 p-3.5 text-xs text-zinc-100 shadow-2xl backdrop-blur">
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <div className="flex items-center gap-1.5 font-bold text-rose-300">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" aria-hidden="true" />
+                <span>
+                  Nhắc hạn giấy tờ nghỉ việc ({urgentResignationAlerts.length} hồ sơ)
+                </span>
+              </div>
+              <button
+                type="button"
+                aria-label="Đóng thông báo nhắc hạn"
+                onClick={() => setDismissedUrgentBannerSig(urgentResignationSignature)}
+                className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-white cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            </div>
+            <div className="space-y-1.5">
+              {urgentResignationAlerts.slice(0, 3).map(({ record, assessment }) => (
+                <div
+                  key={`toast_resig_${record.id}`}
+                  className="rounded border border-rose-500/30 bg-rose-950/30 px-2.5 py-1.5"
+                >
+                  <div className="font-semibold text-zinc-100">{record.fullName}</div>
+                  <div className="text-[11px] text-rose-300">{assessment.label}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setViewMode('workspace');
+                  setActiveTab('resignation');
+                }}
+                className="flex-1 rounded-md bg-rose-500 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-rose-400 cursor-pointer"
+              >
+                Xem &amp; xử lý ngay
+              </button>
+              {notificationPermission === 'default' && (
+                <button
+                  type="button"
+                  onClick={() => void handleRequestBrowserNotifications()}
+                  className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/25 cursor-pointer"
+                >
+                  <Bell className="h-3 w-3" aria-hidden="true" />
+                  Bật thông báo
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
       {/* Floating Chatbot Launcher Button */}
       {!chatbotOpen && (

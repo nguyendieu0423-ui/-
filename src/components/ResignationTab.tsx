@@ -1,5 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  Bell,
   Calendar,
   CalendarCheck,
   CheckCircle2,
@@ -29,8 +30,11 @@ import {
   applyManualProtectionOnResignationSave,
   assessResignationDeadline,
   buildResignationReminderMessages,
+  extractResignationDateFromText,
+  normalizeAndAutoComputeResignationDates,
   normalizeResignationNationality,
   parseResignationSpreadsheetFile,
+  subtractDaysFromYmd,
   suggestNationalityFromName,
   type ResignationImportPreviewRow,
 } from '../utils/resignationHelpers';
@@ -49,6 +53,9 @@ interface ResignationTabProps {
   syncingCalendarIds: Record<string, boolean>;
   isBulkCalendarSyncing: boolean;
   onNotify: (msg: string, type?: 'success' | 'error' | 'info') => void;
+  hasGasUrl?: boolean;
+  notificationPermission?: NotificationPermission | 'unsupported';
+  onRequestBrowserNotifications?: () => void;
 }
 
 const EMPTY_FORM: Omit<ResignationRecord, 'id'> = {
@@ -78,6 +85,9 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
   syncingCalendarIds,
   isBulkCalendarSyncing,
   onNotify,
+  hasGasUrl = false,
+  notificationPermission = 'unsupported',
+  onRequestBrowserNotifications,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -164,26 +174,27 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
   };
 
   const openEditModal = (rec: ResignationRecord) => {
+    const normalized = normalizeAndAutoComputeResignationDates(rec);
     setEditingRecord(rec);
     setFormState({
-      fullName: rec.fullName,
-      nationality: normalizeResignationNationality(rec.nationality),
-      previousCompany: rec.previousCompany,
-      resignationDate: rec.resignationDate || '',
-      paperworkDeadline: rec.paperworkDeadline || '',
-      paperworkStatus: rec.paperworkStatus || 'Chưa làm',
-      handoverNotes: rec.handoverNotes || '',
-      newJobNeed: rec.newJobNeed || '',
-      phone: rec.phone || '',
-      fbName: rec.fbName || '',
-      fbProfileUrl: rec.fbProfileUrl || '',
-      industry: rec.industry || '',
-      jlpt: rec.jlpt || 'N3',
-      convertedCandidateId: rec.convertedCandidateId,
-      googleCalendarEventId: rec.googleCalendarEventId,
-      googleCalendarEventLink: rec.googleCalendarEventLink,
-      manualProtectedFields: rec.manualProtectedFields,
-      gasProtected: rec.gasProtected,
+      fullName: normalized.fullName,
+      nationality: normalizeResignationNationality(normalized.nationality),
+      previousCompany: normalized.previousCompany,
+      resignationDate: normalized.resignationDate || '',
+      paperworkDeadline: normalized.paperworkDeadline || '',
+      paperworkStatus: normalized.paperworkStatus || 'Chưa làm',
+      handoverNotes: normalized.handoverNotes || '',
+      newJobNeed: normalized.newJobNeed || '',
+      phone: normalized.phone || '',
+      fbName: normalized.fbName || '',
+      fbProfileUrl: normalized.fbProfileUrl || '',
+      industry: normalized.industry || '',
+      jlpt: normalized.jlpt || 'N3',
+      convertedCandidateId: normalized.convertedCandidateId,
+      googleCalendarEventId: normalized.googleCalendarEventId,
+      googleCalendarEventLink: normalized.googleCalendarEventLink,
+      manualProtectedFields: normalized.manualProtectedFields,
+      gasProtected: normalized.gasProtected,
     });
     setIsModalOpen(true);
   };
@@ -212,14 +223,14 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
       return;
     }
     const isNew = !editingRecord;
-    const rawSaved: ResignationRecord = {
+    const rawSaved = normalizeAndAutoComputeResignationDates({
       id: editingRecord?.id || `resig_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       ...formState,
       nationality: normalizeResignationNationality(formState.nationality),
       fullName: formState.fullName.trim(),
       previousCompany: formState.previousCompany.trim(),
       updatedAt: new Date().toISOString(),
-    };
+    });
     const saved = applyManualProtectionOnResignationSave(editingRecord, rawSaved);
     setIsModalOpen(false);
     await onSaveRecord(saved, isNew);
@@ -279,10 +290,20 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
             Quản lý Người nghỉ việc &amp; Thủ tục Giấy tờ (退職者管理)
           </h2>
           <p className="text-xs text-zinc-400">
-            Theo dõi ngày nghỉ việc, hạn nộp giấy tờ (退職証明書・源泉徴収票), nhắc Google Calendar (3 ngày / 1 ngày / 2 giờ) &amp; chuyển tiếp ứng viên mới.
+            Tự động tính hạn giấy tờ = Ngày nghỉ việc - 3 ngày, cảnh báo nội bộ khi ≤ 3 ngày &amp; đồng bộ Google Calendar ({hasGasUrl ? 'ưu tiên GAS CalendarApp' : 'tạo lịch 1-click không lỗi OAuth'}).
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {notificationPermission === 'default' && onRequestBrowserNotifications && (
+            <button
+              type="button"
+              onClick={onRequestBrowserNotifications}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/25"
+            >
+              <Bell className="h-3.5 w-3.5" />
+              Bật nhắc lịch trình duyệt
+            </button>
+          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -321,6 +342,20 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
           </button>
         </div>
       </div>
+
+      {stats.overdueOrUrgent > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-500/50 bg-rose-950/35 px-4 py-2.5 text-xs text-rose-200">
+          <div className="flex items-center gap-2 font-semibold">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" />
+            <span>
+              Cảnh báo tự động: Có {stats.overdueOrUrgent} hồ sơ sắp đến hạn nộp giấy tờ (≤ 3 ngày) hoặc đã quá hạn — đã ghim lên đầu Daily Focus!
+            </span>
+          </div>
+          <span className="rounded bg-rose-500/20 px-2 py-0.5 font-mono text-[10px] font-bold text-rose-300">
+            提出期限 = 退職日 - 3日
+          </span>
+        </div>
+      )}
 
       {/* KPI Strip */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -725,16 +760,46 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                   <input
                     type="date"
                     value={formState.resignationDate}
-                    onChange={(e) =>
-                      setFormState((s) => ({ ...s, resignationDate: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      const nextResig = e.target.value;
+                      setFormState((s) => {
+                        const prevAuto = subtractDaysFromYmd(s.resignationDate, 3);
+                        const shouldAutoFillDeadline =
+                          !s.paperworkDeadline ||
+                          s.paperworkDeadline === s.resignationDate ||
+                          (prevAuto && s.paperworkDeadline === prevAuto);
+                        return {
+                          ...s,
+                          resignationDate: nextResig,
+                          paperworkDeadline: shouldAutoFillDeadline
+                            ? subtractDaysFromYmd(nextResig, 3)
+                            : s.paperworkDeadline,
+                        };
+                      });
+                    }}
                     className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-emerald-500 focus:outline-none"
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-zinc-400">
-                    Hạn chót làm &amp; nộp giấy tờ (書類提出期限)
-                  </label>
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <label className="block text-zinc-400">
+                      Hạn chót làm &amp; nộp giấy tờ (提出期限)
+                    </label>
+                    {formState.resignationDate && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setFormState((s) => ({
+                            ...s,
+                            paperworkDeadline: subtractDaysFromYmd(s.resignationDate, 3),
+                          }))
+                        }
+                        className="text-[10px] font-semibold text-emerald-400 hover:underline"
+                      >
+                        Tính = 退職日 - 3 ngày
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="date"
                     value={formState.paperworkDeadline}
@@ -743,6 +808,11 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                     }
                     className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-emerald-500 focus:outline-none"
                   />
+                  {formState.resignationDate && (
+                    <p className="mt-1 text-[10px] text-zinc-500">
+                      Mặc định tự động: {subtractDaysFromYmd(formState.resignationDate, 3)} (trước ngày nghỉ việc 3 ngày)
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="mb-1 block text-zinc-400">Trạng thái giấy tờ</label>
@@ -815,14 +885,54 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
               </div>
 
               <div>
-                <label className="mb-1 block text-zinc-400">Ghi chú bàn giao &amp; giấy tờ</label>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <label className="block text-zinc-400">Ghi chú bàn giao &amp; giấy tờ</label>
+                  {(() => {
+                    const detected = extractResignationDateFromText(formState.handoverNotes);
+                    if (detected && detected !== formState.resignationDate) {
+                      return (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFormState((s) => ({
+                              ...s,
+                              resignationDate: detected,
+                              paperworkDeadline: subtractDaysFromYmd(detected, 3),
+                            }))
+                          }
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-sky-400 hover:underline"
+                        >
+                          <Sparkles className="h-3 w-3" />
+                          Tách được ngày nghỉ {detected} (Hạn: {subtractDaysFromYmd(detected, 3)}) → Áp dụng
+                        </button>
+                      );
+                    }
+                    return null;
+                  })()}
+                </div>
                 <textarea
                   rows={3}
                   value={formState.handoverNotes || ''}
-                  onChange={(e) =>
-                    setFormState((s) => ({ ...s, handoverNotes: e.target.value }))
-                  }
-                  placeholder="Ví dụ: Đang chờ công ty cũ gửi 退職証明書, 源泉徴収票, 離職票; đã nhắc trả chìa khóa KTX..."
+                  onChange={(e) => {
+                    const nextNotes = e.target.value;
+                    const detected = extractResignationDateFromText(nextNotes);
+                    setFormState((s) => {
+                      const nextResig = !s.resignationDate && detected ? detected : s.resignationDate;
+                      const nextDeadline =
+                        !s.resignationDate &&
+                        detected &&
+                        (!s.paperworkDeadline || s.paperworkDeadline === detected)
+                          ? subtractDaysFromYmd(detected, 3)
+                          : s.paperworkDeadline;
+                      return {
+                        ...s,
+                        handoverNotes: nextNotes,
+                        resignationDate: nextResig,
+                        paperworkDeadline: nextDeadline,
+                      };
+                    });
+                  }}
+                  placeholder="Ví dụ: Dự kiến nghỉ việc 11月30日 / 12月末. Đang chờ công ty cũ gửi 退職証明書, 源泉徴収票..."
                   className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-emerald-500 focus:outline-none"
                 />
               </div>
