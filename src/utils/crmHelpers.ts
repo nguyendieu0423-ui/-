@@ -5,6 +5,7 @@ import type {
   Candidate,
   ExcelAnchor,
   KyujinCompany,
+  KyujinMatchEvaluation,
   KyujinMatchResult,
   KyujinSlot,
   MissingInfoItem,
@@ -365,52 +366,125 @@ export const getUrgentFollowUpReason = (person: Partial<Candidate> = {}): string
 };
 
 const jlptRank = (lvl = ''): number => {
-  const s = String(lvl || '').toUpperCase();
+  const s = String(lvl || '').trim().toUpperCase();
+  if (!s || s === '要確認' || s === '不明') return -1;
   if (s.includes('N1')) return 5;
   if (s.includes('N2')) return 4;
   if (s.includes('N3')) return 3;
   if (s.includes('N4')) return 2;
   if (s.includes('N5') || s.includes('日常')) return 1;
+  if (s.includes('JFT')) return 2;
   if (s.includes('不問')) return 0;
-  return 2;
+  return -1;
 };
 
-const PREFECTURE_PATTERNS: Array<{ rx: RegExp; label: string; keys: string[] }> = [
-  { rx: /kyoto|京都府|京都/i, label: '京都府（Kyoto）', keys: ['京都', 'kyoto'] },
-  { rx: /osaka|大阪府|大阪/i, label: '大阪府（Osaka）', keys: ['大阪', 'osaka'] },
-  { rx: /hyogo|kobe|兵庫県|神戸/i, label: '兵庫県（Hyogo）', keys: ['兵庫', '神戸', 'hyogo', 'kobe'] },
-  { rx: /nara|奈良県|奈良/i, label: '奈良県（Nara）', keys: ['奈良', 'nara'] },
-  { rx: /shiga|滋賀県|滋賀/i, label: '滋賀県（Shiga）', keys: ['滋賀', 'shiga'] },
-  { rx: /aichi|nagoya|愛知県|名古屋/i, label: '愛知県（Aichi）', keys: ['愛知', '名古屋', 'aichi', 'nagoya'] },
-  { rx: /shizuoka|静岡県|静岡/i, label: '静岡県（Shizuoka）', keys: ['静岡', 'shizuoka'] },
-  { rx: /fukuoka|福岡県|福岡/i, label: '福岡県（Fukuoka）', keys: ['福岡', 'fukuoka'] },
-  { rx: /okinawa|沖縄県|沖縄/i, label: '沖縄県（Okinawa）', keys: ['沖縄', 'okinawa'] },
-  { rx: /hokkaido|sapporo|北海道|札幌/i, label: '北海道（Hokkaido）', keys: ['北海道', '札幌', 'hokkaido', 'sapporo'] },
-  { rx: /miyagi|sendai|宮城県|仙台/i, label: '宮城県（Miyagi）', keys: ['宮城', '仙台', 'miyagi', 'sendai'] },
-  { rx: /hiroshima|広島県|広島/i, label: '広島県（Hiroshima）', keys: ['広島', 'hiroshima'] },
-  { rx: /kanagawa|yokohama|kawasaki|神奈川県|神奈川|横浜|川崎/i, label: '神奈川県（Kanagawa）', keys: ['神奈川', '横浜', '川崎', 'kanagawa', 'yokohama', 'kawasaki'] },
-  { rx: /saitama|埼玉県|埼玉/i, label: '埼玉県（Saitama）', keys: ['埼玉', 'saitama'] },
-  { rx: /chiba|千葉県|千葉/i, label: '千葉県（Chiba）', keys: ['千葉', 'chiba'] },
-  { rx: /ibaraki|茨城県|茨城/i, label: '茨城県（Ibaraki）', keys: ['茨城', 'ibaraki'] },
-  { rx: /tochigi|栃木県|栃木/i, label: '栃木県（Tochigi）', keys: ['栃木', 'tochigi'] },
-  { rx: /gunma|群馬県|群馬/i, label: '群馬県（Gunma）', keys: ['群馬', 'gunma'] },
-  { rx: /tokyo|東京都|東京/i, label: '東京都（Tokyo）', keys: ['東京', 'tokyo'] },
-  { rx: /nagano|長野県|長野/i, label: '長野県（Nagano）', keys: ['長野', 'nagano'] },
-  { rx: /gifu|岐阜県|岐阜/i, label: '岐阜県（Gifu）', keys: ['岐阜', 'gifu'] },
-  { rx: /mie|三重県|三重/i, label: '三重県（Mie）', keys: ['三重', 'mie'] },
-  { rx: /niigata|新潟県|新潟/i, label: '新潟県（Niigata）', keys: ['新潟', 'niigata'] },
-  { rx: /okayama|岡山県|岡山/i, label: '岡山県（Okayama）', keys: ['岡山', 'okayama'] },
-  { rx: /kumamoto|熊本県|熊本/i, label: '熊本県（Kumamoto）', keys: ['熊本', 'kumamoto'] },
-  { rx: /kagoshima|鹿児島県|鹿児島/i, label: '鹿児島県（Kagoshima）', keys: ['鹿児島', 'kagoshima'] },
+interface PrefecturePattern {
+  rx: RegExp;
+  label: string;
+  shortLabel: string;
+  keys: string[];
+}
+
+const PREFECTURE_PATTERNS: PrefecturePattern[] = [
+  {
+    rx: /\btokyo\b|東京都|(?:^|[^京都])東京|23区|新宿区|渋谷区|杉並区|立川市|足立区|八王子市|世田谷区|品川区|大田区|中野区|練馬区|板橋区|豊島区|港区|中央区|千代田区/i,
+    label: '東京都（Tokyo）',
+    shortLabel: '東京都',
+    keys: ['東京都', '東京', 'tokyo'],
+  },
+  {
+    rx: /\bkyoto\b|京都府|(?:^|[^東])京都/i,
+    label: '京都府（Kyoto）',
+    shortLabel: '京都府',
+    keys: ['京都府', 'kyoto'],
+  },
+  { rx: /\bosaka\b|大阪府|大阪/i, label: '大阪府（Osaka）', shortLabel: '大阪府', keys: ['大阪', 'osaka'] },
+  { rx: /\bhyogo\b|\bkobe\b|兵庫県|神戸/i, label: '兵庫県（Hyogo）', shortLabel: '兵庫県', keys: ['兵庫', '神戸', 'hyogo', 'kobe'] },
+  { rx: /\bnara\b|奈良県|奈良/i, label: '奈良県（Nara）', shortLabel: '奈良県', keys: ['奈良', 'nara'] },
+  { rx: /\bshiga\b|滋賀県|滋賀/i, label: '滋賀県（Shiga）', shortLabel: '滋賀県', keys: ['滋賀', 'shiga'] },
+  { rx: /\bwakayama\b|和歌山県|和歌山/i, label: '和歌山県（Wakayama）', shortLabel: '和歌山県', keys: ['和歌山', 'wakayama'] },
+  { rx: /\baichi\b|\bnagoya\b|愛知県|名古屋/i, label: '愛知県（Aichi）', shortLabel: '愛知県', keys: ['愛知', '名古屋', 'aichi', 'nagoya'] },
+  { rx: /\bshizuoka\b|静岡県|静岡/i, label: '静岡県（Shizuoka）', shortLabel: '静岡県', keys: ['静岡', 'shizuoka'] },
+  { rx: /\bfukuoka\b|福岡県|福岡/i, label: '福岡県（Fukuoka）', shortLabel: '福岡県', keys: ['福岡', 'fukuoka'] },
+  { rx: /\bokinawa\b|沖縄県|沖縄/i, label: '沖縄県（Okinawa）', shortLabel: '沖縄県', keys: ['沖縄', 'okinawa'] },
+  { rx: /\bhokkaido\b|\bsapporo\b|北海道|札幌/i, label: '北海道（Hokkaido）', shortLabel: '北海道', keys: ['北海道', '札幌', 'hokkaido', 'sapporo'] },
+  { rx: /\bmiyagi\b|\bsendai\b|宮城県|仙台/i, label: '宮城県（Miyagi）', shortLabel: '宮城県', keys: ['宮城', '仙台', 'miyagi', 'sendai'] },
+  { rx: /\bhiroshima\b|広島県|広島/i, label: '広島県（Hiroshima）', shortLabel: '広島県', keys: ['広島', 'hiroshima'] },
+  { rx: /\bkanagawa\b|\byokohama\b|\bkawasaki\b|神奈川県|神奈川|横浜|川崎/i, label: '神奈川県（Kanagawa）', shortLabel: '神奈川県', keys: ['神奈川', '横浜', '川崎', 'kanagawa', 'yokohama', 'kawasaki'] },
+  { rx: /\bsaitama\b|埼玉県|埼玉/i, label: '埼玉県（Saitama）', shortLabel: '埼玉県', keys: ['埼玉', 'saitama'] },
+  { rx: /\bchiba\b|千葉県|千葉/i, label: '千葉県（Chiba）', shortLabel: '千葉県', keys: ['千葉', 'chiba'] },
+  { rx: /\bibaraki\b|茨城県|茨城/i, label: '茨城県（Ibaraki）', shortLabel: '茨城県', keys: ['茨城', 'ibaraki'] },
+  { rx: /\btochigi\b|栃木県|栃木/i, label: '栃木県（Tochigi）', shortLabel: '栃木県', keys: ['栃木', 'tochigi'] },
+  { rx: /\bgunma\b|群馬県|群馬/i, label: '群馬県（Gunma）', shortLabel: '群馬県', keys: ['群馬', 'gunma'] },
+  { rx: /\bnagano\b|長野県|長野/i, label: '長野県（Nagano）', shortLabel: '長野県', keys: ['長野', 'nagano'] },
+  { rx: /\bgifu\b|岐阜県|岐阜/i, label: '岐阜県（Gifu）', shortLabel: '岐阜県', keys: ['岐阜', 'gifu'] },
+  { rx: /\bmie\b|三重県|三重/i, label: '三重県（Mie）', shortLabel: '三重県', keys: ['三重', 'mie'] },
+  { rx: /\bniigata\b|新潟県|新潟/i, label: '新潟県（Niigata）', shortLabel: '新潟県', keys: ['新潟', 'niigata'] },
+  { rx: /\bokayama\b|岡山県|岡山/i, label: '岡山県（Okayama）', shortLabel: '岡山県', keys: ['岡山', 'okayama'] },
+  { rx: /\bkumamoto\b|熊本県|熊本/i, label: '熊本県（Kumamoto）', shortLabel: '熊本県', keys: ['熊本', 'kumamoto'] },
+  { rx: /\bkagoshima\b|鹿児島県|鹿児島/i, label: '鹿児島県（Kagoshima）', shortLabel: '鹿児島県', keys: ['鹿児島', 'kagoshima'] },
+  { rx: /\baomori\b|青森県|青森/i, label: '青森県（Aomori）', shortLabel: '青森県', keys: ['青森', 'aomori'] },
+  { rx: /\biwate\b|岩手県|岩手/i, label: '岩手県（Iwate）', shortLabel: '岩手県', keys: ['岩手', 'iwate'] },
+  { rx: /\bakita\b|秋田県|秋田/i, label: '秋田県（Akita）', shortLabel: '秋田県', keys: ['秋田', 'akita'] },
+  { rx: /\byamagata\b|山形県|山形/i, label: '山形県（Yamagata）', shortLabel: '山形県', keys: ['山形', 'yamagata'] },
+  { rx: /\bfukushima\b|福島県|福島/i, label: '福島県（Fukushima）', shortLabel: '福島県', keys: ['福島', 'fukushima'] },
+  { rx: /\byamanashi\b|山梨県|山梨/i, label: '山梨県（Yamanashi）', shortLabel: '山梨県', keys: ['山梨', 'yamanashi'] },
+  { rx: /\btoyama\b|富山県|富山/i, label: '富山県（Toyama）', shortLabel: '富山県', keys: ['富山', 'toyama'] },
+  { rx: /\bishikawa\b|石川県|石川/i, label: '石川県（Ishikawa）', shortLabel: '石川県', keys: ['石川', 'ishikawa'] },
+  { rx: /\bfukui\b|福井県|福井/i, label: '福井県（Fukui）', shortLabel: '福井県', keys: ['福井', 'fukui'] },
+  { rx: /\btottori\b|鳥取県|鳥取/i, label: '鳥取県（Tottori）', shortLabel: '鳥取県', keys: ['鳥取', 'tottori'] },
+  { rx: /\bshimane\b|島根県|島根/i, label: '島根県（Shimane）', shortLabel: '島根県', keys: ['島根', 'shimane'] },
+  { rx: /\byamaguchi\b|山口県|山口/i, label: '山口県（Yamaguchi）', shortLabel: '山口県', keys: ['山口', 'yamaguchi'] },
+  { rx: /\btokushima\b|徳島県|徳島/i, label: '徳島県（Tokushima）', shortLabel: '徳島県', keys: ['徳島', 'tokushima'] },
+  { rx: /\bkagawa\b|香川県|香川/i, label: '香川県（Kagawa）', shortLabel: '香川県', keys: ['香川', 'kagawa'] },
+  { rx: /\behime\b|愛媛県|愛媛/i, label: '愛媛県（Ehime）', shortLabel: '愛媛県', keys: ['愛媛', 'ehime'] },
+  { rx: /\bkochi\b|高知県|高知/i, label: '高知県（Kochi）', shortLabel: '高知県', keys: ['高知', 'kochi'] },
+  { rx: /\bsaga\b|佐賀県|佐賀/i, label: '佐賀県（Saga）', shortLabel: '佐賀県', keys: ['佐賀', 'saga'] },
+  { rx: /\bnagasaki\b|長崎県|長崎/i, label: '長崎県（Nagasaki）', shortLabel: '長崎県', keys: ['長崎', 'nagasaki'] },
+  { rx: /\boita\b|大分県|大分/i, label: '大分県（Oita）', shortLabel: '大分県', keys: ['大分', 'oita'] },
+  { rx: /\bmiyazaki\b|宮崎県|宮崎/i, label: '宮崎県（Miyazaki）', shortLabel: '宮崎県', keys: ['宮崎', 'miyazaki'] },
 ];
 
-export const extractAllAreaTokens = (rawArea = ''): Array<{ label: string; keys: string[] }> => {
+const REGION_PREFECTURE_GROUPS: Array<{ rx: RegExp; prefectures: string[] }> = [
+  {
+    rx: /kanto|関東/i,
+    prefectures: ['東京都', '神奈川県', '埼玉県', '千葉県', '茨城県', '栃木県', '群馬県'],
+  },
+  {
+    rx: /kansai|kinki|関西|近畿/i,
+    prefectures: ['大阪府', '京都府', '兵庫県', '奈良県', '滋賀県', '和歌山県'],
+  },
+  {
+    rx: /tokai|chubu|東海|中部/i,
+    prefectures: ['愛知県', '静岡県', '岐阜県', '三重県', '長野県'],
+  },
+  {
+    rx: /kyushu|九州/i,
+    prefectures: ['福岡県', '熊本県', '鹿児島県', '佐賀県', '長崎県', '大分県', '宮崎県'],
+  },
+  {
+    rx: /tohoku|東北/i,
+    prefectures: ['宮城県', '福島県', '青森県', '岩手県', '秋田県', '山形県'],
+  },
+];
+
+const doesTextMatchPrefecture = (text: string, pref: PrefecturePattern): boolean =>
+  pref.rx.test(String(text || ''));
+
+export const extractAllAreaTokens = (
+  rawArea = ''
+): Array<{ label: string; shortLabel: string; keys: string[]; rx: RegExp }> => {
   const s = String(rawArea || '').trim();
   if (!s) return [];
-  const matched: Array<{ label: string; keys: string[] }> = [];
+  const matched: Array<{ label: string; shortLabel: string; keys: string[]; rx: RegExp }> = [];
   for (const pref of PREFECTURE_PATTERNS) {
-    if (pref.rx.test(s)) {
-      matched.push({ label: pref.label, keys: pref.keys });
+    if (doesTextMatchPrefecture(s, pref)) {
+      matched.push({
+        label: pref.label,
+        shortLabel: pref.shortLabel,
+        keys: pref.keys,
+        rx: pref.rx,
+      });
     }
   }
   return matched;
@@ -419,32 +493,123 @@ export const extractAllAreaTokens = (rawArea = ''): Array<{ label: string; keys:
 export const doesAreaMatchFilter = (itemArea = '', filterText = ''): boolean => {
   const f = String(filterText || '').trim().toLowerCase();
   if (!f) return true;
-  const target = String(itemArea || '').toLowerCase();
+  const targetRaw = String(itemArea || '');
+  const target = targetRaw.toLowerCase();
   if (!target) return false;
-  if (target.includes(f)) return true;
 
   const filterPrefs = extractAllAreaTokens(f);
   if (filterPrefs.length > 0) {
-    return filterPrefs.some((fp) => fp.keys.some((k) => target.includes(k)));
+    return filterPrefs.some((fp) => fp.rx.test(targetRaw));
   }
-  return false;
+
+  for (const reg of REGION_PREFECTURE_GROUPS) {
+    if (reg.rx.test(f)) {
+      const targetPrefs = extractAllAreaTokens(targetRaw);
+      if (targetPrefs.some((tp) => reg.prefectures.includes(tp.shortLabel))) {
+        return true;
+      }
+    }
+  }
+
+  return target.includes(f);
 };
 
-export const findMatchingKyujinsForCandidate = (
+type CanonicalIndustryKey =
+  | 'KAIGO'
+  | 'FOOD_SERVICE'
+  | 'FOOD_MFG'
+  | 'TRANSPORT'
+  | 'AUTO_MAINT'
+  | 'ACCOMMODATION'
+  | 'CONSTRUCTION'
+  | 'MANUFACTURING'
+  | 'CLEANING'
+  | 'AGRICULTURE'
+  | 'RETAIL_BAITO';
+
+const extractCanonicalIndustryKeys = (rawIndustry = ''): CanonicalIndustryKey[] => {
+  const s = String(rawIndustry || '').trim();
+  if (!s || /^(?:未設定|未定|不問|要確認)$/i.test(s)) return [];
+
+  const keys = new Set<CanonicalIndustryKey>();
+  if (/介護|福祉|デイサービス|グループホーム|有料老人|特別養護|特養|老健|訪問介護|kaigo|điều\s*dưỡng|hộ\s*lý/i.test(s)) {
+    keys.add('KAIGO');
+  }
+  if (/外食|レストラン|居酒屋|ホール|調理|キッチン|カフェ|ngoại\s*thực|nhà\s*hàng|quán\s*ăn|ẩm\s*thực/i.test(s)) {
+    keys.add('FOOD_SERVICE');
+  }
+  if (/飲食料品|食品|弁当|惣菜|製パン|製菓|chế\s*biến\s*thực\s*phẩm|thực\s*phẩm|cơm\s*hộp|bento/i.test(s)) {
+    keys.add('FOOD_MFG');
+  }
+  if (/自動車運送|運送|トラック|ドライバー|配送|運転|vận\s*tải|tài\s*xế|lái\s*xe|logistics/i.test(s)) {
+    keys.add('TRANSPORT');
+  }
+  if (/自動車整備|整備士|bảo\s*dưỡng\s*ô\s*tô|sửa\s*chữa\s*ô\s*tô/i.test(s)) {
+    keys.add('AUTO_MAINT');
+  }
+  if (/宿泊|ホテル|旅館|フロント|khách\s*sạn|lưu\s*trú/i.test(s)) {
+    keys.add('ACCOMMODATION');
+  }
+  if (/建設|建築|土木|とび|型枠|鉄筋|内装|xây\s*dựng|giàn\s*giáo|cốp\s*pha/i.test(s)) {
+    keys.add('CONSTRUCTION');
+  }
+  // Avoid matching generic "製造" inside "飲食料品製造業" / "食品製造"
+  const strippedFoodMfg = s.replace(/飲食料品製造業?|食品製造業?/g, '');
+  if (/素形材|産業機械|電気電子|機械|溶接|プレス|旋盤|cnc|cơ\s*khí|chế\s*tạo|gia\s*công\s*kim\s*loại|製造/i.test(strippedFoodMfg)) {
+    keys.add('MANUFACTURING');
+  }
+  if (/ビルクリーニング|清掃|vệ\s*sinh\s*tòa\s*nhà|dọn\s*dẹp/i.test(s)) {
+    keys.add('CLEANING');
+  }
+  if (/農業|耕種|畜産|nông\s*nghiệp|trồng\s*trọt|chăn\s*nuôi/i.test(s)) {
+    keys.add('AGRICULTURE');
+  }
+  if (/コンビニ|小売|レジ|bán\s*lẻ|konbini|siêu\s*thị/i.test(s)) {
+    keys.add('RETAIL_BAITO');
+  }
+
+  return Array.from(keys);
+};
+
+const TOKYO_23_WARDS_RX =
+  /23区|新宿|渋谷|杉並|足立|世田谷|豊島|港|中央|千代田|品川|大田|中野|練馬|板橋|北|荒川|台東|墨田|江東|江戸川|葛飾|目黒|文京/;
+
+export const evaluateCandidateKyujinMatches = (
   cand: Partial<Candidate> = {},
   kyujinsList: KyujinCompany[] = []
-): KyujinMatchResult[] => {
+): KyujinMatchEvaluation => {
   const candInd = String(cand.desiredIndustry || '').trim();
   const candArea = String(cand.desiredArea || '').trim();
   const candGoal = String(cand.conversionGoal || '').trim();
   const candExp = String(cand.japanExperience || '').trim();
+  const candPassedExam = String(cand.passedExam || '').trim();
   const candNat = String(cand.nationality || '').trim();
   const candSalaryExp = String(cand.salaryExpectation || '').trim();
   const candJlptScore = jlptRank(cand.jlpt);
-  const candAreaPrefs = extractAllAreaTokens(candArea);
 
-  const wantsBaito = /baito|アルバイト|パート|làm thêm/i.test(
-    `${candGoal} ${cand.memo || ''} ${cand.visaStatus || ''}`
+  const candIndKeys = extractCanonicalIndustryKeys(candInd);
+  const hasCandidateIndustry =
+    Boolean(candInd) && !/^(?:未設定|未定|不問|要確認)$/i.test(candInd);
+  const hasCandidateArea =
+    Boolean(candArea) && !/^(?:未設定|未定|不問|要確認)$/i.test(candArea);
+
+  const candAreaPrefs = extractAllAreaTokens(candArea);
+  const candRegions = REGION_PREFECTURE_GROUPS.filter((r) => r.rx.test(candArea));
+
+  const explicitBaitoTargetRx =
+    /baito|アルバイト|パート|làm\s*thêm|bán\s*thời\s*gian|part[- ]?time/i;
+  const seekingBaitoInNotesRx =
+    /(?:tìm|muốn|xin|hỏi|cần|đang\s*tìm|chuyển|kiếm|nguyện\s*vọng)[^.\n]{0,30}(?:baito|làm\s*thêm|アルバイト|パート)/i;
+  const mentionsBaito =
+    explicitBaitoTargetRx.test(`${candGoal} ${candInd}`) ||
+    seekingBaitoInNotesRx.test(`${cand.memo || ''} ${cand.negotiationLog || ''}`);
+  const mentionsTokuteiOrFullTime =
+    /tokutei|特定技能|正社員|chính\s*thức|chuyển\s*(?:đổi|visa|việc)|特定/i.test(
+      `${candGoal} ${candInd} ${cand.visaStatus || ''} ${candPassedExam}`
+    ) || !mentionsBaito;
+
+  const needsHousing = /寮|社宅|nhà\s*ở|ký\s*túc/i.test(
+    `${candGoal} ${candSalaryExp} ${cand.memo || ''}`
   );
 
   const results: KyujinMatchResult[] = [];
@@ -460,113 +625,233 @@ export const findMatchingKyujinsForCandidate = (
         return;
       }
 
-      let rawScore = 0;
-      const reasons: string[] = [];
-
-      // 1. Sector / Industry (up to 35 pts)
+      // 1. Strict Industry Filter (NEVER suggest mismatched industries!)
       const slotInd = String(sl.industry || comp.industry || '').trim();
-      if (candInd && slotInd && (slotInd.includes(candInd) || candInd.includes(slotInd))) {
-        rawScore += 35;
-        reasons.push(`✅ Đúng ngành ${slotInd}`);
-      } else if (!candInd) {
-        rawScore += 15;
-      }
+      const slotIndSource = `${slotInd} ${sl.facilityType || ''}`.trim();
+      const slotIndKeys = extractCanonicalIndustryKeys(slotIndSource);
 
-      // 2. Employment Type (Tokutei / Seishain / Baito) (up to 15 pts)
-      const empType = String(sl.employmentType || comp.employmentType || 'Tokutei Ginou (特定技能)');
-      const slotIsBaito = /baito|アルバイト|パート/i.test(empType);
-      if (wantsBaito && slotIsBaito) {
-        rawScore += 15;
-        reasons.push('✅ Đúng hình thức Baito');
-      } else if (!wantsBaito && !slotIsBaito) {
-        rawScore += 10;
-      } else if (wantsBaito && !slotIsBaito) {
-        rawScore -= 10;
-      }
-
-      // 3. Multi-prefecture Area matching (up to 25 pts)
-      const slotArea = String(sl.area || '').trim();
-      if (candArea && slotArea) {
-        const matchedPref = candAreaPrefs.find((p) =>
-          p.keys.some((k) => slotArea.toLowerCase().includes(k))
-        );
-        if (matchedPref) {
-          rawScore += 25;
-          const shortPref = matchedPref.label.split('（')[0];
-          reasons.push(`✅ Khớp ${shortPref}`);
+      let industryMatched = false;
+      if (hasCandidateIndustry) {
+        if (candIndKeys.length > 0 && slotIndKeys.length > 0) {
+          industryMatched = candIndKeys.some((k) => slotIndKeys.includes(k));
         } else {
-          const fallbackTokens = candArea
-            .split(/[・、,\s\/]+/)
-            .map((t) => t.replace(/[都道府県市区町村]/g, '').trim())
-            .filter((t) => t.length >= 2);
-          const hit = fallbackTokens.find((tok) => slotArea.includes(tok));
-          if (hit) {
-            rawScore += 25;
-            reasons.push(`✅ Khớp ${hit}`);
-          }
+          const normCand = candInd.toLowerCase();
+          const normSlot = slotInd.toLowerCase();
+          industryMatched =
+            Boolean(normSlot) &&
+            (normSlot.includes(normCand) || normCand.includes(normSlot));
+        }
+        if (!industryMatched) {
+          return;
         }
       }
 
-      // 4. JLPT requirement (up to 20 pts)
-      const reqJlpt = String(sl.minJlpt || '要確認');
-      if (reqJlpt === '要確認' || reqJlpt === '不問') {
-        rawScore += 12;
-      } else if (candJlptScore >= jlptRank(reqJlpt)) {
-        rawScore += 20;
-        reasons.push(`✅ Đạt ${cand.jlpt || reqJlpt}`);
-      } else {
-        rawScore -= 15;
+      // 2. Strict Employment Type Filter (NEVER suggest Baito to Tokutei-only candidates)
+      const empType = String(
+        sl.employmentType || comp.employmentType || 'Tokutei Ginou (特定技能)'
+      );
+      const slotIsBaito = /baito|アルバイト|パート/i.test(empType);
+      if (!mentionsBaito && slotIsBaito) {
+        return;
+      }
+      if (mentionsBaito && !mentionsTokuteiOrFullTime && !slotIsBaito) {
+        return;
       }
 
-      // 5. Experience requirement (up to 10 pts)
+      let rawScore = 0;
+      const reasons: string[] = [];
+
+      if (industryMatched) {
+        rawScore += 40;
+        reasons.push(`✅ Đúng ngành ${slotInd || candInd}`);
+      } else {
+        rawScore += 15;
+      }
+
+      // Employment Type bonus
+      if (mentionsBaito && slotIsBaito) {
+        rawScore += 5;
+        reasons.push('✅ Đúng hình thức Baito');
+      } else if (!slotIsBaito && mentionsTokuteiOrFullTime) {
+        rawScore += 5;
+      }
+
+      // 3. Exact Multi-prefecture Area Matching (Tokyo != Kyoto!)
+      const slotArea = String(sl.area || '').trim();
+      let areaMatched = false;
+      if (hasCandidateArea && slotArea) {
+        const slotAreaPrefs = extractAllAreaTokens(slotArea);
+        // Match concrete prefecture in slot against concrete prefectures desired by candidate
+        const matchedPref = slotAreaPrefs.find((sp) =>
+          candAreaPrefs.some((cp) => cp.shortLabel === sp.shortLabel)
+        );
+        if (matchedPref) {
+          areaMatched = true;
+          rawScore += 25;
+          // Extra precision bonus if candidate wants Tokyo 23 wards and slot is inside 23 wards
+          if (
+            matchedPref.shortLabel === '東京都' &&
+            /23区/.test(candArea) &&
+            TOKYO_23_WARDS_RX.test(slotArea)
+          ) {
+            rawScore += 4;
+          }
+          reasons.push(`✅ Khớp ${matchedPref.shortLabel}`);
+        } else if (candRegions.length > 0 && slotAreaPrefs.length > 0) {
+          const matchedViaRegion = slotAreaPrefs.find((sp) =>
+            candRegions.some((reg) => reg.prefectures.includes(sp.shortLabel))
+          );
+          if (matchedViaRegion) {
+            areaMatched = true;
+            rawScore += 22;
+            reasons.push(`✅ Khớp ${matchedViaRegion.shortLabel}`);
+          }
+        } else {
+          // Only fallback to explicit ward/city names >= 2 chars when no prefecture tokens collide
+          const fallbackTokens = candArea
+            .split(/[・、,\s\/（）()]+/)
+            .map((t) => t.replace(/[都道府県市区町村]/g, '').trim())
+            .filter((t) => t.length >= 2 && !/^(?:エリア|area|toàn|nhật|bản)$/i.test(t));
+          const hit = fallbackTokens.find(
+            (tok) => tok !== '京都' && slotArea.includes(tok)
+          );
+          if (hit) {
+            areaMatched = true;
+            rawScore += 22;
+            reasons.push(`✅ Khớp ${hit}`);
+          }
+        }
+      } else if (!hasCandidateArea) {
+        rawScore += 10;
+      }
+
+      // 4. JLPT Requirement (honest check — no false ✅ when JLPT is 要確認 / empty!)
+      const reqJlpt = String(sl.minJlpt || '要確認').trim();
+      const reqJlptScore = jlptRank(reqJlpt);
+      if (reqJlpt === '不問') {
+        rawScore += 12;
+        reasons.push('✅ Không yêu cầu JLPT');
+      } else if (reqJlpt === '要確認' || reqJlptScore < 0) {
+        rawScore += 5;
+      } else if (candJlptScore > 0 && candJlptScore >= reqJlptScore) {
+        rawScore += 15;
+        reasons.push(`✅ Đạt ${cand.jlpt}`);
+      } else if (candJlptScore > 0 && candJlptScore < reqJlptScore) {
+        rawScore -= 20;
+      }
+
+      // 5. Experience Requirement
       const expReq = String(sl.experienceRequirement || '');
+      const hasCandExp = Boolean(candExp || candPassedExam);
       if (/未経験|không yêu cầu/i.test(expReq)) {
         rawScore += 10;
         reasons.push('✅ Không yêu cầu kinh nghiệm');
       } else if (/経験者|có kinh nghiệm/i.test(expReq)) {
-        if (candExp) {
+        if (hasCandExp) {
           rawScore += 10;
           reasons.push('✅ Đáp ứng kinh nghiệm');
         } else {
-          rawScore -= 5;
+          rawScore -= 10;
         }
-      } else if (candExp) {
+      } else if (hasCandExp) {
         rawScore += 5;
       }
 
-      // 6. Salary fit / bonus (up to 10 pts)
-      const salaryText = `${sl.salary || ''} ${sl.estimatedNetSalary || ''} ${sl.hourlyWage || ''}`;
-      const numSalaryM = (sl.salary || '').replace(/,/g, '').match(/(\d{5,6})/);
-      const expSalaryM = candSalaryExp.match(/(\d{2})\s*man/i);
-      if (numSalaryM && expSalaryM) {
-        const offeredYen = Number(numSalaryM[1]);
-        const desiredYen = Number(expSalaryM[1]) * 10000;
-        if (offeredYen >= desiredYen) {
-          rawScore += 10;
-          reasons.push('✅ Đạt mức lương kỳ vọng');
+      // 6. Salary & Housing Fit
+      let salaryFitAdded = false;
+      if (slotIsBaito) {
+        const slotHourlyM = `${sl.hourlyWage || ''} ${sl.salary || ''}`
+          .replace(/,/g, '')
+          .match(/(\d{3,4})\s*円/);
+        const expHourlyM = candSalaryExp
+          .replace(/,/g, '')
+          .match(/(\d{3,4})\s*(?:円|yên|yen)/i);
+        if (slotHourlyM && expHourlyM) {
+          if (Number(slotHourlyM[1]) >= Number(expHourlyM[1])) {
+            rawScore += 10;
+            reasons.push('✅ Đạt mức lương kỳ vọng');
+            salaryFitAdded = true;
+          }
         }
-      } else if (sl.bonus === '賞与あり') {
-        rawScore += 5;
-        reasons.push('🎁 Có thưởng');
-      } else if (salaryText.trim()) {
-        rawScore += 5;
+      } else if (candSalaryExp) {
+        const wantsNet = /thực\s*nhận|手取り|sau\s*trừ/i.test(candSalaryExp);
+        const offeredSource =
+          wantsNet && sl.estimatedNetSalary ? sl.estimatedNetSalary : sl.salary || '';
+        const numSalaryM = offeredSource.replace(/,/g, '').match(/(\d{5,6})/);
+        const expSalaryM = candSalaryExp.match(/(\d{2})\s*(?:man|vạn|万)/i);
+        if (numSalaryM && expSalaryM) {
+          const offeredYen = Number(numSalaryM[1]);
+          const desiredYen = Number(expSalaryM[1]) * 10000;
+          if (offeredYen >= desiredYen) {
+            rawScore += 10;
+            reasons.push('✅ Đạt mức lương kỳ vọng');
+            salaryFitAdded = true;
+          }
+        }
+      }
+
+      if (!salaryFitAdded) {
+        if (
+          needsHousing &&
+          /自社寮|借上げ|借り上げ|寮・社宅あり|寮あり/.test(sl.housingSupport || '')
+        ) {
+          rawScore += 8;
+          reasons.push('✅ Có hỗ trợ nhà ở / KTX');
+        } else if (sl.bonus === '賞与あり') {
+          rawScore += 5;
+          reasons.push('🎁 Có thưởng');
+        } else if (`${sl.salary || ''} ${sl.hourlyWage || ''}`.trim()) {
+          rawScore += 3;
+        }
       }
 
       const clampedScore = Math.max(15, Math.min(100, rawScore));
-      if (clampedScore >= 35 || reasons.length >= 2) {
-        results.push({
-          score: clampedScore,
-          reasons: reasons.slice(0, 5),
-          company: comp,
-          slot: sl,
-        });
-      }
+      results.push({
+        score: clampedScore,
+        reasons: reasons.slice(0, 5),
+        company: comp,
+        slot: sl,
+        industryMatched,
+        areaMatched,
+      });
     });
   });
 
-  results.sort((a, b) => b.score - a.score);
-  return results.slice(0, 5);
+  // Sort strictly by: areaMatched (when candidate specified area) -> score desc
+  results.sort((a, b) => {
+    if (hasCandidateArea && Boolean(a.areaMatched) !== Boolean(b.areaMatched)) {
+      return a.areaMatched ? -1 : 1;
+    }
+    return b.score - a.score;
+  });
+
+  const hasExactIndustryAndAreaMatch =
+    hasCandidateArea && results.some((r) => Boolean(r.areaMatched));
+
+  let noticeMessage = '';
+  if (hasCandidateIndustry) {
+    if (results.length === 0) {
+      noticeMessage = `Chưa có đơn đúng ngành ${candInd}${
+        hasCandidateArea ? ` tại ${candArea}` : ''
+      } trong kho Tin tuyển dụng.`;
+    } else if (hasCandidateArea && !hasExactIndustryAndAreaMatch) {
+      noticeMessage = `Chưa có đơn đúng ngành ${candInd} tại ${candArea} — hiển thị ${results.length} đơn cùng ngành ở khu vực khác để tham khảo.`;
+    }
+  }
+
+  return {
+    matches: results.slice(0, 5),
+    hasCandidateIndustry,
+    hasCandidateArea,
+    hasExactIndustryAndAreaMatch,
+    noticeMessage,
+  };
 };
+
+export const findMatchingKyujinsForCandidate = (
+  cand: Partial<Candidate> = {},
+  kyujinsList: KyujinCompany[] = []
+): KyujinMatchResult[] => evaluateCandidateKyujinMatches(cand, kyujinsList).matches;
 
 export const buildAnonymousJobPostText = (
   comp: KyujinCompany,
@@ -1605,6 +1890,26 @@ export const extractRirekishoViaServer = async (
   return data.extracted || {};
 };
 
+const normalizeExtractedDateYmd = (raw = ''): string => {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const ymd = s.match(/^(\d{4})[年\/\-\.](\d{1,2})[月\/\-\.](\d{1,2})日?$/);
+  if (ymd) {
+    return `${ymd[1]}-${ymd[2].padStart(2, '0')}-${ymd[3].padStart(2, '0')}`;
+  }
+  const dmy = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
+  if (dmy) {
+    const p1 = Number(dmy[1]);
+    const p2 = Number(dmy[2]);
+    // Assume DD/MM/YYYY unless second segment > 12 (MM/DD/YYYY)
+    if (p2 > 12 && p1 <= 12) {
+      return `${dmy[3]}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
+    }
+    return `${dmy[3]}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
+  }
+  return s;
+};
+
 export const extractCandidateViaServer = async (
   payload: {
     text?: string;
@@ -1630,26 +1935,134 @@ export const extractCandidateViaServer = async (
     err.code = data?.code;
     throw err;
   }
-  return (data.candidate || {}) as Partial<Candidate>;
+  const rawCand = (data.candidate || {}) as Partial<Candidate> & { fbUrl?: string };
+  return {
+    ...rawCand,
+    fbProfileUrl: rawCand.fbProfileUrl || rawCand.fbUrl || '',
+    visaExpiry: rawCand.visaExpiry ? normalizeExtractedDateYmd(rawCand.visaExpiry) : '',
+    birthDate: rawCand.birthDate ? normalizeExtractedDateYmd(rawCand.birthDate) : '',
+  };
 };
 
 // ============================================================================
 // CHAT PARSING & SMART REPLY BUILDER
 // ============================================================================
+const MESSENGER_UI_NOISE_RX =
+  /^(?:đã gửi|bạn đã gửi|you sent|đã xem|seen|active now|đang hoạt động|nhắn tin|trả lời|thích|like|\d{1,2}:\d{2}(?:\s*(?:am|pm|sa|ch))?|(?:hôm nay|hôm qua|thứ\s*\w+|chủ nhật|today|yesterday)\s*(?:lúc|at)?\s*\d{0,2}:?\d{0,2}|[👍❤️😂😮😢😡🙏✨]+)$/i;
+
+const CONSULTANT_SPEAKER_LABEL_RX =
+  /^(?:bạn|you|admin|staff|tư vấn(?: viên)?|nhân viên|hỗ trợ|cty|công ty|tokutei|page|ad)\s*[:：]/i;
+
+const CONSULTANT_CONTENT_RX =
+  /(?:chào bạn[,.!]?\s*bên (?:mình|em|anh|chị)|bên (?:mình|anh|chị) (?:hỗ trợ|có đơn|đang tuyển|gửi bạn|xin thêm)|bạn có (?:n|jlpt|bằng) mấy|thẻ ngoại kiều (?:của )?bạn|bạn gửi (?:mình|ad) xem|mình gửi (?:bạn )?(?:\d+ )?(?:đơn|job|lịch mendan)|hẹn bạn mendan|chúng tôi xin phép)/i;
+
+const CANDIDATE_CONTENT_RX =
+  /(?:bên (?:anh|chị|ad|mình) có đơn|em (?:đang|muốn|cần) tìm|mình (?:đang|muốn|cần) tìm|em có (?:n[1-5]|jft)|mình có (?:n[1-5]|jft)|em đang (?:ở|làm)|hạn thẻ (?:của )?(?:em|mình)|lương thực nhận|em tên là|mình tên là|cho em hỏi|xin việc|chuyển visa|chuyển việc)/i;
+
+const extractCandidateLinesOnly = (rawText: string): {
+  cleanedLines: string[];
+  candidateLines: string[];
+  detectedSpeakerFbName: string;
+} => {
+  const rawLines = rawText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !MESSENGER_UI_NOISE_RX.test(l));
+
+  const candidateLines: string[] = [];
+  let currentSpeaker: 'candidate' | 'consultant' | 'unknown' = 'unknown';
+  const speakerCounts = new Map<string, { cand: number; staff: number }>();
+
+  for (const line of rawLines) {
+    if (CONSULTANT_SPEAKER_LABEL_RX.test(line)) {
+      currentSpeaker = 'consultant';
+      continue;
+    }
+
+    const turnM = line.match(/^([^\n:：]{2,40})[:：]\s*(.+)$/);
+    if (turnM) {
+      const label = turnM[1].trim();
+      const body = turnM[2].trim();
+      const isFieldLabel =
+        /^(?:họ\s*(?:và\s*)?tên|tên\s*(?:khai\s*sinh|fb|facebook)|fb|facebook|sđt|sdt|điện\s*thoại|tel|phone|email|mail|visa|hạn\s*(?:thẻ|visa)|trình\s*độ|jlpt|tiếng\s*nhật|khu\s*vực|tỉnh|ngành|kinh\s*nghiệm|chứng\s*chỉ|lương|mục\s*tiêu|nhu\s*cầu|ghi\s*chú|ngày\s*sinh|tuổi|quốc\s*tịch|địa\s*chỉ|link|氏名|名前|在留資格|在留期限|希望|エリア|給料|経験|資格)$/i.test(
+          label
+        );
+      if (!isFieldLabel) {
+        const stats = speakerCounts.get(label) || { cand: 0, staff: 0 };
+        if (CONSULTANT_CONTENT_RX.test(body)) {
+          stats.staff += 2;
+          currentSpeaker = 'consultant';
+        } else if (CANDIDATE_CONTENT_RX.test(body)) {
+          stats.cand += 2;
+          currentSpeaker = 'candidate';
+        } else if (currentSpeaker !== 'consultant') {
+          stats.cand += 1;
+          currentSpeaker = 'candidate';
+        }
+        speakerCounts.set(label, stats);
+        if (currentSpeaker !== 'consultant') {
+          candidateLines.push(body);
+        }
+        continue;
+      }
+    }
+
+    if (CONSULTANT_CONTENT_RX.test(line)) {
+      currentSpeaker = 'consultant';
+      continue;
+    }
+    if (CANDIDATE_CONTENT_RX.test(line)) {
+      currentSpeaker = 'candidate';
+    }
+    if (currentSpeaker !== 'consultant') {
+      candidateLines.push(line);
+    }
+  }
+
+  let detectedSpeakerFbName = '';
+  let bestScore = 0;
+  for (const [label, counts] of speakerCounts.entries()) {
+    const score = counts.cand - counts.staff;
+    if (counts.cand > 0 && score >= bestScore) {
+      bestScore = score;
+      detectedSpeakerFbName = label;
+    }
+  }
+
+  return {
+    cleanedLines: rawLines,
+    candidateLines: candidateLines.length > 0 ? candidateLines : rawLines,
+    detectedSpeakerFbName,
+  };
+};
+
 export const extractPreferredAreaFromChat = (chatText = ''): string => {
   const text = String(chatText || '');
   if (!text.trim()) return '';
 
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const wishLineRx =
-    /(?:ở|tại|về|sang|khu vực|tìm.*ở|muốn.*ở|希望|エリア|勤務地|方面|あたり|近く|ないですか|ありますか|tỉnh)/i;
+    /(?:chuyển\s*(?:sang|qua|về|tới|đến)|muốn\s*(?:tìm|làm|về|sang|ở)|tìm\s*(?:đơn|việc|job).*?(?:ở|tại)|khu\s*vực(?:\s*mong\s*muốn)?|tỉnh\s*mong\s*muốn|nguyện\s*vọng|希望|エリア|勤務地|方面|あたり|近く|ないですか|ありますか)/i;
 
   const wishMatches = new Set<string>();
   for (const line of lines) {
     if (wishLineRx.test(line)) {
+      // If line expresses "đang ở A, muốn sang B, C", inspect the target clause first
+      const switchParts = line.split(/(?:muốn\s*(?:chuyển|tìm|sang|về|qua)|chuyển\s*(?:sang|qua|về|tới))/i);
+      const targetSegment =
+        switchParts.length > 1 ? switchParts.slice(1).join(' ') : line;
+      let foundInTarget = false;
       for (const item of PREFECTURE_PATTERNS) {
-        if (item.rx.test(line)) {
+        if (item.rx.test(targetSegment)) {
           wishMatches.add(item.label);
+          foundInTarget = true;
+        }
+      }
+      if (!foundInTarget) {
+        for (const item of PREFECTURE_PATTERNS) {
+          if (item.rx.test(line)) {
+            wishMatches.add(item.label);
+          }
         }
       }
     }
@@ -1671,9 +2084,12 @@ export const extractPreferredAreaFromChat = (chatText = ''): string => {
     return uniqueLabels.join('・');
   }
 
-  if (/kansai|関西/i.test(text)) return '関西エリア';
-  if (/kanto|関東/i.test(text)) return '関東エリア';
-  return '';
+  const regions: string[] = [];
+  if (/kanto|関東/i.test(text)) regions.push('関東エリア');
+  if (/kansai|関西/i.test(text)) regions.push('関西エリア');
+  if (/chubu|中部|tokai|東海/i.test(text)) regions.push('中部・東海エリア');
+  if (/kyushu|九州/i.test(text)) regions.push('九州エリア');
+  return regions.join('・');
 };
 
 export const parseChatIntoUpdates = (chatText = '') => {
@@ -1684,108 +2100,205 @@ export const parseChatIntoUpdates = (chatText = '') => {
     memoLine: '',
   };
 
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
+  if (!text) return updates;
 
-  // Separate explicit Legal Name & Facebook Name if provided, otherwise first short line
-  const legalNameM = text.match(/(?:họ\s*(?:và\s*)?tên|tên\s*khai\s*sinh|氏名|名前)[：:\s]*([^\n,;()]+)/i);
-  const fbNameM = text.match(/(?:fb|facebook|tên\s*fb)[：:\s]*([^\n,;()]+)/i);
+  const { cleanedLines, candidateLines, detectedSpeakerFbName } =
+    extractCandidateLinesOnly(text);
+  const candText = candidateLines.join('\n');
 
-  if (legalNameM) {
-    updates.name = legalNameM[1].trim();
-  }
-  if (fbNameM) {
-    updates.fbName = fbNameM[1].trim();
-  }
-  if (!updates.name && !updates.fbName && lines.length > 0 && lines[0].length <= 45 && !/[:：。]/.test(lines[0])) {
-    updates.fbName = lines[0];
-    updates.name = lines[0].toUpperCase();
-  }
-
-  const jlptM = text.match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i);
-  if (jlptM) updates.jlpt = jlptM[1].toUpperCase();
-
-  const phoneM = text.match(/(0[789]0[-\s]?\d{4}[-\s]?\d{4})/);
-  if (phoneM) updates.phone = phoneM[1];
-
-  // Parse YYYY-MM-DD, YYYY/MM/DD, or DD/MM/YYYY for Visa Expiry
-  const expYmdM = text.match(
-    /(?:在留期限|ビザ期限|hạn\s*(?:thẻ|visa|ngoại\s*kiều)?|thẻ\s*(?:hết\s*hạn|đến))[：:\s]*(\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2})/i
+  // 1. Facebook Profile / Messenger URL
+  const fbUrlM = text.match(
+    /https?:\/\/(?:www\.|m\.|mbasic\.)?(?:facebook\.com|fb\.com|m\.me)\/[^\s<>"')\]}]+/i
   );
-  const expDmyM = text.match(
-    /(?:在留期限|ビザ期限|hạn\s*(?:thẻ|visa|ngoại\s*kiều)?|thẻ\s*(?:hết\s*hạn|đến))[：:\s]*(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})/i
+  if (fbUrlM) {
+    updates.fbProfileUrl = fbUrlM[0].replace(/[.,;!?]+$/, '');
+  }
+
+  // 2. Legal Name vs Facebook Display Name (never invent or copy staff name)
+  const legalNameM = text.match(
+    /(?:họ\s*(?:và\s*)?tên(?:\s*khai\s*sinh)?|tên\s*khai\s*sinh|full\s*name|氏名|本名|名前)[：:\s]+([^\n,;()]+)/i
+  );
+  const fbNameM = text.match(
+    /(?:tên\s*(?:nick\s*)?(?:fb|facebook|messenger)|nick\s*(?:fb|facebook)|fb|facebook)[：:\s]+([^\n,;()]+)/i
+  );
+  const inlineParenFbM = text.match(
+    /^([A-ZÀ-Ỹ][^\n()]{3,45})\s*\((?:fb|facebook)[：:\s]*([^)\n]+)\)/im
+  );
+
+  if (inlineParenFbM) {
+    updates.name = inlineParenFbM[1].trim();
+    updates.fbName = inlineParenFbM[2].trim();
+  }
+  if (legalNameM && !updates.name) {
+    const candidateName = legalNameM[1].trim();
+    if (candidateName && !CONSULTANT_CONTENT_RX.test(candidateName)) {
+      updates.name = candidateName;
+    }
+  }
+  if (fbNameM && !updates.fbName) {
+    const candidateFb = fbNameM[1].trim();
+    if (
+      candidateFb &&
+      !/^https?:\/\//i.test(candidateFb) &&
+      !CONSULTANT_CONTENT_RX.test(candidateFb)
+    ) {
+      updates.fbName = candidateFb;
+    }
+  }
+
+  // Check self-introduction patterns in candidate turns only: "em tên là ..." / "mình tên ..."
+  if (!updates.name) {
+    const selfIntroM = candText.match(
+      /(?:em|mình|tôi)\s*(?:tên\s*(?:là|thật\s*là)?|là)\s+([A-ZÀ-Ỹ][a-zà-ỹ]+(?:\s+[A-ZÀ-Ỹ][a-zà-ỹ]+){1,4}|[A-Z]{2,}(?:\s+[A-Z]{2,}){1,4})/
+    );
+    if (selfIntroM) {
+      const introName = selfIntroM[1].trim();
+      if (!/^(?:Em|Mình|Tôi|Bạn|Anh|Chị)\b/i.test(introName)) {
+        updates.name = introName;
+      }
+    }
+  }
+
+  // Fallback for FB Nickname ONLY (do NOT promote to legal name)
+  if (!updates.fbName && detectedSpeakerFbName) {
+    updates.fbName = detectedSpeakerFbName;
+  } else if (
+    !updates.fbName &&
+    !updates.name &&
+    cleanedLines.length > 0 &&
+    cleanedLines[0].length <= 40 &&
+    !/[:：。?!？！]/.test(cleanedLines[0]) &&
+    !CONSULTANT_CONTENT_RX.test(cleanedLines[0]) &&
+    !CANDIDATE_CONTENT_RX.test(cleanedLines[0]) &&
+    !/^(?:em|anh|chị|bạn|chào|alo|hello|hi|xin chào)\b/i.test(cleanedLines[0])
+  ) {
+    updates.fbName = cleanedLines[0];
+  }
+
+  // 3. Language (JLPT / JFT)
+  const jlptM = candText.match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i) || text.match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i);
+  if (jlptM) updates.jlpt = jlptM[1].toUpperCase().replace(/\s+/g, ' ');
+  else if (/giao tiếp cơ bản|日常会話/i.test(candText)) updates.jlpt = '日常会話';
+
+  // 4. Phone & Email (prefer candidate turns so consultant signature phone isn't grabbed)
+  const phoneSource = /(?:0[789]0|0\d{1,3})[-\s]?\d{3,4}[-\s]?\d{4}/.test(candText)
+    ? candText
+    : text;
+  const phoneM = phoneSource.match(/(0[789]0[-\s]?\d{4}[-\s]?\d{4})/);
+  if (phoneM) updates.phone = phoneM[1].replace(/\s+/g, '-');
+
+  const emailSource = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(candText)
+    ? candText
+    : text;
+  const emailM = emailSource.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+  if (emailM) updates.email = emailM[0];
+
+  // 5. Birth Date & Age
+  const birthYmdM = candText.match(
+    /(?:生年月日|ngày\s*sinh|sinh\s*ngày|dob)[：:\s]*(\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2}日?|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})/i
+  );
+  if (birthYmdM) {
+    updates.birthDate = normalizeExtractedDateYmd(birthYmdM[1]);
+  }
+  const ageM = candText.match(/(\d{2})\s*(?:tuổi|歳)/i);
+  if (ageM) updates.age = ageM[1];
+
+  // 6. Visa Expiry (careful DD/MM/YYYY vs YYYY/MM/DD)
+  const expPrefix =
+    '(?:在留期限|ビザ期限|hạn\\s*(?:thẻ\\s*ngoại\\s*kiều|thẻ|visa|ngoại\\s*kiều)?|thẻ\\s*(?:ngoại\\s*kiều\\s*)?(?:hết\\s*hạn|đến)|hết\\s*hạn)(?:\\s*ngày)?';
+  const expYmdM = candText.match(
+    new RegExp(`${expPrefix}[：:\\s]*(\\d{4}[年\\/\\-]\\d{1,2}[月\\/\\-]\\d{1,2}日?)`, 'i')
+  );
+  const expDmyM = candText.match(
+    new RegExp(`${expPrefix}[：:\\s]*(\\d{1,2}[\\/\\-\\.]\\d{1,2}[\\/\\-\\.]\\d{4})`, 'i')
   );
   if (expYmdM) {
-    const clean = expYmdM[1].replace(/[年月]/g, '-').replace(/日/g, '');
-    const parts = clean.split(/[\/\-]/);
-    if (parts.length === 3) {
-      updates.visaExpiry = `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
-    }
+    updates.visaExpiry = normalizeExtractedDateYmd(expYmdM[1]);
   } else if (expDmyM) {
-    updates.visaExpiry = `${expDmyM[3]}-${expDmyM[2].padStart(2, '0')}-${expDmyM[1].padStart(2, '0')}`;
+    updates.visaExpiry = normalizeExtractedDateYmd(expDmyM[1]);
   }
 
-  // Current visa status
-  if (/thực\s*tập\s*sinh|tts|技能実習/i.test(text)) {
+  // 7. Current Visa Status
+  if (/thực\s*tập\s*sinh|tts|技能実習/i.test(candText)) {
     updates.visaStatus = '技能実習（Thực tập sinh）';
-  } else if (/du\s*học|留学/i.test(text)) {
+  } else if (/du\s*học|留学/i.test(candText)) {
     updates.visaStatus = '留学（Du học sinh）';
+  } else if (/gia\s*đình|phụ\s*thuộc|家族滞在/i.test(candText)) {
+    updates.visaStatus = '家族滞在（Gia đình）';
+  } else if (/kỹ\s*sư|giáo\s*dục|nhân\s*văn|技人国|技術・人文/i.test(candText)) {
+    updates.visaStatus = '技術・人文知識・国際業務（Kỹ sư）';
+  } else if (/định\s*trú|vĩnh\s*trú|定住者|永住者/i.test(candText)) {
+    updates.visaStatus = '定住者 / 永住者';
   } else {
-    const remPeriodM = text.match(
-      /(?:còn|tokutei\s*(?:còn)?|thời hạn\s*(?:còn)?|残り)?\s*(\d+(?:[.,]\d+)?)\s*(?:n\b|năm|年)/i
+    const remPeriodM = candText.match(
+      /(?:còn|tokutei\s*(?:còn)?|thời\s*hạn\s*(?:còn)?|残り)?\s*(\d+(?:[.,]\d+)?)\s*(?:n\b|năm|年)/i
     );
-    if (remPeriodM && /(?:tokutei|特定|còn|残り|visa|ビザ|\d+[.,]\d+\s*n\b)/i.test(text)) {
+    if (remPeriodM && /(?:tokutei|特定|còn|残り|visa|ビザ|\d+[.,]\d+\s*n\b)/i.test(candText)) {
       const yrs = remPeriodM[1].replace(',', '.');
       updates.visaStatus = `特定技能1号（残り約${yrs}年）`;
-    } else if (/tokutei|特定技能/i.test(text)) {
+    } else if (/tokutei|特定技能/i.test(candText)) {
       updates.visaStatus = '特定技能1号';
     }
   }
 
-  if (/介護|特養|デイサービス|グループホーム|有料老人|shoninsha|初任者|viện de|viện có phí|kaigo/i.test(text)) {
+  // 8. Desired Industry (evaluate candidate text first)
+  if (/介護|特養|デイサービス|グループホーム|有料老人|shoninsha|初任者|viện de|viện có phí|kaigo|điều\s*dưỡng|hộ\s*lý/i.test(candText)) {
     updates.desiredIndustry = '介護';
-  } else if (/外食|レストラン|居酒屋|キッチン|ngoại thực|nhà hàng/i.test(text)) {
+  } else if (/外食|レストラン|居酒屋|キッチン|ngoại\s*thực|nhà\s*hàng|quán\s*ăn|bếp/i.test(candText)) {
     updates.desiredIndustry = '外食業';
-  } else if (/ドライバー|トラック|運送|運転|lái xe|vận tải/i.test(text)) {
-    updates.desiredIndustry = '自動車運送業';
-  } else if (/ホテル|宿泊|フロント|khách sạn/i.test(text)) {
-    updates.desiredIndustry = '宿泊';
-  } else if (/食品|弁当|工場|thực phẩm/i.test(text)) {
+  } else if (/chế\s*biến\s*thực\s*phẩm|飲食料品|食品|bento|弁当|cơm\s*hộp|bánh\s*kẹo|thực\s*phẩm/i.test(candText)) {
     updates.desiredIndustry = '飲食料品製造業';
+  } else if (/xây\s*dựng|建設|giàn\s*giáo|cốp\s*pha|sắt\s*thép\s*xây|nội\s*thất/i.test(candText)) {
+    updates.desiredIndustry = '建設';
+  } else if (/cơ\s*khí|gia\s*công\s*kim\s*loại|hàn|tiện|phay|cnc|素形材|産業機械|機械/i.test(candText)) {
+    updates.desiredIndustry = '素形材・産業機械・電気電子情報関連製造業';
+  } else if (/bảo\s*dưỡng\s*ô\s*tô|sửa\s*chữa\s*ô\s*tô|自動車整備/i.test(candText)) {
+    updates.desiredIndustry = '自動車整備';
+  } else if (/tài\s*xế|lái\s*xe|vận\s*tải|ドライバー|トラック|運送|運転/i.test(candText)) {
+    updates.desiredIndustry = '自動車運送業';
+  } else if (/khách\s*sạn|lưu\s*trú|ホテル|宿泊|フロント|buồng\s*phòng/i.test(candText)) {
+    updates.desiredIndustry = '宿泊';
+  } else if (/nông\s*nghiệp|農業|trồng\s*trọt|chăn\s*nuôi/i.test(candText)) {
+    updates.desiredIndustry = '農業';
+  } else if (/vệ\s*sinh\s*tòa\s*nhà|building\s*clean|ビルクリーニング|dọn\s*dẹp/i.test(candText)) {
+    updates.desiredIndustry = 'ビルクリーニング';
   }
 
-  const extractedArea = extractPreferredAreaFromChat(text);
+  // 9. Desired Areas (multi-prefecture)
+  const extractedArea = extractPreferredAreaFromChat(candText);
   if (extractedArea) {
     updates.desiredArea = extractedArea;
   }
 
+  // 10. Certificates / Passed Exams & Experience
   const examList: string[] = [];
-  if (/shoninsha|初任者/i.test(text)) examList.push('介護職員初任者研修修了');
-  if (/jitsumusha|実務者/i.test(text)) examList.push('介護福祉士実務者研修修了');
-  if (/kaigo fukushishi|介護福祉士/i.test(text)) examList.push('介護福祉士');
-  if (/gino|技能評価試験|特定技能試験|chứng chỉ tokutei/i.test(text)) examList.push('特定技能評価試験合格');
+  if (/shoninsha|初任者/i.test(candText)) examList.push('介護職員初任者研修修了');
+  if (/jitsumusha|実務者/i.test(candText)) examList.push('介護福祉士実務者研修修了');
+  if (/kaigo fukushishi|介護福祉士/i.test(candText)) examList.push('介護福祉士');
+  if (/gino|技能評価試験|特定技能試験|chứng\s*chỉ\s*tokutei|đỗ\s*tay\s*nghề|senmon/i.test(candText)) {
+    examList.push('特定技能評価試験合格');
+  }
+  if (/bằng\s*lái|gplx|免許/i.test(candText)) examList.push('運転免許');
   if (examList.length > 0) {
     updates.passedExam = examList.join('・');
   }
 
   const expParts: string[] = [];
   const knMatch =
-    text.match(/(?:kn|kinh nghiệm|経験)\s*(\d+(?:[.,]\d+)?)\s*(?:n\b|năm|年)/i) ||
-    text.match(/(\d+(?:[.,]\d+)?)\s*(?:năm|年)\s*(?:kn|kinh nghiệm|経験)/i);
+    candText.match(/(?:kn|kinh\s*nghiệm|経験)\s*(\d+(?:[.,]\d+)?)\s*(?:n\b|năm|年)/i) ||
+    candText.match(/(\d+(?:[.,]\d+)?)\s*(?:năm|年)\s*(?:kn|kinh\s*nghiệm|経験)/i);
   if (knMatch) {
     expParts.push(`経験${knMatch[1].replace(',', '.')}年`);
   }
-  if (/kaigo năm cuối|năm cuối/i.test(text)) {
+  if (/kaigo năm cuối|năm cuối/i.test(candText)) {
     expParts.push('Đang là Kaigo năm cuối');
   }
   const facilities: string[] = [];
-  if (/viện\s*de\b|デイサービス|デイ\b/i.test(text)) facilities.push('デイサービス');
-  if (/viện\s*có\s*phí|有料老人ホーム|有料/i.test(text)) facilities.push('有料老人ホーム');
-  if (/tokuyou|特別養護老人ホーム|特養/i.test(text)) facilities.push('特別養護老人ホーム');
-  if (/group\s*home|グループホーム|GH\b/i.test(text)) facilities.push('グループホーム');
-  if (/rouken|老健/i.test(text)) facilities.push('老健');
+  if (/viện\s*de\b|デイサービス|デイ\b/i.test(candText)) facilities.push('デイサービス');
+  if (/viện\s*có\s*phí|有料老人ホーム|有料/i.test(candText)) facilities.push('有料老人ホーム');
+  if (/tokuyou|特別養護老人ホーム|特養/i.test(candText)) facilities.push('特別養護老人ホーム');
+  if (/group\s*home|グループホーム|GH\b/i.test(candText)) facilities.push('グループホーム');
+  if (/rouken|老健/i.test(candText)) facilities.push('老健');
   if (facilities.length > 0) {
     expParts.push(`施設経験：${facilities.join('・')}`);
   }
@@ -1793,16 +2306,27 @@ export const parseChatIntoUpdates = (chatText = '') => {
     updates.japanExperience = expParts.join('／');
   }
 
-  const salaryLineM = text.match(/(?:lương|thực nhận|man|手取り|基本給)[^\n]*/i);
-  if (salaryLineM) {
-    updates.salaryExpectation = salaryLineM[0].trim();
+  // 11. Salary expectation & housing / night-shift lines (preserve all matching lines)
+  const salaryLines = candidateLines.filter((l) =>
+    /(?:lương|thực\s*nhận|cơ\s*bản|trừ\s*nhà|tiền\s*nhà|ký\s*túc|ca\s*đêm|yakin|jikyu|時給|手取り|基本給|総支給|寮|夜勤|\d+\s*(?:man|vạn|yên|円|万円))/i.test(
+      l
+    )
+  );
+  if (salaryLines.length > 0) {
+    updates.salaryExpectation = Array.from(new Set(salaryLines)).join(' | ');
   }
 
-  const goalLineM = text.match(/(?:mục tiêu|nhu cầu|tìm công ty|chuyển đổi|nguyện vọng|希望)[^\n]*/i);
-  if (goalLineM) {
-    updates.conversionGoal = goalLineM[0].trim();
+  // 12. Conversion Goal / Need
+  const goalLines = candidateLines.filter((l) =>
+    /(?:mục\s*tiêu|nhu\s*cầu|tìm\s*(?:công\s*ty|đơn|việc|baito)|chuyển\s*(?:đổi|visa|việc|công\s*ty)|nguyện\s*vọng|希望|転職)/i.test(
+      l
+    )
+  );
+  if (goalLines.length > 0) {
+    updates.conversionGoal = Array.from(new Set(goalLines)).join(' | ');
   }
 
+  // 13. Mendan / Status / Proposed Company
   const mendanDateM = text.match(
     /(\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2}|\d{1,2}[月\/]\d{1,2}日?)\s*(?:に|の)?\s*(?:面談|面接)/
   );
@@ -1821,8 +2345,12 @@ export const parseChatIntoUpdates = (chatText = '') => {
   if (compM) updates.proposedCompany = compM[1];
 
   // Zero truncation: preserve 100% of original text verbatim!
-  updates.negotiationLog = `[${todayIso} Ghi chú nguyên văn]\n${text}`;
-  updates.memoLine = `[${todayIso} Nhật ký trao đổi]\n${text}`;
+  const missingLegalNote =
+    !updates.name && updates.fbName
+      ? `[Chưa có họ tên khai sinh — mới ghi nhận tên FB: ${updates.fbName}]\n`
+      : '';
+  updates.negotiationLog = `[${todayIso} Ghi chú nguyên văn]\n${missingLegalNote}${text}`;
+  updates.memoLine = `[${todayIso} Nguyên văn đoạn chat]\n${missingLegalNote}${text}`;
   return updates;
 };
 

@@ -67,6 +67,7 @@ import {
   detectIndustryFromText,
   detectSectorFromIndustryOrText,
   doesAreaMatchFilter,
+  evaluateCandidateKyujinMatches,
   extractCandidateViaServer,
   extractDeclineReason,
   extractKyujinRawTextViaServer,
@@ -74,7 +75,6 @@ import {
   extractNormalizedMendanInfo,
   extractRirekishoTextFromLocalFile,
   extractRirekishoViaServer,
-  findMatchingKyujinsForCandidate,
   formatPublicArea,
   getEffectiveProposedCompany,
   getMissingInfoForCandidate,
@@ -2261,7 +2261,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
   const mergeExtractedCandidateData = (
     base: Candidate,
-    extracted: Partial<Candidate> & { memoLine?: string },
+    extracted: Partial<Candidate> & { memoLine?: string; fbUrl?: string },
     rawSourceText?: string
   ): Candidate => {
     const mergedExp = extracted.japanExperience
@@ -2275,15 +2275,36 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         : extracted.passedExam
       : base.passedExam;
     const todayIso = getJstTodayYmd();
-    const verbatimNote =
-      extracted.negotiationLog ||
-      extracted.memoLine ||
-      (rawSourceText ? `[${todayIso} Nhật ký trao đổi]\n${rawSourceText.trim()}` : '');
+    const rawTrimmed = String(rawSourceText || '').trim();
+    const rawArchive = rawTrimmed ? `[${todayIso} Nguyên văn đoạn chat]\n${rawTrimmed}` : '';
+
+    // Guarantee 100% verbatim preservation in BOTH negotiationLog and memo
+    let incomingLog = String(extracted.negotiationLog || '').trim();
+    if (rawTrimmed) {
+      if (!incomingLog) {
+        incomingLog = rawArchive;
+      } else if (!incomingLog.includes(rawTrimmed)) {
+        incomingLog = `${incomingLog}\n\n${rawArchive}`;
+      }
+    }
+
+    const incomingMemo = rawArchive || String(extracted.memoLine || incomingLog || '').trim();
+
+    const shouldReplaceName =
+      Boolean(extracted.name) &&
+      (!base.name || base.name === 'NEW CANDIDATE' || base.name === base.fbName);
 
     return {
       ...base,
-      name: extracted.name && (!base.name || base.name === 'NEW CANDIDATE') ? extracted.name : base.name,
+      name: shouldReplaceName ? extracted.name! : base.name,
       fbName: extracted.fbName || base.fbName,
+      fbProfileUrl: extracted.fbProfileUrl || extracted.fbUrl || base.fbProfileUrl,
+      nationality: extracted.nationality || base.nationality,
+      gender: extracted.gender || base.gender,
+      birthDate: extracted.birthDate || base.birthDate,
+      age: extracted.age || base.age,
+      email: extracted.email || base.email,
+      address: extracted.address || base.address,
       jlpt: extracted.jlpt || base.jlpt,
       phone: extracted.phone || base.phone,
       visaStatus: extracted.visaStatus || base.visaStatus,
@@ -2295,18 +2316,19 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       conversionGoal: extracted.conversionGoal || base.conversionGoal,
       salaryExpectation: extracted.salaryExpectation || base.salaryExpectation,
       mendanDate: extracted.mendanDate || base.mendanDate,
+      interviewDate: extracted.interviewDate || base.interviewDate,
       progressStatus: extracted.progressStatus || base.progressStatus,
       proposedCompany: extracted.proposedCompany || base.proposedCompany,
       lastContactDate: extracted.lastContactDate || base.lastContactDate || todayIso,
-      negotiationLog: verbatimNote
-        ? base.negotiationLog && !base.negotiationLog.includes(verbatimNote)
-          ? `${base.negotiationLog}\n\n${verbatimNote}`
-          : verbatimNote
+      negotiationLog: incomingLog
+        ? base.negotiationLog && !base.negotiationLog.includes(incomingLog)
+          ? `${base.negotiationLog}\n\n${incomingLog}`
+          : base.negotiationLog || incomingLog
         : base.negotiationLog,
-      memo: verbatimNote
-        ? base.memo && !base.memo.includes(verbatimNote)
-          ? `${base.memo}\n\n${verbatimNote}`
-          : verbatimNote
+      memo: incomingMemo
+        ? base.memo && (!rawTrimmed || !base.memo.includes(rawTrimmed))
+          ? `${base.memo}\n\n${incomingMemo}`
+          : base.memo || incomingMemo
         : base.memo,
     };
   };
@@ -2318,27 +2340,43 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     }
     const rawSnippet = editChatSnippet.trim();
     setIsExtractingCandidateAi(true);
+    let usedAi = false;
     try {
-      let extracted: Partial<Candidate> & { memoLine?: string } | null = null;
+      let extracted: (Partial<Candidate> & { memoLine?: string; fbUrl?: string }) | null = null;
       try {
         const token = await getFirebaseIdToken();
         const aiData = await extractCandidateViaServer({ text: rawSnippet }, token);
         if (aiData && Object.keys(aiData).length > 0) {
           extracted = aiData;
+          usedAi = true;
         }
       } catch {
         // Fallback smoothly to deterministic zero-truncation local parser
       }
       const fallback = parseChatIntoUpdates(rawSnippet);
-      const mergedExtract: Partial<Candidate> & { memoLine?: string } = {
+      const mergedExtract: Partial<Candidate> & { memoLine?: string; fbUrl?: string } = {
         ...fallback,
         ...(extracted || {}),
-        name: extracted?.name || fallback.name,
-        fbName: extracted?.fbName || fallback.fbName,
-        desiredArea: extracted?.desiredArea || fallback.desiredArea,
-        visaExpiry: extracted?.visaExpiry || fallback.visaExpiry,
-        conversionGoal: extracted?.conversionGoal || fallback.conversionGoal,
-        salaryExpectation: extracted?.salaryExpectation || fallback.salaryExpectation,
+        name: extracted?.name || fallback.name || '',
+        fbName: extracted?.fbName || fallback.fbName || '',
+        fbProfileUrl: extracted?.fbProfileUrl || fallback.fbProfileUrl || '',
+        visaStatus: extracted?.visaStatus || fallback.visaStatus || '',
+        visaExpiry: extracted?.visaExpiry || fallback.visaExpiry || '',
+        jlpt: extracted?.jlpt || fallback.jlpt || '',
+        desiredIndustry: extracted?.desiredIndustry || fallback.desiredIndustry || '',
+        desiredArea: extracted?.desiredArea || fallback.desiredArea || '',
+        passedExam: extracted?.passedExam || fallback.passedExam || '',
+        japanExperience: extracted?.japanExperience || fallback.japanExperience || '',
+        conversionGoal: extracted?.conversionGoal || fallback.conversionGoal || '',
+        salaryExpectation: extracted?.salaryExpectation || fallback.salaryExpectation || '',
+        phone: extracted?.phone || fallback.phone || '',
+        email: extracted?.email || fallback.email || '',
+        birthDate: extracted?.birthDate || fallback.birthDate || '',
+        age: extracted?.age || fallback.age || '',
+        proposedCompany: extracted?.proposedCompany || fallback.proposedCompany || '',
+        mendanDate: extracted?.mendanDate || fallback.mendanDate || '',
+        interviewDate: extracted?.interviewDate || fallback.interviewDate || '',
+        progressStatus: extracted?.progressStatus || fallback.progressStatus || '',
         negotiationLog: extracted?.negotiationLog || fallback.negotiationLog,
         memoLine: fallback.memoLine,
       };
@@ -2348,7 +2386,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           : prev
       );
       setEditChatSnippet('');
-      showToast('✨ Đã bóc tách và bảo toàn 100% nội dung vào hồ sơ ứng viên!');
+      showToast(
+        usedAi
+          ? '✨ AI đã bóc tách & bảo toàn 100% nguyên văn vào hồ sơ!'
+          : '✨ Đã bóc tách bằng bộ lọc dự phòng & lưu 100% nguyên văn!'
+      );
     } finally {
       setIsExtractingCandidateAi(false);
     }
@@ -2398,14 +2440,18 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         showToast('✨ Đã đọc ảnh chụp Messenger / Thẻ ngoại kiều và điền vào hồ sơ!');
       } else if (target === 'fbChat') {
         const formattedSummary = [
-          extracted.name ? `Họ tên: ${extracted.name}` : '',
+          extracted.name ? `Họ tên khai sinh: ${extracted.name}` : '',
           extracted.fbName ? `FB: ${extracted.fbName}` : '',
+          extracted.fbProfileUrl ? `Link FB: ${extracted.fbProfileUrl}` : '',
           extracted.visaStatus ? `Visa: ${extracted.visaStatus}` : '',
           extracted.visaExpiry ? `Hạn thẻ: ${extracted.visaExpiry}` : '',
           extracted.jlpt ? `JLPT: ${extracted.jlpt}` : '',
           extracted.desiredIndustry ? `Ngành: ${extracted.desiredIndustry}` : '',
           extracted.desiredArea ? `Khu vực: ${extracted.desiredArea}` : '',
+          extracted.japanExperience ? `Kinh nghiệm: ${extracted.japanExperience}` : '',
+          extracted.passedExam ? `Chứng chỉ: ${extracted.passedExam}` : '',
           extracted.phone ? `SĐT: ${extracted.phone}` : '',
+          extracted.email ? `Email: ${extracted.email}` : '',
           extracted.conversionGoal ? `Mục tiêu: ${extracted.conversionGoal}` : '',
           extracted.salaryExpectation ? `Lương kỳ vọng: ${extracted.salaryExpectation}` : '',
           extracted.negotiationLog || extracted.memo || '',
@@ -2433,11 +2479,16 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       return;
     }
     setIsExtractingFbChatAi(true);
+    let usedAi = false;
     try {
       let aiExtracted: Partial<Candidate> | null = null;
       try {
         const token = await getFirebaseIdToken();
-        aiExtracted = await extractCandidateViaServer({ text: raw }, token);
+        const aiRes = await extractCandidateViaServer({ text: raw }, token);
+        if (aiRes && Object.keys(aiRes).length > 0) {
+          aiExtracted = aiRes;
+          usedAi = true;
+        }
       } catch {
         // Fallback to zero-truncation parser
       }
@@ -2445,45 +2496,97 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       const extracted: Partial<Candidate> & { memoLine?: string } = {
         ...fallback,
         ...(aiExtracted || {}),
-        name: aiExtracted?.name || fallback.name,
-        fbName: aiExtracted?.fbName || fallback.fbName,
-        desiredArea: aiExtracted?.desiredArea || fallback.desiredArea,
-        visaExpiry: aiExtracted?.visaExpiry || fallback.visaExpiry,
-        conversionGoal: aiExtracted?.conversionGoal || fallback.conversionGoal,
-        salaryExpectation: aiExtracted?.salaryExpectation || fallback.salaryExpectation,
+        name: aiExtracted?.name || fallback.name || '',
+        fbName: aiExtracted?.fbName || fallback.fbName || '',
+        fbProfileUrl: aiExtracted?.fbProfileUrl || fallback.fbProfileUrl || '',
+        visaStatus: aiExtracted?.visaStatus || fallback.visaStatus || '',
+        visaExpiry: aiExtracted?.visaExpiry || fallback.visaExpiry || '',
+        jlpt: aiExtracted?.jlpt || fallback.jlpt || '',
+        desiredIndustry: aiExtracted?.desiredIndustry || fallback.desiredIndustry || '',
+        desiredArea: aiExtracted?.desiredArea || fallback.desiredArea || '',
+        passedExam: aiExtracted?.passedExam || fallback.passedExam || '',
+        japanExperience: aiExtracted?.japanExperience || fallback.japanExperience || '',
+        conversionGoal: aiExtracted?.conversionGoal || fallback.conversionGoal || '',
+        salaryExpectation: aiExtracted?.salaryExpectation || fallback.salaryExpectation || '',
+        phone: aiExtracted?.phone || fallback.phone || '',
+        email: aiExtracted?.email || fallback.email || '',
+        birthDate: aiExtracted?.birthDate || fallback.birthDate || '',
+        age: aiExtracted?.age || fallback.age || '',
+        nationality: aiExtracted?.nationality || fallback.nationality || '',
+        gender: aiExtracted?.gender || fallback.gender || '',
+        address: aiExtracted?.address || fallback.address || '',
+        proposedCompany: aiExtracted?.proposedCompany || fallback.proposedCompany || '',
+        mendanDate: aiExtracted?.mendanDate || fallback.mendanDate || '',
+        interviewDate: aiExtracted?.interviewDate || fallback.interviewDate || '',
+        progressStatus: aiExtracted?.progressStatus || fallback.progressStatus || '',
         negotiationLog: aiExtracted?.negotiationLog || fallback.negotiationLog,
         memoLine: fallback.memoLine,
       };
 
       if (fbChatMode === 'update' && fbChatTargetId) {
-        const updater = (list: Candidate[]) =>
-          list.map((p) =>
-            p.id === fbChatTargetId ? mergeExtractedCandidateData(p, extracted, raw) : p
-          );
-        if (schoolStudents.some((s) => s.id === fbChatTargetId)) {
-          setSchoolStudents(updater);
+        const existingTarget = allPeopleCombined.find((p) => p.id === fbChatTargetId);
+        if (!existingTarget) {
+          showToast('⚠️ Không tìm thấy ứng viên cần cập nhật');
+          return;
+        }
+        const mergedTarget = mergeExtractedCandidateData(
+          { ...existingTarget, channel: fbChatChannel || existingTarget.channel },
+          extracted,
+          raw
+        );
+        const targetIsSchool = mergedTarget.channel === 'school';
+        if (targetIsSchool) {
+          setCandidates((prev) => prev.filter((p) => p.id !== fbChatTargetId));
+          setSchoolStudents((prev) => {
+            const exists = prev.some((p) => p.id === fbChatTargetId);
+            return exists
+              ? prev.map((p) => (p.id === fbChatTargetId ? { ...mergedTarget, _isSchool: true } : p))
+              : [{ ...mergedTarget, _isSchool: true }, ...prev];
+          });
         } else {
-          setCandidates(updater);
+          setSchoolStudents((prev) => prev.filter((p) => p.id !== fbChatTargetId));
+          setCandidates((prev) => {
+            const exists = prev.some((p) => p.id === fbChatTargetId);
+            return exists
+              ? prev.map((p) => (p.id === fbChatTargetId ? { ...mergedTarget, _isSchool: false } : p))
+              : [{ ...mergedTarget, _isSchool: false }, ...prev];
+          });
         }
         setFbChatModalOpen(false);
         setFbChatRawText('');
-        showToast('🔄 Đã cập nhật và bảo toàn đầy đủ ghi chú cho ứng viên');
+        showToast(
+          usedAi
+            ? '🔄 AI đã cập nhật & bảo toàn 100% nguyên văn đoạn chat!'
+            : '🔄 Đã cập nhật bằng bộ lọc dự phòng & bảo toàn 100% nguyên văn!'
+        );
         return;
       }
 
+      const todayIso = getJstTodayYmd();
+      const missingNamePrefix =
+        !extracted.name && extracted.fbName
+          ? `[Chưa có họ tên khai sinh — tạm hiển thị theo tên FB: ${extracted.fbName}]\n`
+          : '';
+      const rawArchive = `[${todayIso} Nguyên văn đoạn chat]\n${missingNamePrefix}${raw}`;
+      const fullNegLog =
+        extracted.negotiationLog && !extracted.negotiationLog.includes(raw)
+          ? `${extracted.negotiationLog}\n\n${rawArchive}`
+          : extracted.negotiationLog || rawArchive;
+
       const newPerson: Candidate = {
         id: `cand_${Date.now()}`,
-        name: extracted.name || 'NEW CANDIDATE',
-        fbName: extracted.fbName || 'FB相談者',
+        name: extracted.name || extracted.fbName || 'Ứng viên FB (chưa rõ tên)',
+        fbName: extracted.fbName || '',
+        fbProfileUrl: extracted.fbProfileUrl || '',
         channel: fbChatChannel,
         nationality: extracted.nationality || 'ベトナム',
-        gender: '',
-        age: '',
-        birthDate: '',
+        gender: extracted.gender || '',
+        age: extracted.age || '',
+        birthDate: extracted.birthDate || '',
         jlpt: extracted.jlpt || '要確認',
-        desiredIndustry: extracted.desiredIndustry || '介護',
+        desiredIndustry: extracted.desiredIndustry || '',
         desiredArea: extracted.desiredArea || '',
-        visaStatus: extracted.visaStatus || '特定技能1号',
+        visaStatus: extracted.visaStatus || '',
         visaExpiry: extracted.visaExpiry || '',
         passedExam: extracted.passedExam || '',
         japanExperience: extracted.japanExperience || '',
@@ -2491,14 +2594,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         salaryExpectation: extracted.salaryExpectation || '',
         startDate: '',
         phone: extracted.phone || '',
-        email: '',
-        address: '',
+        email: extracted.email || '',
+        address: extracted.address || '',
         progressStatus: extracted.progressStatus || '新規相談',
         proposedCompany: extracted.proposedCompany || '',
         mendanDate: extracted.mendanDate || '',
-        lastContactDate: extracted.lastContactDate || getJstTodayYmd(),
-        negotiationLog: extracted.negotiationLog || extracted.memoLine || raw,
-        memo: extracted.memoLine || raw,
+        interviewDate: extracted.interviewDate || '',
+        lastContactDate: extracted.lastContactDate || todayIso,
+        negotiationLog: fullNegLog,
+        memo: rawArchive,
       };
 
       if (fbChatChannel === 'school') {
@@ -2518,45 +2622,93 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             : fbChatChannel === 'school'
             ? 'Trường Nhật ngữ'
             : 'FB個人'
-        }: ${newPerson.name}`
+        }: ${newPerson.name}${usedAi ? '' : ' (bộ lọc dự phòng)'}`
       );
     } finally {
       setIsExtractingFbChatAi(false);
     }
   };
 
+  const handleQuickChannelChange = (person: Candidate, nextChannel: ChannelType) => {
+    if (person.channel === nextChannel) return;
+    const isCurrentlySchool = Boolean(person._isSchool || person.channel === 'school');
+    const willBeSchool = nextChannel === 'school';
+    const updatedPerson: Candidate = {
+      ...person,
+      channel: nextChannel,
+      _isSchool: willBeSchool,
+    };
+
+    if (isCurrentlySchool && !willBeSchool) {
+      setSchoolStudents((prev) => prev.filter((s) => s.id !== person.id));
+      setCandidates((prev) => [updatedPerson, ...prev.filter((c) => c.id !== person.id)]);
+    } else if (!isCurrentlySchool && willBeSchool) {
+      setCandidates((prev) => prev.filter((c) => c.id !== person.id));
+      setSchoolStudents((prev) => [updatedPerson, ...prev.filter((s) => s.id !== person.id)]);
+    } else if (willBeSchool) {
+      setSchoolStudents((prev) => prev.map((s) => (s.id === person.id ? updatedPerson : s)));
+    } else {
+      setCandidates((prev) => prev.map((c) => (c.id === person.id ? updatedPerson : c)));
+    }
+
+    const label =
+      nextChannel === 'company'
+        ? 'FB会社公式'
+        : nextChannel === 'school'
+        ? '日本語学校・留学生'
+        : 'FB個人';
+    showToast(`🔄 Đã chuyển "${person.name}" sang kênh ${label} (bảo toàn 100% dữ liệu)`);
+  };
+
   const handleSaveEditingPerson = () => {
     if (!editingPerson) return;
     const { data, isSchool, isNew } = editingPerson;
-    if (!String(data.name || '').trim()) {
-      showToast('⚠️ 氏名を入力してください');
+    const trimmedName = String(data.name || '').trim();
+    const trimmedFb = String(data.fbName || '').trim();
+    if (!trimmedName && !trimmedFb) {
+      showToast('⚠️ Vui lòng nhập Họ tên khai sinh hoặc Tên Facebook');
       return;
     }
 
-    const isSchoolTarget = Boolean(isSchool || data.channel === 'school');
-    const prevList = isSchoolTarget ? schoolStudents : candidates;
+    const effectiveName = trimmedName || trimmedFb;
+    const fallbackNote =
+      !trimmedName && trimmedFb && !(data.memo || '').includes('tạm dùng tên FB')
+        ? `[Chưa có họ tên khai sinh — tạm dùng tên FB: ${trimmedFb}]${data.memo ? '\n' + data.memo : ''}`
+        : data.memo;
+
+    const isSchoolTarget = Boolean(data.channel === 'school' || (isSchool && !data.channel));
     const prevPerson = isNew
       ? undefined
-      : prevList.find((x) => x.id === data.id);
+      : allPeopleCombined.find((x) => x.id === data.id);
 
-    const savedPerson: Candidate = isSchoolTarget
-      ? { ...data, channel: 'school' }
-      : { ...data };
+    const savedPerson: Candidate = {
+      ...data,
+      name: effectiveName,
+      memo: fallbackNote,
+      channel: isSchoolTarget ? 'school' : data.channel || 'personal',
+      _isSchool: isSchoolTarget,
+    };
 
     if (isSchoolTarget) {
-      if (isNew) setSchoolStudents((prev) => [savedPerson, ...prev]);
-      else {
-        setSchoolStudents((prev) =>
-          prev.map((s) => (s.id === savedPerson.id ? savedPerson : s))
-        );
+      if (!isNew) {
+        setCandidates((prev) => prev.filter((c) => c.id !== savedPerson.id));
       }
+      setSchoolStudents((prev) => {
+        const exists = prev.some((s) => s.id === savedPerson.id);
+        return exists
+          ? prev.map((s) => (s.id === savedPerson.id ? savedPerson : s))
+          : [savedPerson, ...prev];
+      });
     } else {
-      if (isNew) setCandidates((prev) => [savedPerson, ...prev]);
-      else {
-        setCandidates((prev) =>
-          prev.map((c) => (c.id === savedPerson.id ? savedPerson : c))
-        );
+      if (!isNew) {
+        setSchoolStudents((prev) => prev.filter((s) => s.id !== savedPerson.id));
       }
+      setCandidates((prev) => {
+        const exists = prev.some((c) => c.id === savedPerson.id);
+        return exists
+          ? prev.map((c) => (c.id === savedPerson.id ? savedPerson : c))
+          : [savedPerson, ...prev];
+      });
     }
 
     setEditingPerson(null);
@@ -2953,7 +3105,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     const isSchool = Boolean(person._isSchool || person.channel === 'school');
     const mendanInfo = extractNormalizedMendanInfo(person);
     const missingItems = getMissingInfoForCandidate(person);
-    const matchingKyujins = findMatchingKyujinsForCandidate(person, kyujins);
+    const matchEval = evaluateCandidateKyujinMatches(person, kyujins);
+    const matchingKyujins = matchEval.matches;
     const proposedComp = getEffectiveProposedCompany(person);
     const declineReason = extractDeclineReason(person);
     const now = new Date();
@@ -2973,13 +3126,29 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               <span className="text-base font-semibold tracking-tight text-[#edeeef]">
                 {person.name}
               </span>
-              <span className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                {isSchool
-                  ? '留学生'
-                  : person.channel === 'company'
-                  ? 'FB会社公式'
-                  : 'FB個人'}
-              </span>
+              {person.fbName && person.fbName !== person.name && (
+                <span className="font-mono text-[11px] text-[#38bdf8]">
+                  FB: {person.fbName}
+                </span>
+              )}
+              <select
+                value={isSchool ? 'school' : person.channel === 'company' ? 'company' : 'personal'}
+                onChange={(e) =>
+                  handleQuickChannelChange(person, e.target.value as ChannelType)
+                }
+                title="Chuyển nhanh kênh nguồn (FB個人 / FB会社公式 / 留学生)"
+                className="rounded border border-[#27272a] bg-[#0c0c0e] px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-[#94949e] hover:border-[#22c55e] hover:text-[#edeeef] focus:border-[#22c55e] focus:outline-none cursor-pointer"
+              >
+                <option value="personal" className="bg-[#141417] text-[#edeeef]">
+                  FB個人
+                </option>
+                <option value="company" className="bg-[#141417] text-[#edeeef]">
+                  FB会社公式
+                </option>
+                <option value="school" className="bg-[#141417] text-[#edeeef]">
+                  留学生
+                </option>
+              </select>
               {isContactedToday ? (
                 <span className="font-mono text-[10px] text-[#22c55e] tabular-nums">
                   CONTACTED {todayIso}
@@ -3310,13 +3479,25 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </div>
         )}
 
-        {matchingKyujins.length > 0 && (
+        {(matchingKyujins.length > 0 || Boolean(matchEval.noticeMessage)) && (
           <div className="mt-3 pt-2">
             <div className="mb-1.5 font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
               Job Match Suggestions ({matchingKyujins.length})
             </div>
-            <div className="space-y-1.5">
-              {matchingKyujins.map(({ company, slot, score, reasons }) => {
+            {matchEval.noticeMessage && (
+              <div
+                className={`mb-2 rounded-md border px-3 py-2 text-[11px] ${
+                  matchingKyujins.length > 0
+                    ? 'border-[#f59e0b]/40 bg-[#f59e0b]/10 text-[#f59e0b]'
+                    : 'border-[#27272a] bg-[#0c0c0e] text-[#94949e]'
+                }`}
+              >
+                {matchEval.noticeMessage}
+              </div>
+            )}
+            {matchingKyujins.length > 0 && (
+              <div className="space-y-1.5">
+                {matchingKyujins.map(({ company, slot, score, reasons }) => {
                 const isBaito = /baito|アルバイト|パート/i.test(
                   slot.employmentType || company.employmentType || ''
                 );
@@ -3411,7 +3592,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   </div>
                 );
               })}
-            </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -3803,6 +3985,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                             id: `cand_${Date.now()}`,
                             name: '',
                             fbName: '',
+                            fbProfileUrl: '',
                             channel:
                               activeTab === 'company'
                                 ? 'company'
@@ -3810,16 +3993,18 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                 ? 'school'
                                 : 'personal',
                             nationality: 'ベトナム',
-                            gender: '男性',
+                            gender: '',
                             age: '',
                             birthDate: '',
-                            jlpt: 'N3',
-                            desiredIndustry: '介護',
+                            jlpt: '要確認',
+                            desiredIndustry: '',
                             desiredArea: '',
-                            visaStatus: '特定技能1号',
+                            visaStatus: '',
                             visaExpiry: '',
                             passedExam: '',
                             japanExperience: '',
+                            conversionGoal: '',
+                            salaryExpectation: '',
                             startDate: '',
                             phone: '',
                             email: '',
@@ -3828,6 +4013,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                             proposedCompany: '',
                             mendanDate: '',
                             lastContactDate: new Date().toISOString().slice(0, 10),
+                            negotiationLog: '',
                             memo: '',
                           },
                         })
@@ -5405,12 +5591,21 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       {/* MODAL 1: EDIT / CREATE CANDIDATE */}
       {editingPerson && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
-          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-xl bg-white p-5 text-xs text-slate-900 shadow-2xl">
+          <div
+            className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-xl bg-white p-5 text-xs text-slate-900 shadow-2xl"
+            onPaste={(e) => {
+              const img = extractFirstImageFromClipboard(e.clipboardData);
+              if (img) {
+                e.preventDefault();
+                void handleExtractCandidateScreenshot(img, 'edit');
+              }
+            }}
+          >
             <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-2.5">
               <h3 className="text-base font-bold text-slate-900">
                 {editingPerson.isNew
                   ? '＋ 新規相談者登録'
-                  : `プロフィール編集：${editingPerson.data.name}`}
+                  : `プロフィール編集：${editingPerson.data.name || editingPerson.data.fbName || ''}`}
               </h3>
               <button
                 type="button"
@@ -5421,16 +5616,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </button>
             </div>
 
-            <div
-              className="mb-4 rounded-lg border border-sky-200 bg-sky-50/70 p-3"
-              onPaste={(e) => {
-                const img = extractFirstImageFromClipboard(e.clipboardData);
-                if (img) {
-                  e.preventDefault();
-                  void handleExtractCandidateScreenshot(img, 'edit');
-                }
-              }}
-            >
+            <div className="mb-4 rounded-lg border border-sky-200 bg-sky-50/70 p-3">
               <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                 <span className="font-bold text-sky-950">
                   Dán đoạn chat / ghi chú dài hoặc Ctrl+V ảnh chụp Messenger / Thẻ ngoại kiều (Bảo toàn 100% nội dung)
@@ -5468,13 +5654,19 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 placeholder="Dán đoạn chat Messenger, ghi chú đàm phán lương/điều kiện hoặc nhấn Ctrl+V ảnh chụp màn hình vào đây..."
                 className="w-full rounded-lg border border-sky-200 bg-white p-2 text-xs"
               />
+              {!editingPerson.data.name && editingPerson.data.fbName && (
+                <div className="mt-1.5 rounded border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-900">
+                  ⚠️ Đoạn chat mới ghi nhận Tên Facebook ({editingPerson.data.fbName}), chưa thấy họ tên khai sinh. Có thể bấm Lưu để dùng tạm tên FB hoặc nhập họ tên thật bên dưới.
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div>
-                <label className="mb-1 block font-semibold">氏名（ローマ字/漢字）*</label>
+                <label className="mb-1 block font-semibold">氏名 / Họ tên khai sinh</label>
                 <input
                   type="text"
+                  placeholder="Để trống nếu mới có tên FB"
                   value={editingPerson.data.name || ''}
                   onChange={(e) =>
                     setEditingPerson({
@@ -5486,7 +5678,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">FBアカウント名</label>
+                <label className="mb-1 block font-semibold">FBアカウント名 / Tên nick FB</label>
                 <input
                   type="text"
                   value={editingPerson.data.fbName || ''}
@@ -5514,23 +5706,36 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5"
                 />
               </div>
-              <div>
-                <label className="mb-1 block font-semibold">流入チャネル</label>
-                <select
-                  value={editingPerson.data.channel || 'personal'}
-                  onChange={(e) =>
-                    setEditingPerson({
-                      ...editingPerson,
-                      isSchool: e.target.value === 'school',
-                      data: { ...editingPerson.data, channel: e.target.value },
-                    })
-                  }
-                  className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-semibold"
-                >
-                  <option value="personal">FB個人</option>
-                  <option value="company">FB会社公式</option>
-                  <option value="school">日本語学校・留学生</option>
-                </select>
+              <div className="sm:col-span-3">
+                <label className="mb-1 block font-semibold">流入チャネル / Nguồn kênh CRM (Chuyển đổi mượt)</label>
+                <div className="flex flex-wrap gap-2">
+                  {(
+                    [
+                      { id: 'personal', label: 'FB個人 (Facebook cá nhân)' },
+                      { id: 'company', label: 'FB会社公式 (Fanpage công ty)' },
+                      { id: 'school', label: '日本語学校・留学生 (Trường Nhật ngữ)' },
+                    ] as Array<{ id: ChannelType; label: string }>
+                  ).map((ch) => (
+                    <button
+                      key={ch.id}
+                      type="button"
+                      onClick={() =>
+                        setEditingPerson({
+                          ...editingPerson,
+                          isSchool: ch.id === 'school',
+                          data: { ...editingPerson.data, channel: ch.id },
+                        })
+                      }
+                      className={`rounded-lg border px-3 py-1.5 text-[11px] font-semibold transition-colors ${
+                        (editingPerson.data.channel || 'personal') === ch.id
+                          ? 'border-indigo-500 bg-indigo-50 text-indigo-900'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      {ch.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div>
@@ -5877,7 +6082,16 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       {/* MODAL 2: FB CHAT AUTO-REGISTER / UPDATE */}
       {fbChatModalOpen && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
-          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-5 text-xs text-slate-900 shadow-2xl">
+          <div
+            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-5 text-xs text-slate-900 shadow-2xl"
+            onPaste={(e) => {
+              const img = extractFirstImageFromClipboard(e.clipboardData);
+              if (img) {
+                e.preventDefault();
+                void handleExtractCandidateScreenshot(img, 'fbChat');
+              }
+            }}
+          >
             <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-2.5">
               <h3 className="text-base font-bold text-slate-900">
                 FBチャットから自動登録・既存相談者の状況更新
@@ -5916,59 +6130,68 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </button>
             </div>
 
-            {fbChatMode === 'new' ? (
-              <div className="mb-3">
-                <label className="mb-1 block font-semibold">登録先チャネル（自動切替）</label>
-                <div className="flex flex-wrap gap-2">
-                  {(
-                    [
-                      { id: 'company', label: 'FB会社公式' },
-                      { id: 'personal', label: 'FB個人' },
-                      { id: 'school', label: '日本語学校・留学生' },
-                    ] as Array<{ id: ChannelType; label: string }>
-                  ).map((ch) => (
-                    <button
-                      key={ch.id}
-                      type="button"
-                      onClick={() => setFbChatChannel(ch.id)}
-                      className={`rounded-lg border px-3 py-1.5 font-semibold ${
-                        fbChatChannel === ch.id
-                          ? 'border-indigo-500 bg-indigo-50 text-indigo-900'
-                          : 'border-slate-200 bg-white text-slate-700'
-                      }`}
-                    >
-                      {ch.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
+            {fbChatMode === 'update' && (
               <div className="mb-3">
                 <label className="mb-1 block font-semibold">更新対象の相談者を選択</label>
                 <select
                   value={fbChatTargetId}
-                  onChange={(e) => setFbChatTargetId(e.target.value)}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setFbChatTargetId(nextId);
+                    const found = allPeopleCombined.find((p) => p.id === nextId);
+                    if (found) {
+                      setFbChatChannel(
+                        found._isSchool || found.channel === 'school'
+                          ? 'school'
+                          : found.channel === 'company'
+                          ? 'company'
+                          : 'personal'
+                      );
+                    }
+                  }}
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-semibold"
                 >
                   <option value="">-- 相談者を選択してください --</option>
                   {allPeopleCombined.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.name} {p.fbName ? `(${p.fbName})` : ''} - {p.progressStatus}
+                      {p.name} {p.fbName && p.fbName !== p.name ? `(${p.fbName})` : ''} - {p.progressStatus}
                     </option>
                   ))}
                 </select>
               </div>
             )}
 
-            <div
-              onPaste={(e) => {
-                const img = extractFirstImageFromClipboard(e.clipboardData);
-                if (img) {
-                  e.preventDefault();
-                  void handleExtractCandidateScreenshot(img, 'fbChat');
-                }
-              }}
-            >
+            <div className="mb-3">
+              <label className="mb-1 block font-semibold">
+                {fbChatMode === 'new'
+                  ? '登録先チャネル / Chọn kênh nguồn'
+                  : 'チャネル設定 / Kênh lưu trữ (có thể chuyển đổi kênh ngay)'}
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {(
+                  [
+                    { id: 'personal', label: 'FB個人' },
+                    { id: 'company', label: 'FB会社公式' },
+                    { id: 'school', label: '日本語学校・留学生' },
+                  ] as Array<{ id: ChannelType; label: string }>
+                ).map((ch) => (
+                  <button
+                    key={ch.id}
+                    type="button"
+                    onClick={() => setFbChatChannel(ch.id)}
+                    className={`rounded-lg border px-3 py-1.5 font-semibold ${
+                      fbChatChannel === ch.id
+                        ? 'border-indigo-500 bg-indigo-50 text-indigo-900'
+                        : 'border-slate-200 bg-white text-slate-700'
+                    }`}
+                  >
+                    {ch.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
               <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                 <label className="font-semibold">
                   Dán đoạn chat Messenger, ghi chú hoặc Ctrl+V ảnh chụp màn hình (Chat / Thẻ ngoại kiều)

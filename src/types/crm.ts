@@ -211,6 +211,16 @@ export interface KyujinMatchResult {
   reasons: string[];
   company: KyujinCompany;
   slot: KyujinSlot;
+  industryMatched?: boolean;
+  areaMatched?: boolean;
+}
+
+export interface KyujinMatchEvaluation {
+  matches: KyujinMatchResult[];
+  hasCandidateIndustry: boolean;
+  hasCandidateArea: boolean;
+  hasExactIndustryAndAreaMatch: boolean;
+  noticeMessage: string;
 }
 
 export interface ExcelAnchor {

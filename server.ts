@@ -249,23 +249,35 @@ async function extractMessengerCandidateWithGemini(
   };
 }
 
-const CANDIDATE_EXTRACTION_PROMPT = `Bạn là AI nhập liệu & bóc tách hồ sơ ứng viên Tokutei Ginou / Du học sinh / Thực tập sinh cho Tokutei CRM.
-QUY TẮC TUYỆT ĐỐI (BẢO TOÀN 100% DỮ LIỆU - KHÔNG CẮT BỚT):
-1. Tuyệt đối KHÔNG tóm tắt, KHÔNG làm tròn, KHÔNG cắt bớt số liệu, ngày tháng, tên tỉnh, tên Facebook hay nội dung trao đổi.
-2. name: Họ tên khai sinh / pháp lý trên thẻ ngoại kiều hoặc giấy tờ (nếu có).
-3. fbName: Tên hiển thị Facebook (tách riêng nếu khác với tên khai sinh, ví dụ: name="Lê Thị Bích Phương", fbName="Thị Bích Phương Lê").
-4. fbProfileUrl: Link Facebook nếu có.
-5. visaStatus: Tình trạng visa hiện tại (vd: Thực tập sinh / TTS, Du học, Tokutei Ginou 1...).
-6. visaExpiry: Ngày hết hạn thẻ ngoại kiều chính xác dạng YYYY-MM-DD (nếu văn bản ghi 09/04/2027 hãy chuẩn hóa thành 2027-04-09).
-7. desiredIndustry: Ngành nghề mong muốn (介護, 外食業, 飲食料品製造業, 宿泊, 自動車運送業, 農業, 建設, 自動車整備, ビルクリーニング, v.v.).
-8. desiredArea: GIỮ NGUYÊN TẤT CẢ các tỉnh/khu vực mong muốn nối bằng dấu "・" (ví dụ: 栃木県（Tochigi）・埼玉県（Saitama）・群馬県（Gunma）). Không được bỏ sót tỉnh nào!
-9. japanExperience: Kinh nghiệm & bằng cấp chi tiết tại Nhật (giữ nguyên toàn bộ, vd: "Đang là Kaigo năm cuối", số năm kinh nghiệm, chứng chỉ).
-10. passedExam: Chứng chỉ / Kỳ thi đã đỗ (vd: Shoninsha, Jitsumusha, Kaigo Fukushishi, Tokutei tay nghề...).
-11. jlpt: Trình độ tiếng Nhật (N1, N2, N3, N4, N5, JFT, 日常会話...).
-12. conversionGoal: Nhu cầu & Mục tiêu chuyển đổi (giữ nguyên đầy đủ ý ứng viên).
-13. salaryExpectation: Mức lương kỳ vọng / chi tiết tính toán lương thực nhận / trừ tiền nhà nếu có.
-14. negotiationLog: Nhật ký & Tình trạng trao đổi chi tiết — chép ĐẦY ĐỦ NGUYÊN VĂN các mốc đàm phán lương, điều kiện, phản hồi chênh lệch kỳ vọng, tên đơn/địa điểm đang hỏi, tuyệt đối không rút gọn.
-15. phone, email, address, nationality, gender, birthDate (YYYY-MM-DD), age, mendanDate (YYYY-MM-DD), progressStatus.`;
+const CANDIDATE_EXTRACTION_PROMPT = `Bạn là chuyên gia nhập liệu & phân tích hội thoại Messenger/Facebook cho hệ thống Tokutei CRM (tuyển dụng lao động Kỹ năng Đặc định Nhật Bản).
+
+NHIỆM VỤ CỐT LÕI:
+Đọc đoạn chat hoặc ảnh chụp màn hình Messenger / Zairyu Card (có thể dài, nhiều lượt nói xen kẽ tiếng Việt, tiếng Nhật, emoji, mốc thời gian) và bóc tách chính xác 100% thông tin CỦA ỨNG VIÊN.
+
+QUY TẮC PHÂN BIỆT ỨNG VIÊN VS NGƯỜI TƯ VẤN (BẮT BUỘC):
+1. Xác định vai trò từng người trong hội thoại dựa trên ngữ cảnh:
+   - **ỨNG VIÊN** là người: hỏi tìm việc / tìm đơn hàng / chuyển visa / tìm baito; chia sẻ trình độ tiếng Nhật (N1-N5/JFT), tình trạng visa, hạn thẻ ngoại kiều, kinh nghiệm làm việc; gửi ảnh thẻ ngoại kiều (在留カード) hoặc sơ yếu lý lịch; hỏi mức lương, ca làm việc, ký túc xá, khu vực; hoặc trả lời câu hỏi phỏng vấn sơ vấn.
+   - **NGƯỜI TƯ VẤN / NHÂN VIÊN / ADMIN** là người: chào hỏi hỗ trợ ("Chào bạn, bên mình hỗ trợ việc làm...", "Em/Anh gửi thông tin đơn..."); giới thiệu công ty, gửi job, hẹn lịch Mendan/phỏng vấn; hoặc đặt câu hỏi khai thác thông tin ứng viên ("Bạn có N mấy rồi?", "Thẻ bạn hết hạn khi nào?").
+   - **TUYỆT ĐỐI KHÔNG** lấy tên, SĐT, hoặc nick Facebook của nhân viên tư vấn hay tên công ty tuyển dụng gán cho ứng viên.
+
+QUY TẮC TÁCH BẠCH DANH TÍNH & LIÊN HỆ:
+2. **name** (Họ tên khai sinh / pháp lý): CHỈ điền khi trong hội thoại hoặc ảnh thẻ/hồ sơ xuất hiện rõ họ tên thật / tên khai sinh (vd: "Lê Thị Bích Phương", "NGUYEN VAN AN", chữ cái in hoa trên thẻ ngoại kiều, hoặc câu "họ tên: ...", "em tên khai sinh là ...").
+   - Nếu đoạn chat CHỈ hiển thị tên nick/tên tài khoản Facebook (chưa rõ họ tên khai sinh), **BẮT BUỘC để name = "" (chuỗi rỗng)**, KHÔNG tự đoán hoặc bịa ra tên khác.
+3. **fbName** (Tên hiển thị Facebook/Messenger): Điền đúng tên nick Facebook của ỨNG VIÊN (tách riêng nếu khác họ tên khai sinh, ví dụ name="Lê Thị Bích Phương", fbName="Thị Bích Phương Lê"; nếu chỉ thấy tên nick FB thì điền vào fbName và để name=""). Tuyệt đối không điền tên nhân viên tư vấn.
+4. **fbProfileUrl**: Trích xuất đầy đủ link Facebook / Messenger nếu có trong văn bản ("https://facebook.com/...", "https://www.facebook.com/...", "https://m.me/...", "fb.com/...").
+
+QUY TẮC NGHIỆP VỤ TOKUTEI & BẢO TOÀN 100% DỮ LIỆU:
+5. **visaStatus**: Tình trạng visa hiện tại (vd: "技能実習（Thực tập sinh）", "留学（Du học sinh）", "特定技能1号（Tokutei 1）", "家族滞在（Gia đình）", "技術・人文知識・国際業務（Kỹ sư）", "定住者"...).
+6. **visaExpiry**: Ngày hết hạn thẻ ngoại kiều chuẩn YYYY-MM-DD. LƯU Ý QUAN TRỌNG: nếu chat kiểu Việt Nam ghi "09/04/2027" thì đó là ngày 09 tháng 04 năm 2027 -> "2027-04-09" (tuyệt đối không đảo nhầm ngày/tháng). Nếu ghi kiểu Nhật "2027年4月9日" hoặc "2027/04/09" -> "2027-04-09".
+7. **jlpt**: Trình độ tiếng Nhật ("N1", "N2", "N3", "N4", "N5", "JFT", "日常会話", hoặc "" nếu chưa rõ).
+8. **japanExperience**: Kinh nghiệm làm việc/học tập chi tiết tại Nhật (giữ nguyên số năm, loại cơ sở/nhà máy/công việc, vd: "Đang là Kaigo năm cuối tại viện có phí, 3 năm kinh nghiệm").
+9. **passedExam**: Chứng chỉ / Kỳ thi / Bằng cấp đã đỗ (vd: "介護職員初任者研修修了", "実務者研修", "介護福祉士", "特定技能評価試験合格（外食/食品/介護...）", bằng lái xe...).
+10. **desiredIndustry**: Ngành nghề / Lĩnh vực mong muốn ("介護", "外食業", "飲食料品製造業", "宿泊", "自動車運送業", "自動車整備", "建設", "素形材・産業機械・電気電子情報関連製造業", "農業", "ビルクリーニング", v.v.).
+11. **desiredArea**: GIỮ NGUYÊN TẤT CẢ các tỉnh/khu vực ứng viên mong muốn chuyển tới, nối bằng dấu "・" (ví dụ: "栃木県（Tochigi）・埼玉県（Saitama）・群馬県（Gunma）", hoặc "関東エリア"). Phân biệt tỉnh đang ở hiện tại với tỉnh mong muốn chuyển sang nếu có nêu khác nhau; không được bỏ sót bất kỳ tỉnh nào.
+12. **conversionGoal**: Nhu cầu & Mục tiêu chuyển việc / chuyển đổi visa / tìm Baito (giữ nguyên toàn bộ ý ứng viên, vd: "Tìm công ty mới phỏng vấn chuyển đổi visa Tokutei ngành Kaigo").
+13. **salaryExpectation**: Mức lương kỳ vọng, lương thực nhận ("手取り"), phụ cấp ca đêm, tiền nhà/ký túc xá, lý do chênh lệch kỳ vọng (giữ nguyên con số, vd: "Kỳ vọng thực nhận ~16 man sau trừ nhà 3 man; đơn ở Saitama chưa ca đêm ~13 man").
+14. **negotiationLog**: Nhật ký & Tình trạng trao đổi chi tiết — chép ĐẦY ĐỦ NGUYÊN VĂN các mốc đàm phán lương, điều kiện, ngày giờ hẹn, tên công ty/cơ sở, lý do cân nhắc, phản hồi hai bên (giữ nguyên chi tiết tiếng Việt/Nhật và số liệu, tuyệt đối không tóm tắt mất ý). Nếu trong chat chỉ thấy tên FB mà chưa có tên khai sinh, ghi chú thêm: "[Chưa có họ tên khai sinh — mới ghi nhận tên FB: ...]".
+15. Các trường khác (nếu có trong dữ liệu của ứng viên): phone, email, address, nationality, gender, birthDate (YYYY-MM-DD), age, proposedCompany, mendanDate (YYYY-MM-DD hoặc YYYY-MM-DD HH:mm), interviewDate (YYYY-MM-DD hoặc YYYY-MM-DD HH:mm), progressStatus. Trường nào không có dữ liệu thì trả về "".`;
 
 async function startServer() {
   const app = express();
@@ -654,13 +666,22 @@ async function startServer() {
               email: { type: Type.STRING },
               address: { type: Type.STRING },
               progressStatus: { type: Type.STRING },
+              proposedCompany: { type: Type.STRING },
               mendanDate: { type: Type.STRING },
+              interviewDate: { type: Type.STRING },
             },
           },
         },
       });
 
       const candidate = safeParseGeminiJson<Record<string, unknown>>(response.text, {});
+      if (
+        typeof candidate.fbProfileUrl === 'string' &&
+        candidate.fbProfileUrl &&
+        !candidate.fbUrl
+      ) {
+        candidate.fbUrl = candidate.fbProfileUrl;
+      }
       res.json({ candidate });
     } catch (err) {
       const code = (err as { code?: string })?.code;
