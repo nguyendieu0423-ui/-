@@ -250,7 +250,7 @@ export default function App() {
   const [isExtractingCandidateAi, setIsExtractingCandidateAi] = useState(false);
   const [fbChatModalOpen, setFbChatModalOpen] = useState(false);
   const [fbChatMode, setFbChatMode] = useState<'new' | 'update'>('new');
-  const [fbChatChannel, setFbChatChannel] = useState<ChannelType>('company');
+  const [fbChatChannel, setFbChatChannel] = useState<ChannelType>('personal');
   const [fbChatTargetId, setFbChatTargetId] = useState('');
   const [fbChatRawText, setFbChatRawText] = useState('');
   const [isExtractingFbChatAi, setIsExtractingFbChatAi] = useState(false);
@@ -2315,6 +2315,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       japanExperience: mergedExp,
       conversionGoal: extracted.conversionGoal || base.conversionGoal,
       salaryExpectation: extracted.salaryExpectation || base.salaryExpectation,
+      startDate: extracted.startDate || base.startDate,
+      graduationDate: extracted.graduationDate || base.graduationDate,
       mendanDate: extracted.mendanDate || base.mendanDate,
       interviewDate: extracted.interviewDate || base.interviewDate,
       progressStatus: extracted.progressStatus || base.progressStatus,
@@ -2369,10 +2371,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         japanExperience: extracted?.japanExperience || fallback.japanExperience || '',
         conversionGoal: extracted?.conversionGoal || fallback.conversionGoal || '',
         salaryExpectation: extracted?.salaryExpectation || fallback.salaryExpectation || '',
+        startDate: extracted?.startDate || fallback.startDate || '',
+        graduationDate: extracted?.graduationDate || fallback.graduationDate || '',
         phone: extracted?.phone || fallback.phone || '',
         email: extracted?.email || fallback.email || '',
         birthDate: extracted?.birthDate || fallback.birthDate || '',
         age: extracted?.age || fallback.age || '',
+        nationality: extracted?.nationality || fallback.nationality || '',
         proposedCompany: extracted?.proposedCompany || fallback.proposedCompany || '',
         mendanDate: extracted?.mendanDate || fallback.mendanDate || '',
         interviewDate: extracted?.interviewDate || fallback.interviewDate || '',
@@ -2443,15 +2448,19 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           extracted.name ? `Họ tên khai sinh: ${extracted.name}` : '',
           extracted.fbName ? `FB: ${extracted.fbName}` : '',
           extracted.fbProfileUrl ? `Link FB: ${extracted.fbProfileUrl}` : '',
+          extracted.nationality ? `Quốc tịch: ${extracted.nationality}` : '',
           extracted.visaStatus ? `Visa: ${extracted.visaStatus}` : '',
           extracted.visaExpiry ? `Hạn thẻ: ${extracted.visaExpiry}` : '',
           extracted.jlpt ? `JLPT: ${extracted.jlpt}` : '',
           extracted.desiredIndustry ? `Ngành: ${extracted.desiredIndustry}` : '',
           extracted.desiredArea ? `Khu vực: ${extracted.desiredArea}` : '',
+          extracted.startDate ? `Nhập công ty: ${extracted.startDate}` : '',
           extracted.japanExperience ? `Kinh nghiệm: ${extracted.japanExperience}` : '',
           extracted.passedExam ? `Chứng chỉ: ${extracted.passedExam}` : '',
           extracted.phone ? `SĐT: ${extracted.phone}` : '',
           extracted.email ? `Email: ${extracted.email}` : '',
+          extracted.mendanDate ? `Mendan: ${extracted.mendanDate}` : '',
+          extracted.interviewDate ? `Phỏng vấn cty: ${extracted.interviewDate}` : '',
           extracted.conversionGoal ? `Mục tiêu: ${extracted.conversionGoal}` : '',
           extracted.salaryExpectation ? `Lương kỳ vọng: ${extracted.salaryExpectation}` : '',
           extracted.negotiationLog || extracted.memo || '',
@@ -2508,6 +2517,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         japanExperience: aiExtracted?.japanExperience || fallback.japanExperience || '',
         conversionGoal: aiExtracted?.conversionGoal || fallback.conversionGoal || '',
         salaryExpectation: aiExtracted?.salaryExpectation || fallback.salaryExpectation || '',
+        startDate: aiExtracted?.startDate || fallback.startDate || '',
+        graduationDate: aiExtracted?.graduationDate || fallback.graduationDate || '',
         phone: aiExtracted?.phone || fallback.phone || '',
         email: aiExtracted?.email || fallback.email || '',
         birthDate: aiExtracted?.birthDate || fallback.birthDate || '',
@@ -2592,7 +2603,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         japanExperience: extracted.japanExperience || '',
         conversionGoal: extracted.conversionGoal || '',
         salaryExpectation: extracted.salaryExpectation || '',
-        startDate: '',
+        startDate: extracted.startDate || '',
+        graduationDate: extracted.graduationDate || '',
         phone: extracted.phone || '',
         email: extracted.email || '',
         address: extracted.address || '',

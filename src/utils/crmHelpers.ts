@@ -372,7 +372,7 @@ const jlptRank = (lvl = ''): number => {
   if (s.includes('N2')) return 4;
   if (s.includes('N3')) return 3;
   if (s.includes('N4')) return 2;
-  if (s.includes('N5') || s.includes('日常')) return 1;
+  if (s.includes('N5') || s.includes('日常') || s.includes('初級')) return 1;
   if (s.includes('JFT')) return 2;
   if (s.includes('不問')) return 0;
   return -1;
@@ -2175,17 +2175,59 @@ export const parseChatIntoUpdates = (chatText = '') => {
     updates.fbName = cleanedLines[0];
   }
 
-  // 3. Language (JLPT / JFT)
-  const jlptM = candText.match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i) || text.match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i);
-  if (jlptM) updates.jlpt = jlptM[1].toUpperCase().replace(/\s+/g, ' ');
-  else if (/giao tiếp cơ bản|日常会話/i.test(candText)) updates.jlpt = '日常会話';
+  // 2b. Default Nationality & Channel & Initial Progress Status
+  const hasVietnamese =
+    /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]|\b(?:dhs|em|mình|anh|chị|tìm|chuyển|visa|tốt nghiệp|năm sau|kinh nghiệm)\b/i.test(
+      text
+    );
+  if (hasVietnamese) {
+    updates.nationality = 'ベトナム';
+  }
+  if (/fanpage|page\s*công\s*ty|fb\s*công\s*ty|公式/i.test(text)) {
+    updates.channel = 'company';
+  } else {
+    updates.channel = 'personal';
+  }
+  updates.progressStatus = '新規相談';
 
-  // 4. Phone & Email (prefer candidate turns so consultant signature phone isn't grabbed)
+  // 3. Language (JLPT / JFT / 初級) — NEVER promote upcoming target exam (e.g. "sắp tới thi N3") as current level!
+  const upcomingExamM = candText.match(
+    /(?:sắp\s*(?:tới)?|chuẩn\s*bị|đang\s*ôn|dự\s*định|tháng\s*\d{1,2}(?:\/\d{4})?)\s*(?:sẽ\s*)?thi\s*(?:jlpt\s*)?(N[1-5])/i
+  );
+  const upcomingExamNote = upcomingExamM
+    ? `Sắp tới thi JLPT ${upcomingExamM[1].toUpperCase()}`
+    : '';
+  const candTextCurrentJlpt = candText.replace(
+    /(?:sắp\s*(?:tới)?|chuẩn\s*bị|đang\s*ôn|dự\s*định|tháng\s*\d{1,2}(?:\/\d{4})?)\s*(?:sẽ\s*)?thi\s*(?:jlpt\s*)?N[1-5]/gi,
+    ''
+  );
+  const jlptM =
+    candTextCurrentJlpt.match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i) ||
+    text
+      .replace(
+        /(?:sắp\s*(?:tới)?|chuẩn\s*bị|đang\s*ôn|dự\s*định|tháng\s*\d{1,2}(?:\/\d{4})?)\s*(?:sẽ\s*)?thi\s*(?:jlpt\s*)?N[1-5]/gi,
+        ''
+      )
+      .match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i);
+  if (jlptM) {
+    updates.jlpt = jlptM[1].toUpperCase().replace(/\s+/g, ' ');
+  } else if (/初級|sơ\s*cấp/i.test(candText)) {
+    updates.jlpt = '初級';
+  } else if (/giao tiếp cơ bản|日常会話/i.test(candText)) {
+    updates.jlpt = '日常会話';
+  }
+
+  // 4. Phone / LINE & Email (prefer candidate turns so consultant signature isn't grabbed)
   const phoneSource = /(?:0[789]0|0\d{1,3})[-\s]?\d{3,4}[-\s]?\d{4}/.test(candText)
     ? candText
     : text;
   const phoneM = phoneSource.match(/(0[789]0[-\s]?\d{4}[-\s]?\d{4})/);
-  if (phoneM) updates.phone = phoneM[1].replace(/\s+/g, '-');
+  if (phoneM) {
+    updates.phone = phoneM[1].replace(/\s+/g, '-');
+  } else {
+    const lineM = candText.match(/(?:line(?:\s*id)?)[：:\s]+([A-Za-z0-9._-]{3,40})/i);
+    if (lineM) updates.phone = `LINE: ${lineM[1]}`;
+  }
 
   const emailSource = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(candText)
     ? candText
@@ -2218,10 +2260,11 @@ export const parseChatIntoUpdates = (chatText = '') => {
     updates.visaExpiry = normalizeExtractedDateYmd(expDmyM[1]);
   }
 
-  // 7. Current Visa Status
+  // 7. Current Visa Status (includes slang "dhs" -> 留学)
+  const isDhs = /\bdhs\b|du\s*học(?:\s*sinh)?|留学/i.test(candText);
   if (/thực\s*tập\s*sinh|tts|技能実習/i.test(candText)) {
     updates.visaStatus = '技能実習（Thực tập sinh）';
-  } else if (/du\s*học|留学/i.test(candText)) {
+  } else if (isDhs) {
     updates.visaStatus = '留学（Du học sinh）';
   } else if (/gia\s*đình|phụ\s*thuộc|家族滞在/i.test(candText)) {
     updates.visaStatus = '家族滞在（Gia đình）';
@@ -2279,16 +2322,23 @@ export const parseChatIntoUpdates = (chatText = '') => {
     examList.push('特定技能評価試験合格');
   }
   if (/bằng\s*lái|gplx|免許/i.test(candText)) examList.push('運転免許');
+  if (updates.jlpt && /^N[1-5]$/.test(updates.jlpt)) {
+    examList.push(`JLPT ${updates.jlpt}`);
+  }
   if (examList.length > 0) {
     updates.passedExam = examList.join('・');
   }
 
   const expParts: string[] = [];
-  const knMatch =
-    candText.match(/(?:kn|kinh\s*nghiệm|経験)\s*(\d+(?:[.,]\d+)?)\s*(?:n\b|năm|年)/i) ||
-    candText.match(/(\d+(?:[.,]\d+)?)\s*(?:năm|年)\s*(?:kn|kinh\s*nghiệm|経験)/i);
-  if (knMatch) {
-    expParts.push(`経験${knMatch[1].replace(',', '.')}年`);
+  if (/(?:chưa\s*(?:có\s*)?(?:kn|kinh\s*nghiệm)|chưa\s*từng\s*làm|mới\s*sang\s*chưa\s*làm|未経験)/i.test(candText)) {
+    expParts.push('Chưa có kinh nghiệm');
+  } else {
+    const knMatch =
+      candText.match(/(?:kn|kinh\s*nghiệm|経験)\s*(\d+(?:[.,]\d+)?)\s*(?:n\b|năm|年)/i) ||
+      candText.match(/(\d+(?:[.,]\d+)?)\s*(?:năm|年)\s*(?:kn|kinh\s*nghiệm|経験)/i);
+    if (knMatch) {
+      expParts.push(`Kinh nghiệm ${knMatch[1].replace(',', '.')} năm`);
+    }
   }
   if (/kaigo năm cuối|năm cuối/i.test(candText)) {
     expParts.push('Đang là Kaigo năm cuối');
@@ -2302,8 +2352,50 @@ export const parseChatIntoUpdates = (chatText = '') => {
   if (facilities.length > 0) {
     expParts.push(`施設経験：${facilities.join('・')}`);
   }
+  if (upcomingExamNote) {
+    expParts.push(upcomingExamNote);
+  }
   if (expParts.length > 0) {
     updates.japanExperience = expParts.join('／');
+  }
+
+  // 10b. Graduation date & Available startDate (current year = 2026)
+  const CURRENT_CRM_YEAR = 2026;
+  const gradNextYearM =
+    candText.match(
+      /(?:k[ìi]\s*)?tháng\s*(\d{1,2})\s*(?:[\/\-]\s*(20\d{2})|(?:năm\s*sau|sang\s*năm)|(năm\s*nay))?\s*(?:là\s*)?(?:tốt\s*nghiệp|ra\s*trường)/i
+    ) ||
+    candText.match(
+      /(?:tốt\s*nghiệp|ra\s*trường)\s*(?:vào\s*)?(?:k[ìi]\s*)?tháng\s*(\d{1,2})\s*(?:[\/\-]\s*(20\d{2})|(?:năm\s*sau|sang\s*năm)|(năm\s*nay))?/i
+    );
+  const gradJpM = candText.match(/(20\d{2})年(\d{1,2})月(?:卒業|卒予定)/);
+  if (gradNextYearM) {
+    const gMonth = Math.min(12, Math.max(1, Number(gradNextYearM[1])));
+    const explicitYr = gradNextYearM[2] ? Number(gradNextYearM[2]) : 0;
+    const isNextYr = /năm\s*sau|sang\s*năm/i.test(gradNextYearM[0]);
+    const isThisYr = /năm\s*nay/i.test(gradNextYearM[0]);
+    const gYear = explicitYr
+      ? explicitYr
+      : isNextYr
+      ? CURRENT_CRM_YEAR + 1
+      : isThisYr
+      ? CURRENT_CRM_YEAR
+      : gMonth <= 11
+      ? CURRENT_CRM_YEAR + 1
+      : CURRENT_CRM_YEAR;
+    updates.graduationDate = `${gYear}-${String(gMonth).padStart(2, '0')}`;
+    const startMonth = (gMonth % 12) + 1;
+    const startYear = gMonth === 12 ? gYear + 1 : gYear;
+    updates.startDate = `${startYear}年${startMonth}月以降（sau tốt nghiệp tháng ${gMonth}/${gYear}）`;
+  } else if (gradJpM) {
+    const gYear = Number(gradJpM[1]);
+    const gMonth = Math.min(12, Math.max(1, Number(gradJpM[2])));
+    updates.graduationDate = `${gYear}-${String(gMonth).padStart(2, '0')}`;
+    const startMonth = (gMonth % 12) + 1;
+    const startYear = gMonth === 12 ? gYear + 1 : gYear;
+    updates.startDate = `${startYear}年${startMonth}月以降（sau tốt nghiệp tháng ${gMonth}/${gYear}）`;
+  } else if (/即日|làm\s*ngay|đi\s*làm\s*luôn/i.test(candText)) {
+    updates.startDate = '即日可能';
   }
 
   // 11. Salary expectation & housing / night-shift lines (preserve all matching lines)
@@ -2318,21 +2410,43 @@ export const parseChatIntoUpdates = (chatText = '') => {
 
   // 12. Conversion Goal / Need
   const goalLines = candidateLines.filter((l) =>
-    /(?:mục\s*tiêu|nhu\s*cầu|tìm\s*(?:công\s*ty|đơn|việc|baito)|chuyển\s*(?:đổi|visa|việc|công\s*ty)|nguyện\s*vọng|希望|転職)/i.test(
+    /(?:mục\s*tiêu|nhu\s*cầu|tìm\s*(?:công\s*ty|đơn|việc|baito)|chuyển\s*(?:đổi|visa|việc|công\s*ty|sang\s*tokutei)|nguyện\s*vọng|希望|転職)/i.test(
       l
     )
   );
   if (goalLines.length > 0) {
     updates.conversionGoal = Array.from(new Set(goalLines)).join(' | ');
+  } else if (isDhs) {
+    updates.conversionGoal = 'Du học sinh tìm đơn chuyển đổi sang visa Tokutei Ginou';
   }
 
-  // 13. Mendan / Status / Proposed Company
+  // 13. Mendan / Interview (YYYY-MM-DD HH:mm) / Status / Proposed Company
   const mendanDateM = text.match(
-    /(\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2}|\d{1,2}[月\/]\d{1,2}日?)\s*(?:に|の)?\s*(?:面談|面接)/
+    /(?:mendan|面談)[^\n\d]{0,15}(\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2}|\d{1,2}[月\/]\d{1,2}日?)(?:[^\n\d]{0,12}(\d{1,2}[:h]\d{2}))?/i
+  ) || text.match(
+    /(\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2}|\d{1,2}[月\/]\d{1,2}日?)\s*(?:lúc\s*(\d{1,2}[:h]\d{2})\s*)?(?:に|の)?\s*(?:面談|mendan)/i
   );
   if (mendanDateM) {
-    const ts = parseFlexibleDateToTimestamp(mendanDateM[1], 2026);
-    if (ts > 0) updates.mendanDate = formatTimestampToIso(ts);
+    const ts = parseFlexibleDateToTimestamp(mendanDateM[1], CURRENT_CRM_YEAR);
+    if (ts > 0) {
+      const timePart = (mendanDateM[2] || '').replace('h', ':');
+      updates.mendanDate = timePart
+        ? `${formatTimestampToIso(ts)} ${timePart.padStart(5, '0')}`
+        : formatTimestampToIso(ts);
+    }
+  }
+
+  const interviewDateM = text.match(
+    /(?:phỏng\s*vấn|pv|面接)[^\n\d]{0,15}(\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2}|\d{1,2}[月\/]\d{1,2}日?)(?:[^\n\d]{0,12}(\d{1,2}[:h]\d{2}))?/i
+  );
+  if (interviewDateM) {
+    const ts = parseFlexibleDateToTimestamp(interviewDateM[1], CURRENT_CRM_YEAR);
+    if (ts > 0) {
+      const timePart = (interviewDateM[2] || '').replace('h', ':');
+      updates.interviewDate = timePart
+        ? `${formatTimestampToIso(ts)} ${timePart.padStart(5, '0')}`
+        : formatTimestampToIso(ts);
+    }
   }
 
   if (/内定/.test(text)) updates.progressStatus = '内定';
