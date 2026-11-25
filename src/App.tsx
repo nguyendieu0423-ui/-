@@ -91,6 +91,7 @@ import {
   parseExcelFileToKyujinEntries,
   parseFlexibleDateToTimestamp,
   parseRawKyujinTextFallback,
+  recognizeCandidateImageWithTesseract,
   sanitizeJobDescriptionForCandidate,
 } from './utils/crmHelpers';
 import {
@@ -278,6 +279,25 @@ export default function App() {
   } | null>(null);
   const [editChatSnippet, setEditChatSnippet] = useState('');
   const [isExtractingCandidateAi, setIsExtractingCandidateAi] = useState(false);
+  const [currentImageBase64, setCurrentImageBase64] = useState<{
+    mimeType: string;
+    base64Data: string;
+    dataUrl: string;
+    fileName: string;
+  } | null>(null);
+  const [candidateExtractBanner, setCandidateExtractBanner] = useState<{
+    type: 'loading' | 'success' | 'warning';
+    text: string;
+  } | null>(null);
+
+  const editingPersonSessionKey = editingPerson
+    ? `${editingPerson.isNew ? 'new' : 'edit'}:${editingPerson.data.id}`
+    : '';
+
+  useEffect(() => {
+    setCurrentImageBase64(null);
+    setCandidateExtractBanner(null);
+  }, [editingPersonSessionKey]);
   const [fbChatModalOpen, setFbChatModalOpen] = useState(false);
   const [fbChatMode, setFbChatMode] = useState<'new' | 'update'>('new');
   const [fbChatChannel, setFbChatChannel] = useState<ChannelType>('personal');
@@ -2682,6 +2702,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     const shouldReplaceName =
       Boolean(extracted.name) &&
       (!base.name || base.name === 'NEW CANDIDATE' || base.name === base.fbName);
+    const extractedJlpt = String(extracted.jlpt || '').trim();
+    const resolvedJlpt =
+      extractedJlpt && extractedJlpt !== '要確認'
+        ? extractedJlpt
+        : base.jlpt || extractedJlpt || '要確認';
 
     return {
       ...base,
@@ -2694,7 +2719,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       age: extracted.age || base.age,
       email: extracted.email || base.email,
       address: extracted.address || base.address,
-      jlpt: extracted.jlpt || base.jlpt,
+      jlpt: resolvedJlpt,
       phone: extracted.phone || base.phone,
       visaStatus: extracted.visaStatus || base.visaStatus,
       visaExpiry: extracted.visaExpiry || base.visaExpiry,
@@ -2724,70 +2749,172 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     };
   };
 
-  const handleApplyChatToEditingPerson = async () => {
-    if (!editingPerson || !editChatSnippet.trim()) {
-      showToast('⚠️ Vui lòng dán đoạn chat hoặc ghi chú trao đổi trước');
+  const runCandidateExtraction = async (options?: {
+    imagePayload?: {
+      mimeType: string;
+      base64Data: string;
+      dataUrl: string;
+      fileName: string;
+    } | null;
+    rawTextOverride?: string;
+  }) => {
+    if (!editingPerson) return;
+    const activeImage =
+      options?.imagePayload !== undefined ? options.imagePayload : currentImageBase64;
+    const activeText = (
+      options?.rawTextOverride !== undefined ? options.rawTextOverride : editChatSnippet
+    ).trim();
+
+    if (!activeImage && !activeText) {
+      const warnMsg = '⚠️ Vui lòng dán đoạn chat hoặc tải/dán ảnh chụp màn hình trước';
+      setCandidateExtractBanner({ type: 'warning', text: warnMsg });
+      showToast(warnMsg);
       return;
     }
-    const rawSnippet = editChatSnippet.trim();
+
     setIsExtractingCandidateAi(true);
+    setCandidateExtractBanner({
+      type: 'loading',
+      text: activeImage
+        ? '⏳ AI Vision đang đọc ảnh và bóc tách dữ liệu...'
+        : '⏳ AI đang bóc tách đoạn hội thoại...',
+    });
+
     let usedAi = false;
+    let usedOcrFallback = false;
+
     try {
-      let extracted: (Partial<Candidate> & { memoLine?: string; fbUrl?: string }) | null = null;
+      let aiExtracted: (Partial<Candidate> & { memoLine?: string; fbUrl?: string }) | null = null;
+      const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [];
+      if (activeImage) {
+        parts.push({
+          inlineData: {
+            mimeType: activeImage.mimeType,
+            data: activeImage.base64Data,
+          },
+        });
+      }
+      if (activeText) {
+        parts.push({ text: activeText });
+      }
+
       try {
         const token = await getFirebaseIdToken();
-        const aiData = await extractCandidateViaServer({ text: rawSnippet }, token);
+        const aiData = await extractCandidateViaServer(
+          {
+            text: activeText || undefined,
+            parts: parts.length > 0 ? parts : undefined,
+          },
+          token
+        );
         if (aiData && Object.keys(aiData).length > 0) {
-          extracted = aiData;
+          aiExtracted = aiData;
           usedAi = true;
         }
       } catch {
-        // Fallback smoothly to deterministic zero-truncation local parser
+        // Vision AI unavailable or not configured -> fall through to Tesseract.js OCR / parser
       }
-      const fallback = parseChatIntoUpdates(rawSnippet);
+
+      let combinedRawSource = activeText;
+      if (!usedAi && activeImage) {
+        usedOcrFallback = true;
+        try {
+          const ocrText = await recognizeCandidateImageWithTesseract(
+            activeImage.dataUrl,
+            (progressText) => {
+              setCandidateExtractBanner({
+                type: 'loading',
+                text: `⏳ ${progressText}`,
+              });
+            }
+          );
+          if (ocrText) {
+            combinedRawSource = [activeText, ocrText].filter(Boolean).join('\n\n');
+          }
+        } catch (ocrErr) {
+          const ocrMsg =
+            ocrErr instanceof Error ? ocrErr.message : 'Không thể chạy OCR đọc ảnh';
+          if (!activeText) {
+            setCandidateExtractBanner({
+              type: 'warning',
+              text: `⚠️ Không đọc được ảnh (${ocrMsg}). Vui lòng thử ảnh rõ nét hơn hoặc dán nội dung chat.`,
+            });
+            showToast(`⚠️ Lỗi đọc ảnh: ${ocrMsg}`);
+            return;
+          }
+        }
+      }
+
+      const fallbackSource =
+        combinedRawSource || aiExtracted?.negotiationLog || aiExtracted?.memo || '';
+      const fallback = parseChatIntoUpdates(fallbackSource);
+      const verbatimRaw =
+        combinedRawSource || aiExtracted?.negotiationLog || aiExtracted?.memo || '';
+
       const mergedExtract: Partial<Candidate> & { memoLine?: string; fbUrl?: string } = {
         ...fallback,
-        ...(extracted || {}),
-        name: extracted?.name || fallback.name || '',
-        fbName: extracted?.fbName || fallback.fbName || '',
-        fbProfileUrl: extracted?.fbProfileUrl || fallback.fbProfileUrl || '',
-        visaStatus: extracted?.visaStatus || fallback.visaStatus || '',
-        visaExpiry: extracted?.visaExpiry || fallback.visaExpiry || '',
-        jlpt: extracted?.jlpt || fallback.jlpt || '',
-        desiredIndustry: extracted?.desiredIndustry || fallback.desiredIndustry || '',
-        desiredArea: extracted?.desiredArea || fallback.desiredArea || '',
-        passedExam: extracted?.passedExam || fallback.passedExam || '',
-        japanExperience: extracted?.japanExperience || fallback.japanExperience || '',
-        conversionGoal: extracted?.conversionGoal || fallback.conversionGoal || '',
-        salaryExpectation: extracted?.salaryExpectation || fallback.salaryExpectation || '',
-        startDate: extracted?.startDate || fallback.startDate || '',
-        graduationDate: extracted?.graduationDate || fallback.graduationDate || '',
-        phone: extracted?.phone || fallback.phone || '',
-        email: extracted?.email || fallback.email || '',
-        birthDate: extracted?.birthDate || fallback.birthDate || '',
-        age: extracted?.age || fallback.age || '',
-        nationality: extracted?.nationality || fallback.nationality || '',
-        proposedCompany: extracted?.proposedCompany || fallback.proposedCompany || '',
-        mendanDate: extracted?.mendanDate || fallback.mendanDate || '',
-        interviewDate: extracted?.interviewDate || fallback.interviewDate || '',
-        progressStatus: extracted?.progressStatus || fallback.progressStatus || '',
-        negotiationLog: extracted?.negotiationLog || fallback.negotiationLog,
+        ...(aiExtracted || {}),
+        // Preserve Vision AI's Messenger vs ID-card distinction (do not invent fullName from chat if Vision AI left it empty)
+        name: usedAi && activeImage ? aiExtracted?.name || '' : aiExtracted?.name || fallback.name || '',
+        fbName: aiExtracted?.fbName || fallback.fbName || '',
+        fbProfileUrl: aiExtracted?.fbProfileUrl || fallback.fbProfileUrl || '',
+        visaStatus: aiExtracted?.visaStatus || fallback.visaStatus || '',
+        visaExpiry: aiExtracted?.visaExpiry || fallback.visaExpiry || '',
+        jlpt:
+          usedAi && activeImage
+            ? aiExtracted?.jlpt || '要確認'
+            : aiExtracted?.jlpt || fallback.jlpt || '要確認',
+        desiredIndustry: aiExtracted?.desiredIndustry || fallback.desiredIndustry || '',
+        desiredArea: aiExtracted?.desiredArea || fallback.desiredArea || '',
+        passedExam: aiExtracted?.passedExam || fallback.passedExam || '',
+        japanExperience: aiExtracted?.japanExperience || fallback.japanExperience || '',
+        conversionGoal: aiExtracted?.conversionGoal || fallback.conversionGoal || '',
+        salaryExpectation: aiExtracted?.salaryExpectation || fallback.salaryExpectation || '',
+        startDate: aiExtracted?.startDate || fallback.startDate || '',
+        graduationDate: aiExtracted?.graduationDate || fallback.graduationDate || '',
+        phone: aiExtracted?.phone || fallback.phone || '',
+        email: aiExtracted?.email || fallback.email || '',
+        birthDate: aiExtracted?.birthDate || fallback.birthDate || '',
+        age: aiExtracted?.age || fallback.age || '',
+        nationality: aiExtracted?.nationality || fallback.nationality || '',
+        proposedCompany: aiExtracted?.proposedCompany || fallback.proposedCompany || '',
+        mendanDate: aiExtracted?.mendanDate || fallback.mendanDate || '',
+        interviewDate: aiExtracted?.interviewDate || fallback.interviewDate || '',
+        progressStatus: aiExtracted?.progressStatus || fallback.progressStatus || '',
+        negotiationLog: aiExtracted?.negotiationLog || fallback.negotiationLog || verbatimRaw,
         memoLine: fallback.memoLine,
       };
+
       setEditingPerson((prev) =>
         prev
-          ? { ...prev, data: mergeExtractedCandidateData(prev.data, mergedExtract, rawSnippet) }
+          ? {
+              ...prev,
+              data: mergeExtractedCandidateData(prev.data, mergedExtract, verbatimRaw),
+            }
           : prev
       );
-      setEditChatSnippet('');
-      showToast(
-        usedAi
-          ? '✨ AI đã bóc tách & bảo toàn 100% nguyên văn vào hồ sơ!'
-          : '✨ Đã bóc tách bằng bộ lọc dự phòng & lưu 100% nguyên văn!'
-      );
+
+      if (activeText) {
+        setEditChatSnippet('');
+      }
+
+      const successText = activeImage
+        ? usedOcrFallback
+          ? '✅ Đã bóc tách thành công từ ảnh chụp! (OCR)'
+          : '✅ Đã bóc tách thành công từ ảnh chụp!'
+        : usedAi
+          ? '✅ AI đã bóc tách & bảo toàn 100% nguyên văn vào hồ sơ!'
+          : '✅ Đã bóc tách bằng bộ lọc dự phòng & lưu 100% nguyên văn!';
+
+      setCandidateExtractBanner({ type: 'success', text: successText });
+      showToast(successText);
     } finally {
       setIsExtractingCandidateAi(false);
     }
+  };
+
+  const handleApplyChatToEditingPerson = async () => {
+    await runCandidateExtraction();
   };
 
   const handleExtractCandidateScreenshot = async (
@@ -2798,75 +2925,94 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       showToast('⚠️ Vui lòng chọn hoặc dán ảnh chụp màn hình hợp lệ');
       return;
     }
-    if (target === 'edit') setIsExtractingCandidateAi(true);
-    else setIsExtractingFbChatAi(true);
 
-    try {
-      const compressed = await compressImageFileToBase64(file, 1600, 0.78);
-      const token = await getFirebaseIdToken();
-      const extracted = await extractCandidateViaServer(
-        {
-          parts: [
-            {
-              inlineData: {
-                mimeType: compressed.mimeType,
-                data: compressed.base64Data,
-              },
-            },
-          ],
-        },
-        token
-      );
-
-      if (target === 'edit' && editingPerson) {
-        setEditingPerson((prev) =>
-          prev
-            ? {
-                ...prev,
-                data: mergeExtractedCandidateData(
-                  prev.data,
-                  extracted,
-                  extracted.negotiationLog || extracted.memo || ''
-                ),
-              }
-            : prev
-        );
-        showToast('✨ Đã đọc ảnh chụp Messenger / Thẻ ngoại kiều và điền vào hồ sơ!');
-      } else if (target === 'fbChat') {
-        const formattedSummary = [
-          extracted.name ? `Họ tên khai sinh: ${extracted.name}` : '',
-          extracted.fbName ? `FB: ${extracted.fbName}` : '',
-          extracted.fbProfileUrl ? `Link FB: ${extracted.fbProfileUrl}` : '',
-          extracted.nationality ? `Quốc tịch: ${extracted.nationality}` : '',
-          extracted.visaStatus ? `Visa: ${extracted.visaStatus}` : '',
-          extracted.visaExpiry ? `Hạn thẻ: ${extracted.visaExpiry}` : '',
-          extracted.jlpt ? `JLPT: ${extracted.jlpt}` : '',
-          extracted.desiredIndustry ? `Ngành: ${extracted.desiredIndustry}` : '',
-          extracted.desiredArea ? `Khu vực: ${extracted.desiredArea}` : '',
-          extracted.startDate ? `Nhập công ty: ${extracted.startDate}` : '',
-          extracted.japanExperience ? `Kinh nghiệm: ${extracted.japanExperience}` : '',
-          extracted.passedExam ? `Chứng chỉ: ${extracted.passedExam}` : '',
-          extracted.phone ? `SĐT: ${extracted.phone}` : '',
-          extracted.email ? `Email: ${extracted.email}` : '',
-          extracted.mendanDate ? `Mendan: ${extracted.mendanDate}` : '',
-          extracted.interviewDate ? `Phỏng vấn cty: ${extracted.interviewDate}` : '',
-          extracted.conversionGoal ? `Mục tiêu: ${extracted.conversionGoal}` : '',
-          extracted.salaryExpectation ? `Lương kỳ vọng: ${extracted.salaryExpectation}` : '',
-          extracted.negotiationLog || extracted.memo || '',
-        ]
-          .filter(Boolean)
-          .join('\n');
-        setFbChatRawText((prev) =>
-          prev.trim() ? `${prev.trim()}\n\n${formattedSummary}` : formattedSummary
-        );
-        showToast('✨ Đã bóc tách nội dung từ ảnh chụp vào khung đăng ký nhanh!');
+    if (target === 'edit') {
+      try {
+        setCandidateExtractBanner({
+          type: 'loading',
+          text: '⏳ Đang nén và chuẩn bị ảnh chụp...',
+        });
+        const compressed = await compressImageFileToBase64(file, 1600, 0.82);
+        const imagePayload = {
+          ...compressed,
+          fileName: file.name || `screenshot_${Date.now()}.jpg`,
+        };
+        setCurrentImageBase64(imagePayload);
+        await runCandidateExtraction({ imagePayload });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Không thể đọc tệp ảnh';
+        setCandidateExtractBanner({ type: 'warning', text: `⚠️ Lỗi đọc ảnh: ${msg}` });
+        showToast(`⚠️ Lỗi đọc ảnh: ${msg}`);
       }
+      return;
+    }
+
+    setIsExtractingFbChatAi(true);
+    try {
+      const compressed = await compressImageFileToBase64(file, 1600, 0.82);
+      let extracted: Partial<Candidate> | null = null;
+      let ocrFallbackText = '';
+
+      try {
+        const token = await getFirebaseIdToken();
+        const aiRes = await extractCandidateViaServer(
+          {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: compressed.mimeType,
+                  data: compressed.base64Data,
+                },
+              },
+            ],
+          },
+          token
+        );
+        if (aiRes && Object.keys(aiRes).length > 0) {
+          extracted = aiRes;
+        }
+      } catch {
+        // Vision AI failed -> fallback to Tesseract.js OCR
+      }
+
+      if (!extracted) {
+        ocrFallbackText = await recognizeCandidateImageWithTesseract(compressed.dataUrl);
+        extracted = parseChatIntoUpdates(ocrFallbackText);
+      }
+
+      const formattedSummary = [
+        extracted.name ? `Họ tên khai sinh: ${extracted.name}` : '',
+        extracted.fbName ? `FB: ${extracted.fbName}` : '',
+        extracted.fbProfileUrl ? `Link FB: ${extracted.fbProfileUrl}` : '',
+        extracted.nationality ? `Quốc tịch: ${extracted.nationality}` : '',
+        extracted.visaStatus ? `Visa: ${extracted.visaStatus}` : '',
+        extracted.visaExpiry ? `Hạn thẻ: ${extracted.visaExpiry}` : '',
+        extracted.jlpt ? `JLPT: ${extracted.jlpt}` : '',
+        extracted.desiredIndustry ? `Ngành: ${extracted.desiredIndustry}` : '',
+        extracted.desiredArea ? `Khu vực: ${extracted.desiredArea}` : '',
+        extracted.startDate ? `Nhập công ty: ${extracted.startDate}` : '',
+        extracted.japanExperience ? `Kinh nghiệm: ${extracted.japanExperience}` : '',
+        extracted.passedExam ? `Chứng chỉ: ${extracted.passedExam}` : '',
+        extracted.phone ? `SĐT: ${extracted.phone}` : '',
+        extracted.email ? `Email: ${extracted.email}` : '',
+        extracted.mendanDate ? `Mendan: ${extracted.mendanDate}` : '',
+        extracted.interviewDate ? `Phỏng vấn cty: ${extracted.interviewDate}` : '',
+        extracted.conversionGoal ? `Mục tiêu: ${extracted.conversionGoal}` : '',
+        extracted.salaryExpectation ? `Lương kỳ vọng: ${extracted.salaryExpectation}` : '',
+        extracted.negotiationLog || extracted.memo || ocrFallbackText || '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      setFbChatRawText((prev) =>
+        prev.trim() ? `${prev.trim()}\n\n${formattedSummary}` : formattedSummary
+      );
+      showToast('✅ Đã bóc tách thành công từ ảnh chụp!');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Không thể đọc ảnh chụp lúc này';
       showToast(`⚠️ Lỗi đọc ảnh: ${msg}`);
     } finally {
-      if (target === 'edit') setIsExtractingCandidateAi(false);
-      else setIsExtractingFbChatAi(false);
+      setIsExtractingFbChatAi(false);
     }
   };
 
@@ -6371,6 +6517,37 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   </button>
                 </div>
               </div>
+              {currentImageBase64 && (
+                <div className="mb-2 flex items-center gap-3 rounded-lg border border-sky-200 bg-white p-2">
+                  <img
+                    src={currentImageBase64.dataUrl}
+                    alt={currentImageBase64.fileName || 'Ảnh chụp màn hình'}
+                    className="h-20 w-28 shrink-0 rounded border border-slate-200 object-cover"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold text-slate-800">
+                      📷 {currentImageBase64.fileName || 'Ảnh chụp từ Clipboard'}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-slate-500">
+                      Đã tối ưu kích thước (
+                      {Math.max(1, Math.round((currentImageBase64.base64Data.length * 0.75) / 1024))}{' '}
+                      KB) • Bấm &quot;AI bóc tách nguyên văn&quot; để phân tích lại nếu cần
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCurrentImageBase64(null);
+                      setCandidateExtractBanner(null);
+                    }}
+                    className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100"
+                    title="Xóa ảnh đính kèm"
+                  >
+                    <X className="h-3 w-3" aria-hidden="true" />
+                    Xóa ảnh
+                  </button>
+                </div>
+              )}
               <textarea
                 rows={3}
                 value={editChatSnippet}
@@ -6378,6 +6555,19 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 placeholder="Dán đoạn chat Messenger, ghi chú đàm phán lương/điều kiện hoặc nhấn Ctrl+V ảnh chụp màn hình vào đây..."
                 className="w-full rounded-lg border border-sky-200 bg-white p-2 text-xs"
               />
+              {candidateExtractBanner && (
+                <div
+                  className={`mt-1.5 rounded border px-2.5 py-1.5 text-[11px] font-semibold ${
+                    candidateExtractBanner.type === 'success'
+                      ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                      : candidateExtractBanner.type === 'warning'
+                      ? 'border-amber-300 bg-amber-50 text-amber-900'
+                      : 'border-sky-300 bg-white text-sky-900'
+                  }`}
+                >
+                  {candidateExtractBanner.text}
+                </div>
+              )}
               {!editingPerson.data.name && editingPerson.data.fbName && (
                 <div className="mt-1.5 rounded border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-900">
                   ⚠️ Đoạn chat mới ghi nhận Tên Facebook ({editingPerson.data.fbName}), chưa thấy họ tên khai sinh. Có thể bấm Lưu để dùng tạm tên FB hoặc nhập họ tên thật bên dưới.

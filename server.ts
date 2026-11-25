@@ -250,43 +250,30 @@ async function extractMessengerCandidateWithGemini(
   };
 }
 
-const CANDIDATE_EXTRACTION_PROMPT = `Bạn là trợ lý nhập liệu CRM chuyên nghiệp cho công ty giới thiệu việc làm tại Nhật Bản (Tokutei Ginou / Hệ thống Tokutei CRM).
+const CANDIDATE_EXTRACTION_PROMPT = `Bạn là AI chuyên gia bóc tách dữ liệu ứng viên cho hệ thống Tokutei CRM (giới thiệu việc làm tại Nhật Bản).
 Thời điểm hiện tại: năm 2026 (tháng 11/2026).
 
 NHIỆM VỤ CỐT LÕI:
-Đọc đoạn hội thoại tin nhắn Messenger/Facebook hoặc ảnh chụp màn hình Chat / Thẻ ngoại kiều (Zairyu Card) và trích xuất thông tin CỦA ỨNG VIÊN vào JSON.
+Đọc kỹ đoạn hội thoại tin nhắn Messenger/Facebook HOẶC ảnh chụp màn hình Messenger / Thẻ ngoại kiều (Zairyu Card) / Ảnh bài đăng tuyển dụng ứng viên gửi kèm và trả về JSON chuẩn xác để tự động điền vào form "+ 新規相談者登録".
 
-QUY TẮC BÓC TÁCH BẮT BUỘC:
-1. Chỉ trích xuất thông tin có trong hội thoại hoặc suy luận chắc chắn từ ngữ cảnh. Tuyệt đối KHÔNG tự bịa thông tin. Trường nào chưa có thông tin thì trả về chuỗi rỗng "".
+QUY TẮC BÓC TÁCH BẮT BUỘC (TUÂN THỦ TUYỆT ĐỐI):
+1. Chỉ trích xuất thông tin thực sự có trong ảnh / hội thoại hoặc suy luận chắc chắn từ ngữ cảnh. KHÔNG tự bịa thông tin.
 2. PHÂN BIỆT ỨNG VIÊN VS NGƯỜI TƯ VẤN:
-   - **ỨNG VIÊN** là người hỏi tìm việc, tìm đơn Tokutei/Baito, chia sẻ trình độ tiếng Nhật, visa, hạn thẻ, kinh nghiệm, gửi ảnh thẻ ngoại kiều, hỏi lương/khu vực/ca làm.
-   - **NGƯỜI TƯ VẤN / NHÂN VIÊN** là người chào hỏi tư vấn, giới thiệu công ty/đơn hàng, hẹn lịch Mendan, hỏi khai thác thông tin. Tuyệt đối không lấy tên/SĐT của nhân viên tư vấn gán cho ứng viên.
-3. TỰ ĐỘNG GIẢI MÃ TIẾNG LÓNG / VIẾT TẮT CỦA NGƯỜI VIỆT TẠI NHẬT:
-   - **"dhs"** / **"du học sinh"** -> \`visaStatus = "留学"\` (hoặc \`"留学（Du học sinh）"\`), và nếu bối cảnh là hỏi việc Tokutei thì ghi rõ vào \`conversionGoal\` mục tiêu chuyển sang Tokutei.
-   - **"chưa có kinh nghiệm"** / **"chưa có kn"** / **"chưa từng làm"** -> Ghi rõ \`"Chưa có kinh nghiệm"\` vào trường \`japanExperience\`.
-   - **"kì tháng X năm sau tốt nghiệp"** / **"tháng X năm sau ra trường"** -> Vì năm hiện tại là **2026**, tháng X năm sau là năm **2027** (vd: "kì tháng 3 năm sau tốt nghiệp" -> tốt nghiệp \`2027-03\`, suy ra thời điểm có thể nhập công ty \`startDate\` là sau tháng X năm sau: \`"2027年4月以降（sau tốt nghiệp tháng 3/2027）"\`; hoặc tháng 9 năm sau -> \`"2027年10月以降（sau tốt nghiệp tháng 9/2027）"\`; tháng 12 năm sau -> \`"2028年1月以降（sau tốt nghiệp tháng 12/2027）"\`). Ghi \`graduationDate = "2027-03"\` nếu biết tháng tốt nghiệp.
-   - **"có n4 và sắp tới thi n3"** (hoặc tương tự: hiện có N4, sắp thi N3) -> \`jlpt\` BẮT BUỘC điền trình độ ĐÃ ĐẠT là \`"N4"\` (tuyệt đối không điền N3), và ghi chú \`"Sắp tới thi JLPT N3"\` vào \`japanExperience\` (và \`negotiationLog\`).
-4. NGÔN NGỮ & GIÁ TRỊ ĐẦU RA CHUẨN:
-   - **name** (氏名 / Họ tên khai sinh): CHỈ điền khi rõ họ tên thật / tên khai sinh (trên thẻ ngoại kiều hoặc ứng viên tự khai họ tên). **Để trống "" nếu chỉ thấy tên nick Facebook**.
-   - **fbName** (FBアカウント名 / Tên nick FB): Lấy chính xác tên hiển thị trên Messenger/Facebook của ứng viên (vd: "Nguyễn Lyly").
-   - **fbProfileUrl** (Link Facebook / Messenger): Lấy URL facebook.com / m.me / fb.com nếu có, không có thì "".
-   - **channel** (流入チャネル): Chọn 1 trong: \`"personal"\` (Mặc định chọn \`"personal"\` = FB個人 nếu chat qua nick cá nhân / chưa rõ), \`"company"\` (FB会社公式 nếu rõ là fanpage/inbox công ty), \`"school"\` (日本語学校・留学生 chỉ khi rõ từ danh sách trường).
-   - **nationality** (国籍): Nếu giao tiếp bằng tiếng Việt -> điền \`"ベトナム"\`.
-   - **age** / **birthDate** (年齢 / 生年月日): \`birthDate\` chuẩn \`YYYY-MM-DD\`, \`age\` là số tuổi (không có thì "").
-   - **jlpt** (日本語レベル): Chỉ chọn 1 trong các mức đã đạt: \`"N1"\`, \`"N2"\`, \`"N3"\`, \`"N4"\`, \`"N5"\`, \`"初級"\` (hoặc \`""\` nếu chưa rõ).
-   - **desiredIndustry** (希望分野): Giá trị chuẩn tiếng Nhật (vd: \`"介護"\`, \`"外食業"\`, \`"飲食料品製造業"\`, \`"建設"\`, \`"宿泊"\`, \`"自動車運送業"\`, \`"自動車整備"\`, \`"素形材・産業機械・電気電子情報関連製造業"\`, \`"農業"\`, \`"ビルクリーニング"\`).
-   - **desiredArea** (希望勤務エリア): Giá trị chuẩn tiếng Nhật (vd: \`"関東エリア"\`, \`"関西エリア"\`, \`"東海エリア"\` hoặc các tỉnh cụ thể nối bằng \`"・"\` như \`"東京都・神奈川県・埼玉県"\`).
-   - **progressStatus** (進捗ステータス): Mặc định \`"新規相談"\` nếu mới nhắn tin lần đầu; hoặc phản ánh đúng bước hiện tại (\`"面談調整中"\`, \`"面談済み"\`, \`"1次面接予定"\`, \`"内定"\`...).
-   - **visaStatus** & **visaExpiry** (在留資格 / 在留期限): Visa hiện tại (vd: \`"留学"\`, \`"特定技能1号"\`, \`"技能実習"\`, \`"家族滞在"\`...) và hạn chuẩn \`YYYY-MM-DD\` (nếu kiểu VN "09/04/2027" -> "2027-04-09", không có thì "").
-   - **passedExam** (合格済み試験・資格): Chứng chỉ đã đỗ (vd: \`"特定技能評価試験合格"\`, \`"JLPT N4"\`...).
-   - **proposedCompany** (提案先企業): "" nếu chưa có.
-   - **mendanDate** & **interviewDate** (面談日 / 企業面接日時): Định dạng \`"YYYY-MM-DD HH:mm"\` (hoặc \`"YYYY-MM-DD"\` nếu không có giờ) khi đã chốt lịch; "" nếu chưa chốt.
-   - **phone** (電話番号 / LINE): SĐT hoặc ID LINE nếu có, "" nếu chưa có.
-   - **startDate** (入社可能時期): Thời điểm có thể vào làm (vd: \`"2027年4月以降（sau tốt nghiệp tháng 3/2027）"\`, \`"即日可能"\`...).
-   - **japanExperience** (Kinh nghiệm & Bằng cấp chi tiết): Tóm tắt ngắn gọn bằng tiếng Việt kinh nghiệm làm việc tại Nhật ("Chưa có kinh nghiệm" nếu chưa có), bằng cấp, lịch dự thi JLPT sắp tới.
-   - **salaryExpectation** (Lương kỳ vọng / Mốc đàm phán): Ngắn gọn, giữ nguyên số liệu (vd: "~16 man sau trừ").
-   - **conversionGoal** (Nhu cầu & Mục tiêu chuyển đổi): Tóm tắt bằng tiếng Việt ngắn gọn, rõ ràng nguyện vọng chuyển visa và điều kiện tìm việc.
-   - **negotiationLog**: Lưu nguyên văn đầy đủ nội dung trao đổi quan trọng, số liệu, ngày giờ (không cắt bớt mất ý).`;
+   - **ỨNG VIÊN** là người hỏi tìm việc, hỏi lương/ca làm/điều kiện đơn tuyển dụng, gửi ảnh bài đăng, chia sẻ visa, hạn thẻ, tiếng Nhật, kinh nghiệm.
+   - **NGƯỜI TƯ VẤN / NHÂN VIÊN** là người chào hỏi tư vấn, giới thiệu công ty, hẹn lịch Mendan. Tuyệt đối không lấy tên/SĐT của nhân viên tư vấn gán cho ứng viên.
+3. QUY TẮC CHI TIẾT TỪNG TRƯỜNG:
+   - **fullName** (氏名 / Họ tên khai sinh): CHỈ điền nếu trong ảnh có giấy tờ tùy thân (Thẻ ngoại kiều / Zairyu Card, Sơ yếu lý lịch / CV) ghi rõ họ tên khai sinh hoặc ứng viên tự khai rõ họ tên thật. **Nếu chỉ là ảnh chụp đoạn chat Messenger, BẮT BUỘC để trống \`""\`**.
+   - **fbName** (FBアカウント名 / Tên nick FB): Lấy chính xác tên hiển thị ở thanh tiêu đề trên cùng của khung chat Messenger (ví dụ: \`"Dương Như"\`, \`"Nguyễn Lyly"\`).
+   - **nationality** (国籍): Tự nhận diện quốc tịch theo tên người nhắn, ngôn ngữ chat hoặc thông tin trên thẻ ngoại kiều và chuẩn hóa về tiếng Nhật: \`ベトナム\`, \`インドネシア\`, \`ミャンマー\`, \`ネパール\`, \`フィリピン\`, \`カンボジア\`, \`中国\`...
+   - **japaneseLevel** (日本語レベル): Chỉ điền trình độ thực tế của ứng viên (\`N1\`, \`N2\`, \`N3\`, \`N4\`, \`N5\`, \`JFT\`, \`初級\`, \`日常会話\`) nếu ứng viên tự khai (vd: "em có N4"). **QUAN TRỌNG**: Nếu \`N3\` / \`N4\` chỉ xuất hiện trong ảnh bài đăng tuyển dụng / tin tuyển dụng mà ứng viên đang hỏi thăm (vd: yêu cầu đơn là N3/N4) chứ chưa rõ trình độ của ứng viên, BẮT BUỘC giữ nguyên là \`"要確認"\`. Nếu nói "có N4 và sắp thi N3" -> chỉ điền \`"N4"\`, ghi chú "Sắp tới thi N3" vào \`japanExperience\`.
+   - **desiredField** (希望分野): Tự nhận diện ngành nghề chuẩn tiếng Nhật từ nội dung chat hoặc ảnh bài đăng tuyển dụng ứng viên gửi kèm (ví dụ: \`外食業\`, \`介護\`, \`飲食料品製造業\`, \`ビルクリーニング\`, \`宿泊\`, \`自動車運送業\`, \`建設\`, \`自動車整備\`, \`農業\`, \`素形材・産業機械・電気電子情報関連製造業\`, \`コンビニ・小売（アルバイト）\`).
+   - **desiredArea** (希望勤務エリア): Tự nhận diện khu vực làm việc chuẩn tiếng Nhật từ lời nhắn hoặc bài đăng ứng viên hỏi (ví dụ: thấy \`都内\` -> điền \`東京都\`; thấy \`関東\` -> điền \`関東エリア\`; thấy \`大阪\` -> điền \`大阪府\`; nhiều tỉnh nối bằng \`・\`).
+   - **visaType** & **visaExpiry** (在留資格 / 在留期限): Trích xuất loại visa (\`特定技能1号\`, \`留学\`, \`技能実習\`, \`家族滞在\`, \`技術・人文知識・国際業務\`...) và hạn thẻ \`YYYY-MM-DD\` nếu có (chú ý giải mã "dhs" -> \`留学（Du học sinh）\`).
+   - **certifications** (合格済み試験・資格): Trích xuất bằng tay nghề Tokutei, JFT, bằng lái xe, sơ cấp cứu Kaigo... nếu có; không có thì \`""\`.
+   - **goal** (Nhu cầu & Mục tiêu chuyển đổi): Tóm tắt ngắn gọn bằng tiếng Việt mục đích của ứng viên (bao gồm cả hình thức làm việc như Baito / Làm thêm hay Tokutei, mức lương/điều kiện của đơn mà ứng viên đang hỏi).
+   - **rawLog** (Nhật ký & Tình trạng trao đổi nguyên văn): **BẮT BUỘC** trích xuất TOÀN BỘ chữ có trong ảnh (bao gồm CẢ nội dung văn bản trong ảnh bài đăng tuyển dụng mà ứng viên gửi kèm lẫn toàn bộ tin nhắn hội thoại kèm mốc giờ), giữ nguyên từng dòng không cắt bớt.
+4. CÁC TRƯỜNG BỔ SUNG (điền nếu có trong ảnh/chat, không có thì \`""\`):
+   - \`fbProfileUrl\`, \`channel\` (\`"personal"\` mặc định, \`"company"\` nếu fanpage công ty, \`"school"\` nếu trường Nhật ngữ), \`age\`, \`birthDate\` (\`YYYY-MM-DD\`), \`phone\`, \`email\`, \`address\`, \`startDate\` (năm hiện tại 2026 -> "tháng X năm sau" là 2027), \`graduationDate\`, \`japanExperience\`, \`salaryExpectation\`, \`progressStatus\` (mặc định \`"新規相談"\`), \`proposedCompany\`, \`mendanDate\`, \`interviewDate\`.`;
 
 async function startServer() {
   const app = express();
@@ -654,6 +641,7 @@ async function startServer() {
           responseSchema: {
             type: Type.OBJECT,
             properties: {
+              fullName: { type: Type.STRING },
               name: { type: Type.STRING },
               fbName: { type: Type.STRING },
               fbProfileUrl: { type: Type.STRING },
@@ -662,15 +650,21 @@ async function startServer() {
               gender: { type: Type.STRING },
               birthDate: { type: Type.STRING },
               age: { type: Type.STRING },
+              japaneseLevel: { type: Type.STRING },
               jlpt: { type: Type.STRING },
+              visaType: { type: Type.STRING },
               visaStatus: { type: Type.STRING },
               visaExpiry: { type: Type.STRING },
+              desiredField: { type: Type.STRING },
               desiredIndustry: { type: Type.STRING },
               desiredArea: { type: Type.STRING },
+              goal: { type: Type.STRING },
               conversionGoal: { type: Type.STRING },
+              certifications: { type: Type.STRING },
               passedExam: { type: Type.STRING },
               japanExperience: { type: Type.STRING },
               salaryExpectation: { type: Type.STRING },
+              rawLog: { type: Type.STRING },
               negotiationLog: { type: Type.STRING },
               startDate: { type: Type.STRING },
               graduationDate: { type: Type.STRING },
@@ -686,14 +680,41 @@ async function startServer() {
         },
       });
 
-      const candidate = safeParseGeminiJson<Record<string, unknown>>(response.text, {});
-      if (
-        typeof candidate.fbProfileUrl === 'string' &&
-        candidate.fbProfileUrl &&
-        !candidate.fbUrl
-      ) {
-        candidate.fbUrl = candidate.fbProfileUrl;
-      }
+      const raw = safeParseGeminiJson<Record<string, unknown>>(response.text, {});
+      const pickStr = (...vals: unknown[]) => {
+        for (const v of vals) {
+          if (typeof v === 'string' && v.trim()) return v.trim();
+        }
+        return '';
+      };
+
+      const resolvedArea = pickStr(raw.desiredArea)
+        .replace(/都内/g, '東京都')
+        .replace(/^関東$/g, '関東エリア');
+
+      const candidate: Record<string, unknown> = {
+        ...raw,
+        name: pickStr(raw.fullName, raw.name),
+        fullName: pickStr(raw.fullName, raw.name),
+        fbName: pickStr(raw.fbName),
+        fbProfileUrl: pickStr(raw.fbProfileUrl, raw.fbUrl),
+        fbUrl: pickStr(raw.fbProfileUrl, raw.fbUrl),
+        nationality: pickStr(raw.nationality),
+        jlpt: pickStr(raw.japaneseLevel, raw.jlpt) || '要確認',
+        japaneseLevel: pickStr(raw.japaneseLevel, raw.jlpt) || '要確認',
+        desiredIndustry: pickStr(raw.desiredField, raw.desiredIndustry),
+        desiredField: pickStr(raw.desiredField, raw.desiredIndustry),
+        desiredArea: resolvedArea,
+        visaStatus: pickStr(raw.visaType, raw.visaStatus),
+        visaType: pickStr(raw.visaType, raw.visaStatus),
+        visaExpiry: pickStr(raw.visaExpiry),
+        passedExam: pickStr(raw.certifications, raw.passedExam),
+        certifications: pickStr(raw.certifications, raw.passedExam),
+        conversionGoal: pickStr(raw.goal, raw.conversionGoal),
+        goal: pickStr(raw.goal, raw.conversionGoal),
+        negotiationLog: pickStr(raw.rawLog, raw.negotiationLog),
+        rawLog: pickStr(raw.rawLog, raw.negotiationLog),
+      };
       res.json({ candidate });
     } catch (err) {
       const code = (err as { code?: string })?.code;

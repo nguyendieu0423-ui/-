@@ -42,35 +42,58 @@ export const compressImageFileToBase64 = async (
 
     const width = img.naturalWidth || img.width || 1000;
     const height = img.naturalHeight || img.height || 1000;
-    const scale = Math.min(1, maxDimension / Math.max(width, height));
-    const targetW = Math.max(1, Math.round(width * scale));
-    const targetH = Math.max(1, Math.round(height * scale));
+    const MAX_BYTES = 1.5 * 1024 * 1024;
+    const attempts: Array<{ maxDim: number; q: number }> = [
+      { maxDim: maxDimension, q: quality },
+      { maxDim: Math.min(maxDimension, 1280), q: 0.72 },
+      { maxDim: 1024, q: 0.65 },
+    ];
 
-    const canvas = document.createElement('canvas');
-    canvas.width = targetW;
-    canvas.height = targetH;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      const base64Data = await fileToBase64Raw(file);
-      return {
-        mimeType: rawMime,
-        base64Data,
-        dataUrl: `data:${rawMime};base64,${base64Data}`,
-      };
+    for (let i = 0; i < attempts.length; i++) {
+      const { maxDim, q } = attempts[i];
+      const scale = Math.min(1, maxDim / Math.max(width, height));
+      const targetW = Math.max(1, Math.round(width * scale));
+      const targetH = Math.max(1, Math.round(height * scale));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        const base64Data = await fileToBase64Raw(file);
+        return {
+          mimeType: rawMime,
+          base64Data,
+          dataUrl: `data:${rawMime};base64,${base64Data}`,
+        };
+      }
+
+      // Fill white background for transparent PNG screenshots so OCR remains crisp in JPEG
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, targetW, targetH);
+      ctx.drawImage(img, 0, 0, targetW, targetH);
+
+      const dataUrl = canvas.toDataURL('image/jpeg', q);
+      const commaIdx = dataUrl.indexOf(',');
+      const base64Data = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+      const estimatedBytes = Math.ceil((base64Data.length * 3) / 4);
+      canvas.width = 0;
+      canvas.height = 0;
+
+      if (estimatedBytes <= MAX_BYTES || i === attempts.length - 1) {
+        return {
+          mimeType: 'image/jpeg',
+          base64Data,
+          dataUrl,
+        };
+      }
     }
 
-    // Fill white background for transparent PNG screenshots so OCR remains crisp in JPEG
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, targetW, targetH);
-    ctx.drawImage(img, 0, 0, targetW, targetH);
-
-    const dataUrl = canvas.toDataURL('image/jpeg', quality);
-    const commaIdx = dataUrl.indexOf(',');
-    const base64Data = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+    const fallbackBase64 = await fileToBase64Raw(file);
     return {
-      mimeType: 'image/jpeg',
-      base64Data,
-      dataUrl,
+      mimeType: rawMime,
+      base64Data: fallbackBase64,
+      dataUrl: `data:${rawMime};base64,${fallbackBase64}`,
     };
   } finally {
     URL.revokeObjectURL(objectUrl);

@@ -393,10 +393,10 @@ interface PrefecturePattern {
 
 const PREFECTURE_PATTERNS: PrefecturePattern[] = [
   {
-    rx: /\btokyo\b|東京都|(?:^|[^京都])東京|23区|新宿区|渋谷区|杉並区|立川市|足立区|八王子市|世田谷区|品川区|大田区|中野区|練馬区|板橋区|豊島区|港区|中央区|千代田区/i,
+    rx: /\btokyo\b|東京都|都内|(?:^|[^京都])東京|23区|新宿区|渋谷区|杉並区|立川市|足立区|八王子市|世田谷区|品川区|大田区|中野区|練馬区|板橋区|豊島区|港区|中央区|千代田区/i,
     label: '東京都（Tokyo）',
     shortLabel: '東京都',
-    keys: ['東京都', '東京', 'tokyo'],
+    keys: ['東京都', '東京', '都内', 'tokyo'],
   },
   {
     rx: /\bkyoto\b|京都府|(?:^|[^東])京都/i,
@@ -1967,6 +1967,26 @@ const normalizeExtractedDateYmd = (raw = ''): string => {
   return s;
 };
 
+export interface ServerCandidateExtractionResponse extends Partial<Candidate> {
+  fullName?: string;
+  japaneseLevel?: string;
+  desiredField?: string;
+  visaType?: string;
+  certifications?: string;
+  goal?: string;
+  rawLog?: string;
+  fbUrl?: string;
+}
+
+const normalizeCandidateJlptValue = (rawVal?: string): string => {
+  const s = String(rawVal || '').trim();
+  if (!s) return '';
+  if (/^JFT/i.test(s)) return 'JFT';
+  const nMatch = s.match(/^(N[1-5])$/i);
+  if (nMatch) return nMatch[1].toUpperCase();
+  return s;
+};
+
 export const extractCandidateViaServer = async (
   payload: {
     text?: string;
@@ -1986,19 +2006,50 @@ export const extractCandidateViaServer = async (
     headers,
     body: JSON.stringify(payload),
   });
-  const data = await response.json();
+  const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const err = new Error(data?.error || `HTTP ${response.status}`) as Error & { code?: string };
     err.code = data?.code;
     throw err;
   }
-  const rawCand = (data.candidate || {}) as Partial<Candidate> & { fbUrl?: string };
+  const rawCand = (data.candidate || {}) as ServerCandidateExtractionResponse;
+  const rawArea = String(rawCand.desiredArea || '')
+    .replace(/都内/g, '東京都')
+    .replace(/^関東$/g, '関東エリア')
+    .trim();
+
   return {
     ...rawCand,
-    fbProfileUrl: rawCand.fbProfileUrl || rawCand.fbUrl || '',
+    name: String(rawCand.fullName || rawCand.name || '').trim(),
+    fbName: String(rawCand.fbName || '').trim(),
+    fbProfileUrl: String(rawCand.fbProfileUrl || rawCand.fbUrl || '').trim(),
+    nationality: String(rawCand.nationality || '').trim(),
+    jlpt: normalizeCandidateJlptValue(rawCand.japaneseLevel || rawCand.jlpt) || '要確認',
+    desiredIndustry: String(rawCand.desiredField || rawCand.desiredIndustry || '').trim(),
+    desiredArea: rawArea,
+    visaStatus: String(rawCand.visaType || rawCand.visaStatus || '').trim(),
     visaExpiry: rawCand.visaExpiry ? normalizeExtractedDateYmd(rawCand.visaExpiry) : '',
     birthDate: rawCand.birthDate ? normalizeExtractedDateYmd(rawCand.birthDate) : '',
+    passedExam: String(rawCand.certifications || rawCand.passedExam || '').trim(),
+    conversionGoal: String(rawCand.goal || rawCand.conversionGoal || '').trim(),
+    negotiationLog: String(rawCand.rawLog || rawCand.negotiationLog || '').trim(),
   };
+};
+
+export const recognizeCandidateImageWithTesseract = async (
+  imageSource: string | Blob,
+  onProgress?: (progressText: string) => void
+): Promise<string> => {
+  const Tesseract = await import('tesseract.js');
+  onProgress?.('Đang khởi tạo bộ đọc OCR đa ngữ (vie+jpn+eng)...');
+  const result = await Tesseract.recognize(imageSource, 'vie+jpn+eng', {
+    logger: (m: { status?: string; progress?: number }) => {
+      if (m && typeof m.progress === 'number' && m.status === 'recognizing text') {
+        onProgress?.(`Đang nhận diện chữ trong ảnh (${Math.round(m.progress * 100)}%)...`);
+      }
+    },
+  });
+  return String(result?.data?.text || '').trim();
 };
 
 // ============================================================================
@@ -2041,7 +2092,7 @@ const extractCandidateLinesOnly = (rawText: string): {
       const label = turnM[1].trim();
       const body = turnM[2].trim();
       const isFieldLabel =
-        /^(?:họ\s*(?:và\s*)?tên|tên\s*(?:khai\s*sinh|fb|facebook)|fb|facebook|sđt|sdt|điện\s*thoại|tel|phone|email|mail|visa|hạn\s*(?:thẻ|visa)|trình\s*độ|jlpt|tiếng\s*nhật|khu\s*vực|tỉnh|ngành|kinh\s*nghiệm|chứng\s*chỉ|lương|mục\s*tiêu|nhu\s*cầu|ghi\s*chú|ngày\s*sinh|tuổi|quốc\s*tịch|địa\s*chỉ|link|氏名|名前|在留資格|在留期限|希望|エリア|給料|経験|資格)$/i.test(
+        /^(?:họ\s*(?:và\s*)?tên|tên\s*(?:khai\s*sinh|fb|facebook)|fb|facebook|sđt|sdt|điện\s*thoại|tel|phone|email|mail|visa|hạn\s*(?:thẻ|visa)|trình\s*độ|jlpt|tiếng\s*nhật|khu\s*vực|tỉnh|ngành|kinh\s*nghiệm|chứng\s*chỉ|lương|mục\s*tiêu|nhu\s*cầu|ghi\s*chú|ngày\s*sinh|tuổi|quốc\s*tịch|địa\s*chỉ|link|địa\s*điểm|yêu\s*cầu|lương\s*cơ\s*bản|氏名|名前|本名|国籍|生年月日|性別|住所|在留資格|在留期限|在留期間(?:\s*[\(（]満了日[\)）])?|希望.*|エリア|給料|給与|月給|時給|経験|資格|合格.*|免許|備考|メモ|勤務.*|応募.*|連絡先)$/i.test(
           label
         );
       if (!isFieldLabel) {
@@ -2234,12 +2285,25 @@ export const parseChatIntoUpdates = (chatText = '') => {
 
   // 2b. Default Nationality & Channel & Initial Progress Status
   const hasVietnamese =
-    /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]|\b(?:dhs|em|mình|anh|chị|tìm|chuyển|visa|tốt nghiệp|năm sau|kinh nghiệm)\b/i.test(
+    /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]|\b(?:dhs|em|mình|anh|chị|tìm|chuyển|visa|tốt nghiệp|năm sau|kinh nghiệm|đơn|việc|lương|baito|tokutei|nguyen|duong|tran|pham|hoang)\b/i.test(
       text
     );
-  if (hasVietnamese) {
+  if (/viet\s*nam|ベトナム/i.test(text) || hasVietnamese) {
     updates.nationality = 'ベトナム';
+  } else if (/indonesia|インドネシア/i.test(text)) {
+    updates.nationality = 'インドネシア';
+  } else if (/myanmar|ミャンマー|miến\s*điện/i.test(text)) {
+    updates.nationality = 'ミャンマー';
+  } else if (/nepal|ネパール/i.test(text)) {
+    updates.nationality = 'ネパール';
+  } else if (/philippines|フィリピン/i.test(text)) {
+    updates.nationality = 'フィリピン';
+  } else if (/cambodia|カンボジア|campuchia/i.test(text)) {
+    updates.nationality = 'カンボジア';
+  } else if (/china|中国|trung\s*quốc/i.test(text)) {
+    updates.nationality = '中国';
   }
+
   if (/fanpage|page\s*công\s*ty|fb\s*công\s*ty|公式/i.test(text)) {
     updates.channel = 'company';
   } else {
@@ -2247,31 +2311,37 @@ export const parseChatIntoUpdates = (chatText = '') => {
   }
   updates.progressStatus = '新規相談';
 
-  // 3. Language (JLPT / JFT / 初級) — NEVER promote upcoming target exam (e.g. "sắp tới thi N3") as current level!
+  // 3. Language (JLPT / JFT / 初級) — NEVER promote upcoming target exam OR job-post requirement (e.g. N3/N4 in job card) as candidate level!
   const upcomingExamM = candText.match(
     /(?:sắp\s*(?:tới)?|chuẩn\s*bị|đang\s*ôn|dự\s*định|tháng\s*\d{1,2}(?:\/\d{4})?)\s*(?:sẽ\s*)?thi\s*(?:jlpt\s*)?(N[1-5])/i
   );
   const upcomingExamNote = upcomingExamM
     ? `Sắp tới thi JLPT ${upcomingExamM[1].toUpperCase()}`
     : '';
-  const candTextCurrentJlpt = candText.replace(
+
+  const nonJobReqLines = candidateLines
+    .filter(
+      (l) =>
+        !/(?:募集|応募条件|求める|資格要件|対象者|時給|月給|基本給|年収|仕事内容|勤務時間|シフト|N[1-5]\s*[〜～\/・]\s*N[1-5]|N[1-5]\s*(?:以上|程度|相当)|yêu\s*cầu\s*N[1-5]|tuyển\s*N[1-5])/i.test(
+          l
+        )
+    )
+    .join('\n');
+
+  const candTextCurrentJlpt = nonJobReqLines.replace(
     /(?:sắp\s*(?:tới)?|chuẩn\s*bị|đang\s*ôn|dự\s*định|tháng\s*\d{1,2}(?:\/\d{4})?)\s*(?:sẽ\s*)?thi\s*(?:jlpt\s*)?N[1-5]/gi,
     ''
   );
-  const jlptM =
-    candTextCurrentJlpt.match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i) ||
-    text
-      .replace(
-        /(?:sắp\s*(?:tới)?|chuẩn\s*bị|đang\s*ôn|dự\s*định|tháng\s*\d{1,2}(?:\/\d{4})?)\s*(?:sẽ\s*)?thi\s*(?:jlpt\s*)?N[1-5]/gi,
-        ''
-      )
-      .match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i);
+  const jlptM = candTextCurrentJlpt.match(/\b(N[1-5]|JFT(?:\s*Basic)?)\b/i);
   if (jlptM) {
-    updates.jlpt = jlptM[1].toUpperCase().replace(/\s+/g, ' ');
-  } else if (/初級|sơ\s*cấp/i.test(candText)) {
+    const rawLevel = jlptM[1].toUpperCase().replace(/\s+/g, ' ');
+    updates.jlpt = rawLevel.startsWith('JFT') ? 'JFT' : rawLevel;
+  } else if (/初級|sơ\s*cấp/i.test(nonJobReqLines)) {
     updates.jlpt = '初級';
-  } else if (/giao tiếp cơ bản|日常会話/i.test(candText)) {
+  } else if (/giao tiếp cơ bản|日常会話/i.test(nonJobReqLines)) {
     updates.jlpt = '日常会話';
+  } else {
+    updates.jlpt = '要確認';
   }
 
   // 4. Phone / LINE & Email (prefer candidate turns so consultant signature isn't grabbed)
@@ -2302,15 +2372,23 @@ export const parseChatIntoUpdates = (chatText = '') => {
   const ageM = candText.match(/(\d{2})\s*(?:tuổi|歳)/i);
   if (ageM) updates.age = ageM[1];
 
-  // 6. Visa Expiry (careful DD/MM/YYYY vs YYYY/MM/DD)
+  // 6. Visa Expiry (careful DD/MM/YYYY vs YYYY/MM/DD & Zairyu Card 在留期間(満了日))
   const expPrefix =
-    '(?:在留期限|ビザ期限|hạn\\s*(?:thẻ\\s*ngoại\\s*kiều|thẻ|visa|ngoại\\s*kiều)?|thẻ\\s*(?:ngoại\\s*kiều\\s*)?(?:hết\\s*hạn|đến)|hết\\s*hạn)(?:\\s*ngày)?';
-  const expYmdM = candText.match(
-    new RegExp(`${expPrefix}[：:\\s]*(\\d{4}[年\\/\\-]\\d{1,2}[月\\/\\-]\\d{1,2}日?)`, 'i')
-  );
-  const expDmyM = candText.match(
-    new RegExp(`${expPrefix}[：:\\s]*(\\d{1,2}[\\/\\-\\.]\\d{1,2}[\\/\\-\\.]\\d{4})`, 'i')
-  );
+    '(?:在留期限|在留期間(?:\\s*[\\(（]満了日[\\)）])?|ビザ期限|hạn\\s*(?:thẻ\\s*ngoại\\s*kiều|thẻ|visa|ngoại\\s*kiều)?|thẻ\\s*(?:ngoại\\s*kiều\\s*)?(?:hết\\s*hạn|đến)|hết\\s*hạn)(?:\\s*ngày)?';
+  const expYmdM =
+    candText.match(
+      new RegExp(`${expPrefix}[：:\\s]*(\\d{4}[年\\/\\-]\\d{1,2}[月\\/\\-]\\d{1,2}日?)`, 'i')
+    ) ||
+    text.match(
+      new RegExp(`${expPrefix}[：:\\s]*(\\d{4}[年\\/\\-]\\d{1,2}[月\\/\\-]\\d{1,2}日?)`, 'i')
+    );
+  const expDmyM =
+    candText.match(
+      new RegExp(`${expPrefix}[：:\\s]*(\\d{1,2}[\\/\\-\\.]\\d{1,2}[\\/\\-\\.]\\d{4})`, 'i')
+    ) ||
+    text.match(
+      new RegExp(`${expPrefix}[：:\\s]*(\\d{1,2}[\\/\\-\\.]\\d{1,2}[\\/\\-\\.]\\d{4})`, 'i')
+    );
   if (expYmdM) {
     updates.visaExpiry = normalizeExtractedDateYmd(expYmdM[1]);
   } else if (expDmyM) {
@@ -2333,7 +2411,13 @@ export const parseChatIntoUpdates = (chatText = '') => {
     const remPeriodM = candText.match(
       /(?:còn|tokutei\s*(?:còn)?|thời\s*hạn\s*(?:còn)?|残り)?\s*(\d+(?:[.,]\d+)?)\s*(?:n\b|năm|年)/i
     );
-    if (remPeriodM && /(?:tokutei|特定|còn|残り|visa|ビザ|\d+[.,]\d+\s*n\b)/i.test(candText)) {
+    const remYearsNum = remPeriodM ? Number(remPeriodM[1].replace(',', '.')) : 0;
+    if (
+      remPeriodM &&
+      remYearsNum > 0 &&
+      remYearsNum <= 10 &&
+      /(?:tokutei|特定|còn|残り|visa|ビザ|\d+[.,]\d+\s*n\b)/i.test(candText)
+    ) {
       const yrs = remPeriodM[1].replace(',', '.');
       updates.visaStatus = `特定技能1号（残り約${yrs}年）`;
     } else if (/tokutei|特定技能/i.test(candText)) {
@@ -2375,12 +2459,18 @@ export const parseChatIntoUpdates = (chatText = '') => {
   if (/shoninsha|初任者/i.test(candText)) examList.push('介護職員初任者研修修了');
   if (/jitsumusha|実務者/i.test(candText)) examList.push('介護福祉士実務者研修修了');
   if (/kaigo fukushishi|介護福祉士/i.test(candText)) examList.push('介護福祉士');
-  if (/gino|技能評価試験|特定技能試験|chứng\s*chỉ\s*tokutei|đỗ\s*tay\s*nghề|senmon/i.test(candText)) {
+  if (
+    /gino|技能評価試験|技能測定試験|特定技能[12]?号?(?:技能)?(?:評価|測定)?試験|chứng\s*chỉ\s*tokutei|đỗ\s*tay\s*nghề|senmon/i.test(
+      candText
+    )
+  ) {
     examList.push('特定技能評価試験合格');
   }
   if (/bằng\s*lái|gplx|免許/i.test(candText)) examList.push('運転免許');
   if (updates.jlpt && /^N[1-5]$/.test(updates.jlpt)) {
     examList.push(`JLPT ${updates.jlpt}`);
+  } else if (updates.jlpt === 'JFT') {
+    examList.push('JFT-Basic');
   }
   if (examList.length > 0) {
     updates.passedExam = examList.join('・');

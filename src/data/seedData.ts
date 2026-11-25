@@ -84,7 +84,7 @@ export const PROGRESS_STATUSES = [
   '辞退・終了',
 ];
 
-export const JLPT_LEVELS = ['N1', 'N2', 'N3', 'N4', 'N5', '初級', '日常会話', '不問', '要確認'];
+export const JLPT_LEVELS = ['N1', 'N2', 'N3', 'N4', 'N5', 'JFT', '初級', '日常会話', '不問', '要確認'];
 
 export const INITIAL_CANDIDATES: Candidate[] = [
   {
