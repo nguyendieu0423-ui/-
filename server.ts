@@ -22,6 +22,7 @@ import {
   type MessengerExtractedProfile,
 } from './src/db/crmRepository.ts';
 import type { Candidate, ResignationRecord } from './src/types/crm.ts';
+import { extractKyujinSalaryInfo } from './src/utils/salaryParser.ts';
 
 dotenv.config();
 
@@ -106,10 +107,10 @@ const KYUJIN_EXTRACTION_PROMPT = `あなたは日本の人材紹介会社（特�
 6. facilityType: 介護の場合の施設形態（デイサービス、グループホーム、有料老人ホーム、特別養護老人ホーム、老健、訪問介護）。
 7. area: 勤務地を「都道府県＋区・市」レベルで正確に記載。
 8. shiftTime: シフト・勤務時間（例: 早番・日勤・夜勤、または 17:00〜22:30）。
-9. salary: 総支給 / 基本給 / 月給（Baitoの場合は「時給 1,300円〜」）。
+9. salary: 給与・月給・時給・基本給・想定月収・賃金・報酬・給与形態・総支給から必ず抽出（例: 220,000円, 22万円, 22.5万円, 20万～25万円, 220k, 月給215,000円（夜勤手当含む））。時給の場合は「時給 1,150円〜（交通費支給）」のように記載。金額の記載がある場合は絶対に「給与要確認」にしないこと。
 10. nightShiftAllowance: 夜勤手当（例: 6,000円/回、なし）。
 11. estimatedNetSalary: 手取り目安・控除後の記載があればそのまま記載（例: 約185,000円）。
-12. hourlyWage: アルバイト・パートの場合の時給（例: 1,250円 / 22時以降1,563円）。
+12. hourlyWage: 時給（アルバイト・パート、または10,000円未満の時給表記がある場合: 1,250円 / 1,150円〜（交通費支給） / 1,200円～1,500円）。
 13. commuteAllowance: 交通費・通勤手当（例: 全額支給 / 月上限20,000円）。
 14. shiftsPerWeek: 週の勤務日数・時間（例: 週3〜5日 / 週28時間以内）。
 15. minJlpt: N1, N2, N3, N4, N5, 日常会話, 不問, 要確認。
@@ -704,7 +705,7 @@ async function startServer() {
 
   app.post('/api/gemini/extract-kyujin', optionalAuth, async (req, res) => {
     try {
-      const { mimeType, base64Data, rawText, fileName } = req.body ?? {};
+      const { mimeType, base64Data, rawText, fileName, images } = req.body ?? {};
       const parts: Array<
         { text: string } | { inlineData: { mimeType: string; data: string } }
       > = [{ text: KYUJIN_EXTRACTION_PROMPT }];
@@ -712,6 +713,30 @@ async function startServer() {
       if (typeof rawText === 'string' && rawText.trim()) {
         parts.push({
           text: `Tên nguồn/file: ${typeof fileName === 'string' ? fileName : 'Văn bản thô'}\n\nNội dung tuyển dụng:\n${rawText}`,
+        });
+      } else if (Array.isArray(images) && images.length > 0) {
+        const validImages = images.filter(
+          (img): img is { mimeType: string; base64Data: string } =>
+            Boolean(
+              img &&
+                typeof img === 'object' &&
+                typeof (img as { mimeType?: unknown }).mimeType === 'string' &&
+                ALLOWED_MIME_TYPES.has((img as { mimeType: string }).mimeType) &&
+                typeof (img as { base64Data?: unknown }).base64Data === 'string' &&
+                (img as { base64Data: string }).base64Data.length > 0
+            )
+        );
+        if (validImages.length === 0) {
+          res.status(400).json({ error: 'Không có trang ảnh hợp lệ để nhận diện OCR.' });
+          return;
+        }
+        parts.push({
+          text: `Tên nguồn/file: ${typeof fileName === 'string' ? fileName : 'PDF_Scan'} (${validImages.length} trang ảnh scan). Hãy đọc toàn bộ chữ tiếng Nhật, bảng lương (給与/月給/時給/万), địa điểm và điều kiện tuyển dụng trên tất cả các trang ảnh này.`,
+        });
+        validImages.slice(0, 12).forEach((img) => {
+          parts.push({
+            inlineData: { mimeType: img.mimeType, data: img.base64Data },
+          });
         });
       } else {
         if (typeof mimeType !== 'string' || !ALLOWED_MIME_TYPES.has(mimeType)) {
@@ -775,7 +800,50 @@ async function startServer() {
       });
 
       const parsed = safeParseGeminiJson<unknown>(response.text, []);
-      res.json({ items: Array.isArray(parsed) ? parsed : [parsed] });
+      const rawItems = (Array.isArray(parsed) ? parsed : [parsed]).filter(
+        (x): x is Record<string, unknown> => Boolean(x && typeof x === 'object')
+      );
+      const rawTextFallbackSalary =
+        typeof rawText === 'string' && rawText.trim() && rawItems.length <= 1
+          ? extractKyujinSalaryInfo(rawText)
+          : null;
+
+      const normalizedItems = rawItems.map((item) => {
+        const aiSal = String(item.salary || '').trim();
+        const aiHourly = String(item.hourlyWage || '').trim();
+        const combinedHint = [
+          aiSal && !/要確認/.test(aiSal) ? aiSal : '',
+          aiHourly && !/要確認/.test(aiHourly) ? `時給 ${aiHourly}` : '',
+          String(item.jobDescription || ''),
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        let salaryParsed = extractKyujinSalaryInfo(combinedHint, {
+          assumeBareNumberIsSalary: Boolean(aiSal && !/要確認/.test(aiSal)),
+        });
+
+        if (salaryParsed.salaryType === 'unknown' && rawTextFallbackSalary?.salaryType !== 'unknown' && rawTextFallbackSalary) {
+          salaryParsed = rawTextFallbackSalary;
+        }
+
+        const finalSalary =
+          salaryParsed.salaryType !== 'unknown'
+            ? salaryParsed.salary
+            : aiSal || (aiHourly ? `時給 ${aiHourly}` : '給与要確認');
+        const finalHourly =
+          salaryParsed.salaryType === 'hourly'
+            ? salaryParsed.hourlyWage
+            : aiHourly;
+
+        return {
+          ...item,
+          salary: finalSalary,
+          hourlyWage: finalHourly,
+        };
+      });
+
+      res.json({ items: normalizedItems });
     } catch (err) {
       const code = (err as { code?: string })?.code;
       const message = err instanceof Error ? err.message : 'Kyujin extraction failed';
@@ -1594,6 +1662,11 @@ async function startServer() {
         res.status(500).json({ error: msg });
       }
     }
+  );
+
+  app.use(
+    '/pdfjs-assets',
+    express.static(path.resolve(__dirname, 'node_modules/pdfjs-dist'))
   );
 
   if (process.env.NODE_ENV !== 'production') {

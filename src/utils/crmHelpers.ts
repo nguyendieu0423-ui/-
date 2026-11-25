@@ -13,6 +13,11 @@ import type {
   RirekishoDraft,
 } from '../types/crm';
 import { compressImageFileToBase64, fileToBase64Raw } from './imageCompression';
+import {
+  extractKyujinSalaryFromRows,
+  extractKyujinSalaryInfo,
+} from './salaryParser';
+import { extractPdfWithOcrFallback } from './pdfExtractor';
 
 export const copyTextSafely = async (text: string): Promise<boolean> => {
   const str = String(text || '');
@@ -1278,6 +1283,10 @@ export const normalizeKyujinItem = (
       experienceRequirement: expReq,
       experienceDetail: String(sl.experienceDetail || comp.experienceDetail || '').trim(),
       jobDescription: cleanDesc,
+      ...(sl.salaryManuallyEdited ? { salaryManuallyEdited: true } : {}),
+      ...(Array.isArray(sl.manualProtectedFields) && sl.manualProtectedFields.length > 0
+        ? { manualProtectedFields: sl.manualProtectedFields }
+        : {}),
     };
   });
 
@@ -1427,35 +1436,8 @@ const extractHousingFromRows = (
   return '⚠️ 要確認';
 };
 
-const extractSalaryFromRows = (rows: unknown[][] = []): string => {
-  for (let r = 0; r < rows.length; r++) {
-    const row = rows[r] || [];
-    for (let c = 0; c < row.length; c++) {
-      const cell = String(row[c] || '').trim();
-      if (/総支給/.test(cell)) {
-        for (let k = c + 1; k < Math.min(row.length, c + 5); k++) {
-          const val = String(row[k] || '').trim();
-          const m = val.match(/(\d{2,3}(?:,\d{3})+|\d{5,6})\s*円?/);
-          if (m) return `${Number(m[1].replace(/,/g, '')).toLocaleString()}円`;
-        }
-      }
-    }
-  }
-  for (let r = 0; r < rows.length; r++) {
-    const row = rows[r] || [];
-    for (let c = 0; c < row.length; c++) {
-      const cell = String(row[c] || '').trim();
-      if (/基本給|月給/.test(cell)) {
-        for (let k = c + 1; k < Math.min(row.length, c + 5); k++) {
-          const val = String(row[k] || '').trim();
-          const m = val.match(/(\d{2,3}(?:,\d{3})+|\d{5,6})\s*円?/);
-          if (m) return `${Number(m[1].replace(/,/g, '')).toLocaleString()}円`;
-        }
-      }
-    }
-  }
-  return '給与要確認';
-};
+const extractSalaryFromRows = (rows: unknown[][] = []): string =>
+  extractKyujinSalaryFromRows(rows).salary;
 
 const splitSheetRowsIntoKyujinBlocks = (rows: unknown[][] = []) => {
   const jobCodeRowIndices: number[] = [];
@@ -1508,19 +1490,19 @@ const parseExcelBlockToKyujin = (
         .map((v) => String(v || '').trim())
         .filter(Boolean);
 
-      if (!companyName && /^企業名$/.test(cell) && rightValues.length > 0) {
+      if (!companyName && /^(?:企業名|会社名|法人名|施設名|事業所名)$/.test(cell) && rightValues.length > 0) {
         companyName = rightValues[0].replace(/\s*代表者.*$/, '').trim();
       }
       if (!jobCode && /^案件番号$/.test(cell) && rightValues.length > 0) {
         jobCode = rightValues[0].trim();
       }
-      if (!workArea && /^勤務先$/.test(cell) && rightValues.length > 0) {
+      if (!workArea && /^(?:勤務先|勤務地|就業場所)$/.test(cell) && rightValues.length > 0) {
         workArea = rightValues.join(' ').trim();
       }
       if (!fallbackLocation && /^所在地$/.test(cell) && rightValues.length > 0) {
         fallbackLocation = rightValues.join(' ').trim();
       }
-      if (!jobDescription && /主な仕事内容|仕事内容/.test(cell) && rightValues.length > 0) {
+      if (!jobDescription && /主な仕事内容|仕事内容|業務内容/.test(cell) && rightValues.length > 0) {
         jobDescription = rightValues.join(' ').trim();
       }
       if (/賞与/.test(cell) && rightValues.length > 0) {
@@ -1530,7 +1512,7 @@ const parseExcelBlockToKyujin = (
   }
 
   const fullText = blockRows.map((r) => (r || []).join(' ')).join('\n');
-  if (!companyName && !jobCode && !workArea && !/求人票|特定技能/.test(fullText)) {
+  if (!companyName && !jobCode && !workArea && !/求人票|特定技能|給与|月給|時給|賃金/.test(fullText)) {
     return null;
   }
 
@@ -1552,9 +1534,16 @@ const parseExcelBlockToKyujin = (
   const employmentType = detectEmploymentTypeFromText(fullText, `${fileName} ${sheetName}`);
   const minJlpt = extractJlptLevel(blockRows, anchors, rowOffset);
   const housingSupport = extractHousingFromRows(blockRows, anchors, rowOffset);
-  const salary = extractSalaryFromRows(blockRows);
+  const salaryParsed = extractKyujinSalaryFromRows(blockRows);
+  const salary = salaryParsed.salary;
   const bonusNorm = normalizeBonusInfo('', '', `${bonusText} ${fullText}`);
-  const hourlyM = fullText.match(/時給\s*([0-9,]+\s*円[^\n]*)/);
+  const hourlyM = fullText.match(/時給[：:\s]*([0-9,]+\s*円[^\n]*)/);
+  const resolvedHourlyWage =
+    salaryParsed.hourlyWage || (hourlyM ? extractKyujinSalaryInfo(`時給 ${hourlyM[1]}`).hourlyWage || hourlyM[1].trim() : '');
+  const finalEmploymentType =
+    salaryParsed.salaryType === 'hourly' && !/tokutei|特定技能|正社員/i.test(fullText)
+      ? 'Baito / Làm thêm (アルバイト・パート)'
+      : employmentType;
   const netM = fullText.match(/(?:手取り|実収入|ước tính thực nhận)[：:\s]*([^\n]{3,30})/i);
   const nightM = fullText.match(/(?:夜勤手当)[：:\s]*([^\n]{2,30})/);
   const expReq = /経験者必須|経験あり必須|要経験/.test(fullText)
@@ -1567,19 +1556,19 @@ const parseExcelBlockToKyujin = (
     companyName: finalCompany,
     sector,
     industry,
-    employmentType,
+    employmentType: finalEmploymentType,
     recruitmentStatus: '募集中',
     slot: {
       slotId: `slot_xl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       sector,
       industry,
-      employmentType,
+      employmentType: finalEmploymentType,
       jobCode: jobCode || sheetName || cleanArea || '新規枠',
       area: cleanArea || '勤務地要確認',
       salary,
       nightShiftAllowance: nightM ? nightM[1].trim() : '',
       estimatedNetSalary: netM ? netM[1].trim() : '',
-      hourlyWage: hourlyM ? hourlyM[1].trim() : '',
+      hourlyWage: resolvedHourlyWage,
       bonus: bonusNorm.bonus,
       bonusDetail: bonusNorm.bonusDetail,
       minJlpt,
@@ -1714,18 +1703,23 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
   const blocks = rawText
     .split(/(?:\n\s*[-=]{4,}\s*\n|\n{3,}(?=(?:企業名|会社名|【|■|Đơn|Job)))/i)
     .map((b) => b.trim())
-    .filter((b) => b.length >= 20);
+    .filter((b) => b.length >= 8);
   const targetBlocks = blocks.length > 0 ? blocks : [rawText.trim()];
 
   return targetBlocks.map((block, idx) => {
     const compM = block.match(/(?:企業名|会社名|Công ty)[：:\s]*([^\n]+)/i);
-    const areaM = block.match(/(?:勤務地|エリア|Khu vực|Địa điểm)[：:\s]*([^\n]+)/i);
-    const salM = block.match(/(?:総支給|基本給|月給|Lương|時給)[：:\s]*([^\n]+)/i);
+    const areaM = block.match(/(?:勤務地|勤務先|エリア|Khu vực|Địa điểm)[：:\s]*([^\n]+)/i);
     const jlptM = block.match(/\b(N[1-5])\b/i);
-    const hourlyM = block.match(/時給\s*([0-9,]+\s*円[^\n]*)/);
+    const salaryInfo = extractKyujinSalaryInfo(block);
     const industry = detectIndustryFromText(block, sourceTitle);
     const sector = detectSectorFromIndustryOrText(industry, block);
-    const employmentType = detectEmploymentTypeFromText(block, sourceTitle);
+    let employmentType = detectEmploymentTypeFromText(block, sourceTitle);
+    if (
+      salaryInfo.salaryType === 'hourly' &&
+      !/tokutei|特定技能|正社員/i.test(block)
+    ) {
+      employmentType = 'Baito / Làm thêm (アルバイト・パート)';
+    }
     const inferredArea = areaM ? areaM[1].trim() : extractPreferredAreaFromChat(block) || 'Nhật Bản';
 
     return {
@@ -1735,8 +1729,8 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
       employmentType,
       jobCode: `JOB-${idx + 1}`,
       area: inferredArea,
-      salary: salM ? salM[1].trim() : hourlyM ? `時給 ${hourlyM[1].trim()}` : '給与要確認',
-      hourlyWage: hourlyM ? hourlyM[1].trim() : '',
+      salary: salaryInfo.salary,
+      hourlyWage: salaryInfo.hourlyWage,
       minJlpt: jlptM ? jlptM[1].toUpperCase() : '要確認',
       housingSupport: /自社寮/.test(block)
         ? '自社寮あり'
@@ -1758,7 +1752,8 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
 
 export const extractKyujinViaServer = async (
   file: File,
-  idToken?: string | null
+  idToken?: string | null,
+  onProgress?: (statusText: string) => void
 ) => {
   const lower = file.name.toLowerCase();
   const headers: Record<string, string> = {
@@ -1768,15 +1763,85 @@ export const extractKyujinViaServer = async (
     headers.Authorization = `Bearer ${idToken}`;
   }
 
+  const callKyujinApi = async (bodyPayload: Record<string, unknown>) => {
+    const response = await fetch('/api/gemini/extract-kyujin', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(bodyPayload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data?.error || `HTTP ${response.status}`);
+    }
+    return Array.isArray(data.items) ? data.items : [];
+  };
+
+  if (lower.endsWith('.pdf') || file.type === 'application/pdf') {
+    if (file.size > 30 * 1024 * 1024) {
+      throw new Error(`File PDF "${file.name}" vượt quá giới hạn 30MB.`);
+    }
+
+    const pdfResult = await extractPdfWithOcrFallback(file, onProgress);
+
+    if (pdfResult.mode === 'text') {
+      onProgress?.(`Đang phân tích nội dung tiếng Nhật (${pdfResult.numPages} trang)...`);
+      try {
+        const items = await callKyujinApi({
+          rawText: pdfResult.text,
+          fileName: file.name,
+        });
+        if (items.length > 0) return items;
+      } catch {
+        // Fallback to local Japanese Kyujin parser when Gemini key is absent/unavailable
+      }
+      return parseRawKyujinTextFallback(pdfResult.text, file.name);
+    }
+
+    // Scanned PDF -> OCR via Vision AI on rendered page images (same pipeline as dropped/pasted images)
+    const rendered = pdfResult.renderedImages;
+    if (rendered.length === 0) {
+      throw new Error(`Không thể dựng ảnh trang từ file PDF scan "${file.name}".`);
+    }
+
+    const batchSize = 4;
+    const allItems: Array<Record<string, string>> = [];
+    for (let i = 0; i < rendered.length; i += batchSize) {
+      const batch = rendered.slice(i, i + batchSize);
+      const startPage = batch[0].pageNumber;
+      const endPage = batch[batch.length - 1].pageNumber;
+      onProgress?.(
+        `Đang nhận diện OCR AI trang ${startPage}${endPage > startPage ? `–${endPage}` : ''}/${rendered.length}...`
+      );
+      const batchItems = await callKyujinApi({
+        images: batch.map((img) => ({
+          mimeType: img.mimeType,
+          base64Data: img.base64Data,
+        })),
+        fileName: file.name,
+      });
+      allItems.push(...batchItems);
+    }
+    return allItems;
+  }
+
   let payload: Record<string, unknown> = { fileName: file.name };
 
   if (lower.endsWith('.docx')) {
+    onProgress?.('Đang trích xuất văn bản Word (.docx)...');
     const rawText = await extractWordTextViaMammoth(file);
-    payload = { rawText, fileName: file.name };
+    try {
+      const items = await callKyujinApi({ rawText, fileName: file.name });
+      if (items.length > 0) return items;
+    } catch {
+      // Fallback to local parser for .docx when Gemini key is absent
+    }
+    return parseRawKyujinTextFallback(rawText, file.name);
   } else if (lower.endsWith('.txt') || lower.endsWith('.csv') || file.type.startsWith('text/')) {
+    onProgress?.('Đang đọc dữ liệu văn bản / CSV...');
     const rawText = await file.text();
     payload = { rawText, fileName: file.name };
   } else if (file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(lower)) {
+    onProgress?.('Đang nén & gửi ảnh qua OCR AI...');
     const compressed = await compressImageFileToBase64(file, 1600, 0.78);
     payload = {
       mimeType: compressed.mimeType,
@@ -1793,16 +1858,7 @@ export const extractKyujinViaServer = async (
     payload = { mimeType, base64Data, fileName: file.name };
   }
 
-  const response = await fetch('/api/gemini/extract-kyujin', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data?.error || `HTTP ${response.status}`);
-  }
-  return Array.isArray(data.items) ? data.items : [];
+  return callKyujinApi(payload);
 };
 
 export const extractKyujinRawTextViaServer = async (

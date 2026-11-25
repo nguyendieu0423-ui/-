@@ -117,6 +117,12 @@ import {
   normalizeAndAutoComputeResignationDates,
   normalizeResignationNationality,
 } from './utils/resignationHelpers';
+import {
+  extractKyujinSalaryInfo,
+  getKyujinSlotSalaryDisplayMeta,
+  isKyujinSalaryMissing,
+  normalizeManualKyujinSalaryInput,
+} from './utils/salaryParser';
 
 const MESSENGER_WEBHOOK_URL = 'https://fb-crm.ai.studio/api/webhooks/messenger';
 const FB_PAGE_LINK_STORAGE_KEY = 'tokutei_fb_page_link_v1';
@@ -243,11 +249,18 @@ export default function App() {
   const [kyujinSearch, setKyujinSearch] = useState('');
   const [kyujinStatusFilter, setKyujinStatusFilter] = useState<'all' | 'open' | 'closed'>('all');
   const [kyujinBonusOnly, setKyujinBonusOnly] = useState(false);
+  const [kyujinMissingSalaryOnly, setKyujinMissingSalaryOnly] = useState(false);
   const [kyujinSectorFilter, setKyujinSectorFilter] = useState('all');
   const [kyujinIndustryFilter, setKyujinIndustryFilter] = useState('all');
   const [kyujinEmploymentTypeFilter, setKyujinEmploymentTypeFilter] = useState('all');
   const [kyujinFacilityFilter, setKyujinFacilityFilter] = useState('all');
   const [selectedSlotIds, setSelectedSlotIds] = useState<string[]>([]);
+  const [editingKyujinSalary, setEditingKyujinSalary] = useState<{
+    companyId: string;
+    slotId: string;
+    value: string;
+  } | null>(null);
+  const salaryEditCommitLockRef = useRef<string | null>(null);
   const [isImportingKyujin, setIsImportingKyujin] = useState(false);
   const [kyujinImportProgress, setKyujinImportProgress] = useState<{
     current: number;
@@ -2483,14 +2496,21 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     let closedSlots = 0;
     let bonusSlots = 0;
     let baitoSlots = 0;
+    let missingSalarySlots = 0;
     kyujins.forEach((c) => {
       (c.areaBreakdown || []).forEach((sl) => {
         totalSlots += 1;
         if (sl.recruitmentStatus === '募集終了') closedSlots += 1;
         else openSlots += 1;
         if (sl.bonus === '賞与あり') bonusSlots += 1;
-        if (/baito|アルバイト|パート/i.test(sl.employmentType || c.employmentType || '')) {
+        const isSlotBaito = /baito|アルバイト|パート/i.test(
+          sl.employmentType || c.employmentType || ''
+        );
+        if (isSlotBaito) {
           baitoSlots += 1;
+        }
+        if (isKyujinSalaryMissing(sl, isSlotBaito)) {
+          missingSalarySlots += 1;
         }
       });
     });
@@ -2501,6 +2521,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       closedSlots,
       bonusSlots,
       baitoSlots,
+      missingSalarySlots,
     };
   }, [kyujins]);
 
@@ -2520,6 +2541,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             sl.employmentType ||
             comp.employmentType ||
             detectEmploymentTypeFromText(`${sl.salary || ''} ${sl.hourlyWage || ''}`);
+          const isSlotBaito = /baito|アルバイト|パート/i.test(slotEmp);
+
+          if (kyujinMissingSalaryOnly && !isKyujinSalaryMissing(sl, isSlotBaito)) return false;
 
           if (kyujinSectorFilter !== 'all' && slotSector !== kyujinSectorFilter) return false;
           if (kyujinIndustryFilter !== 'all' && slotInd !== kyujinIndustryFilter) return false;
@@ -2568,6 +2592,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     kyujinSearch,
     kyujinStatusFilter,
     kyujinBonusOnly,
+    kyujinMissingSalaryOnly,
     kyujinSectorFilter,
     kyujinIndustryFilter,
     kyujinEmploymentTypeFilter,
@@ -3198,6 +3223,112 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     }
   };
 
+  const handleStartInlineKyujinSalaryEdit = (
+    companyId: string,
+    slotId: string,
+    initialValue: string
+  ) => {
+    salaryEditCommitLockRef.current = null;
+    setEditingKyujinSalary({
+      companyId,
+      slotId,
+      value: initialValue,
+    });
+  };
+
+  const handleSaveInlineKyujinSalary = (
+    companyId: string,
+    slotId: string,
+    rawInput: string
+  ) => {
+    const lockKey = `${companyId}::${slotId}`;
+    if (salaryEditCommitLockRef.current === lockKey) return;
+    salaryEditCommitLockRef.current = lockKey;
+    setEditingKyujinSalary(null);
+
+    const trimmed = String(rawInput || '').trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const parsed = normalizeManualKyujinSalaryInput(trimmed);
+    const targetComp = kyujins.find((c) => c.id === companyId);
+    const targetSlot = targetComp?.areaBreakdown?.find((s) => s.slotId === slotId);
+    const existingMeta = targetSlot
+      ? getKyujinSlotSalaryDisplayMeta(targetSlot, targetComp?.employmentType || '')
+      : null;
+
+    if (
+      existingMeta &&
+      !existingMeta.isMissing &&
+      parsed.salary === targetSlot?.salary &&
+      parsed.hourlyWage === (targetSlot?.hourlyWage || '')
+    ) {
+      return;
+    }
+
+    const updatedList = kyujins.map((comp) => {
+      if (comp.id !== companyId) return comp;
+      const updatedSlots = (comp.areaBreakdown || []).map((sl) => {
+        if (sl.slotId !== slotId) return sl;
+        const protectedSet = new Set<string>([
+          ...(Array.isArray(sl.manualProtectedFields) ? sl.manualProtectedFields : []),
+          'salary',
+          'hourlyWage',
+        ]);
+        return {
+          ...sl,
+          salary: parsed.salary,
+          hourlyWage: parsed.hourlyWage,
+          salaryManuallyEdited: true,
+          manualProtectedFields: Array.from(protectedSet),
+        };
+      });
+      return normalizeKyujinItem({
+        ...comp,
+        areaBreakdown: updatedSlots,
+      });
+    });
+
+    setKyujins(updatedList);
+    try {
+      localStorage.setItem(STORAGE_KEYS.KYUJINS, JSON.stringify(updatedList));
+    } catch {
+      // ignore localStorage quota errors
+    }
+
+    const displayLabel =
+      parsed.salaryType === 'hourly'
+        ? `時給: ${parsed.hourlyWage || parsed.salary}`
+        : `Lương: ${parsed.salary}`;
+
+    const trimmedGasUrl = gasWebAppUrl.trim();
+    if (trimmedGasUrl && isValidSafeGasUrl(trimmedGasUrl)) {
+      void fetch(trimmedGasUrl, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'updateKyujinSalary',
+          respectManualProtection: true,
+          salaryManuallyEdited: true,
+          manualProtectedFields: ['salary', 'hourlyWage'],
+          companyId,
+          companyName: targetComp?.companyName || '',
+          slotId,
+          jobCode: targetSlot?.jobCode || '',
+          salary: parsed.salary,
+          hourlyWage: parsed.hourlyWage,
+        }),
+      }).catch(() => {
+        // ignore network error in background GAS sync
+      });
+      showToast(`✅ Đã lưu ${displayLabel} & đồng bộ GAS (đã bật bảo vệ ghi đè thủ công)`);
+    } else {
+      showToast(`✅ Đã lưu ${displayLabel} vào LocalStorage (đã bật bảo vệ ghi đè thủ công)`);
+    }
+  };
+
   const toggleSelectSlot = (slotId: string) => {
     setSelectedSlotIds((prev) =>
       prev.includes(slotId) ? prev.filter((id) => id !== slotId) : [...prev, slotId]
@@ -3274,9 +3405,43 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           );
           if (existingIdx >= 0) {
             const target = updated[existingIdx];
+            const existingSlots = [...(target.areaBreakdown || [])];
+            const incomingCode = String(entry.slot.jobCode || '').trim();
+            const matchingSlotIdx =
+              incomingCode && !/^新規枠$/i.test(incomingCode)
+                ? existingSlots.findIndex(
+                    (sl) =>
+                      sl.slotId === entry.slot.slotId ||
+                      (String(sl.jobCode || '').trim() === incomingCode &&
+                        (sl.salaryManuallyEdited ||
+                          sl.manualProtectedFields?.includes('salary')))
+                  )
+                : -1;
+
+            if (matchingSlotIdx >= 0) {
+              const protectedSlot = existingSlots[matchingSlotIdx];
+              const isSalaryProtected =
+                protectedSlot.salaryManuallyEdited ||
+                protectedSlot.manualProtectedFields?.includes('salary');
+              existingSlots[matchingSlotIdx] = {
+                ...entry.slot,
+                slotId: protectedSlot.slotId,
+                ...(isSalaryProtected
+                  ? {
+                      salary: protectedSlot.salary,
+                      hourlyWage: protectedSlot.hourlyWage,
+                      salaryManuallyEdited: protectedSlot.salaryManuallyEdited,
+                      manualProtectedFields: protectedSlot.manualProtectedFields,
+                    }
+                  : {}),
+              };
+            } else {
+              existingSlots.push(entry.slot);
+            }
+
             updated[existingIdx] = normalizeKyujinItem({
               ...target,
-              areaBreakdown: [...(target.areaBreakdown || []), entry.slot],
+              areaBreakdown: existingSlots,
             });
           } else {
             updated.unshift(
@@ -3319,12 +3484,42 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       const sector =
         String(parsed.sector || '').trim() ||
         detectSectorFromIndustryOrText(industry, `${parsed.industry || ''} ${cleanDesc}`);
-      const employmentType =
+
+      const rawSalaryHint = [
+        parsed.salary && !/要確認/.test(parsed.salary) ? parsed.salary : '',
+        parsed.hourlyWage && !/要確認/.test(parsed.hourlyWage) ? `時給 ${parsed.hourlyWage}` : '',
+        cleanDesc,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      const parsedSalary = extractKyujinSalaryInfo(rawSalaryHint, {
+        assumeBareNumberIsSalary: Boolean(parsed.salary && !/要確認/.test(parsed.salary)),
+      });
+      const resolvedSalary =
+        parsedSalary.salaryType !== 'unknown'
+          ? parsedSalary.salary
+          : String(
+              parsed.salary || (parsed.hourlyWage ? `時給 ${parsed.hourlyWage}` : '給与要確認')
+            ).trim();
+      const resolvedHourlyWage =
+        parsedSalary.salaryType === 'hourly'
+          ? parsedSalary.hourlyWage
+          : String(parsed.hourlyWage || '').trim();
+
+      let employmentType =
         String(parsed.employmentType || '').trim() ||
         detectEmploymentTypeFromText(
-          `${parsed.salary || ''} ${parsed.hourlyWage || ''} ${cleanDesc}`,
+          `${resolvedSalary} ${resolvedHourlyWage} ${cleanDesc}`,
           sourceName
         );
+      if (
+        !String(parsed.employmentType || '').trim() &&
+        parsedSalary.salaryType === 'hourly' &&
+        !/tokutei|特定技能|正社員/i.test(cleanDesc)
+      ) {
+        employmentType = 'Baito / Làm thêm (アルバイト・パート)';
+      }
+
       const rawJlpt = String(parsed.minJlpt || '').trim();
       const normalizedJlpt = /^(N[1-5]|日常会話|不問)$/.test(rawJlpt)
         ? rawJlpt
@@ -3351,12 +3546,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           jobCode: derivedCode,
           area: cleanArea || '勤務地要確認',
           shiftTime: shiftLabel,
-          salary: String(
-            parsed.salary || (parsed.hourlyWage ? `時給 ${parsed.hourlyWage}` : '給与要確認')
-          ).trim(),
+          salary: resolvedSalary,
           nightShiftAllowance: String(parsed.nightShiftAllowance || '').trim(),
           estimatedNetSalary: String(parsed.estimatedNetSalary || '').trim(),
-          hourlyWage: String(parsed.hourlyWage || '').trim(),
+          hourlyWage: resolvedHourlyWage,
           commuteAllowance: String(parsed.commuteAllowance || '').trim(),
           shiftsPerWeek: String(parsed.shiftsPerWeek || '').trim(),
           bonus: bonusNorm.bonus,
@@ -3384,6 +3577,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       recruitmentStatus: string;
       slot: KyujinSlot;
     }> = [];
+    const fileErrors: string[] = [];
 
     try {
       for (let fIdx = 0; fIdx < files.length; fIdx++) {
@@ -3391,36 +3585,63 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         setKyujinImportProgress({
           current: fIdx + 1,
           total: files.length,
-          label: file.name,
+          label: `${file.name} — Đang chuẩn bị...`,
         });
         // Yield briefly to keep UI responsive on large multi-file batches
         await new Promise((r) => setTimeout(r, 10));
 
         const lower = file.name.toLowerCase();
-        if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
-          const excelEntries = await parseExcelFileToKyujinEntries(file);
-          extractedEntries.push(...excelEntries);
-        } else {
-          const token = await getFirebaseIdToken();
-          try {
-            const items = await extractKyujinViaServer(file, token);
-            extractedEntries.push(...mapServerKyujinItemsToEntries(items, file.name));
-          } catch (fileErr) {
-            // Fallback for plain text / csv when Gemini key isn't set
-            if (lower.endsWith('.txt') || lower.endsWith('.csv') || file.type.startsWith('text/')) {
-              const rawText = await file.text();
-              const fbItems = parseRawKyujinTextFallback(rawText, file.name);
-              extractedEntries.push(...mapServerKyujinItemsToEntries(fbItems, file.name));
-            } else {
-              throw fileErr;
+        try {
+          if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
+            setKyujinImportProgress({
+              current: fIdx + 1,
+              total: files.length,
+              label: `${file.name} — Đang đọc dữ liệu Excel...`,
+            });
+            const excelEntries = await parseExcelFileToKyujinEntries(file);
+            extractedEntries.push(...excelEntries);
+          } else {
+            const token = await getFirebaseIdToken();
+            try {
+              const items = await extractKyujinViaServer(file, token, (statusText) => {
+                setKyujinImportProgress({
+                  current: fIdx + 1,
+                  total: files.length,
+                  label: `${file.name} — ${statusText}`,
+                });
+              });
+              extractedEntries.push(...mapServerKyujinItemsToEntries(items, file.name));
+            } catch (fileErr) {
+              // Fallback for plain text / csv when Gemini key isn't set
+              if (lower.endsWith('.txt') || lower.endsWith('.csv') || file.type.startsWith('text/')) {
+                const rawText = await file.text();
+                const fbItems = parseRawKyujinTextFallback(rawText, file.name);
+                extractedEntries.push(...mapServerKyujinItemsToEntries(fbItems, file.name));
+              } else {
+                throw fileErr;
+              }
             }
           }
+        } catch (singleErr) {
+          const msg =
+            singleErr instanceof Error
+              ? singleErr.message
+              : `Lỗi đọc file "${file.name}"`;
+          fileErrors.push(msg);
         }
       }
 
       if (extractedEntries.length > 0) {
         mergeExtractedKyujinEntries(extractedEntries);
-        showToast(`✅ Đã đọc và nhập ${extractedEntries.length} đơn / vị trí tuyển dụng mới!`);
+        if (fileErrors.length > 0) {
+          showToast(
+            `⚠️ Đã nhập ${extractedEntries.length} đơn, ${fileErrors.length} file lỗi: ${fileErrors[0]}`
+          );
+        } else {
+          showToast(`✅ Đã đọc và nhập ${extractedEntries.length} đơn / vị trí tuyển dụng mới!`);
+        }
+      } else if (fileErrors.length > 0) {
+        showToast(`⚠️ ${fileErrors[0]}`);
       } else {
         showToast('⚠️ Không tìm thấy dữ liệu đơn tuyển dụng hợp lệ trong file đã chọn');
       }
@@ -3909,7 +4130,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         </span>
                         <span className="text-[#94949e]">{formatPublicArea(slot.area)}</span>
                         <span className="font-mono text-[#22c55e] tabular-nums">
-                          {isBaito && slot.hourlyWage ? `時給 ${slot.hourlyWage}` : slot.salary}
+                          {(() => {
+                            const m = getKyujinSlotSalaryDisplayMeta(
+                              slot,
+                              slot.employmentType || company.employmentType || ''
+                            );
+                            return m.isHourly ? `時給 ${m.displayValue}` : m.displayValue;
+                          })()}
                         </span>
                         <span className="font-mono text-[11px] text-[#94949e]">
                           {slot.minJlpt}
@@ -4564,7 +4791,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                       Mẹo: Nhấn <strong className="text-[#edeeef]">Ctrl+V</strong> để dán trực tiếp ảnh chụp màn hình tin tuyển dụng / Baito hoặc kéo thả nhiều file vào đây.
                     </span>
                     {kyujinImportProgress && (
-                      <span className="font-mono font-semibold text-[#22c55e] tabular-nums">
+                      <span
+                        className={`font-mono font-semibold tabular-nums ${
+                          /OCR|scan/i.test(kyujinImportProgress.label)
+                            ? 'text-[#38bdf8]'
+                            : 'text-[#22c55e]'
+                        }`}
+                      >
                         Đang xử lý {kyujinImportProgress.current}/{kyujinImportProgress.total}: {kyujinImportProgress.label}
                       </span>
                     )}
@@ -4630,6 +4863,20 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                       }`}
                     >
                       Có thưởng ({kyujinStats.bonusSlots})
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setKyujinMissingSalaryOnly((prev) => !prev)}
+                      className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
+                        kyujinMissingSalaryOnly
+                          ? 'border-[#f59e0b] bg-[#f59e0b]/20 text-[#fbbf24]'
+                          : kyujinStats.missingSalarySlots > 0
+                          ? 'border-[#f59e0b]/40 bg-[#f59e0b]/5 text-[#f59e0b] hover:bg-[#f59e0b]/15'
+                          : 'border-[#27272a] bg-[#0c0c0e] text-[#94949e] hover:text-[#edeeef]'
+                      }`}
+                    >
+                      ⚠️ Lương: 要確認 ({kyujinStats.missingSalarySlots})
                     </button>
 
                     <select
@@ -4785,46 +5032,127 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                               </div>
 
                               {/* Compensation & Experience Strip */}
-                              <div className="mb-2 flex flex-wrap items-center gap-2.5 text-xs">
-                                {isBaito ? (
-                                  <>
-                                    <span className="font-mono font-bold text-[#38bdf8] tabular-nums">
-                                      時給: {sl.hourlyWage || sl.salary}
-                                    </span>
-                                    {sl.commuteAllowance && (
-                                      <span className="text-[#94949e]">
-                                        Đi lại: {sl.commuteAllowance}
-                                      </span>
+                              {(() => {
+                                const salaryMeta = getKyujinSlotSalaryDisplayMeta(sl, empType);
+                                const isEditingThisSalary =
+                                  editingKyujinSalary?.companyId === comp.id &&
+                                  editingKyujinSalary?.slotId === sl.slotId;
+
+                                return (
+                                  <div className="mb-2 flex flex-wrap items-center gap-2.5 text-xs">
+                                    {isEditingThisSalary ? (
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="font-mono text-[11px] font-semibold text-[#94949e]">
+                                          {salaryMeta.labelPrefix}:
+                                        </span>
+                                        <input
+                                          type="text"
+                                          autoFocus
+                                          value={editingKyujinSalary.value}
+                                          placeholder="VD: 230,000円 hoặc 1,250円"
+                                          onChange={(e) =>
+                                            setEditingKyujinSalary((prev) =>
+                                              prev ? { ...prev, value: e.target.value } : null
+                                            )
+                                          }
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                              e.preventDefault();
+                                              handleSaveInlineKyujinSalary(
+                                                comp.id,
+                                                sl.slotId,
+                                                editingKyujinSalary.value
+                                              );
+                                            } else if (e.key === 'Escape') {
+                                              e.preventDefault();
+                                              salaryEditCommitLockRef.current = `${comp.id}::${sl.slotId}`;
+                                              setEditingKyujinSalary(null);
+                                            }
+                                          }}
+                                          onBlur={() =>
+                                            handleSaveInlineKyujinSalary(
+                                              comp.id,
+                                              sl.slotId,
+                                              editingKyujinSalary.value
+                                            )
+                                          }
+                                          className="w-48 rounded border border-[#22c55e] bg-[#141417] px-2 py-0.5 font-mono text-xs font-bold text-[#edeeef] outline-none ring-1 ring-[#22c55e]/40"
+                                        />
+                                        <span className="text-[10px] text-[#94949e]">
+                                          Enter để lưu
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleStartInlineKyujinSalaryEdit(
+                                            comp.id,
+                                            sl.slotId,
+                                            salaryMeta.editInitialValue
+                                          )
+                                        }
+                                        title="Click để sửa nhanh mức lương trực tiếp (Enter hoặc click ra ngoài để lưu)"
+                                        className={`group inline-flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 font-mono font-bold tabular-nums transition-colors ${
+                                          salaryMeta.isMissing
+                                            ? 'border border-[#f59e0b]/40 bg-[#f59e0b]/10 text-[#f59e0b] hover:bg-[#f59e0b]/20'
+                                            : salaryMeta.isHourly
+                                            ? 'text-[#38bdf8] hover:bg-[#38bdf8]/15'
+                                            : 'text-[#22c55e] hover:bg-[#22c55e]/15'
+                                        }`}
+                                      >
+                                        <span>
+                                          {salaryMeta.labelPrefix}: {salaryMeta.displayValue}
+                                        </span>
+                                        {sl.salaryManuallyEdited && (
+                                          <span
+                                            title="Đã chỉnh sửa thủ công (được bảo vệ khỏi ghi đè)"
+                                            className="text-[10px] opacity-80"
+                                          >
+                                            🔒
+                                          </span>
+                                        )}
+                                        <span className="text-[10px] opacity-0 transition-opacity group-hover:opacity-80">
+                                          ✎
+                                        </span>
+                                      </button>
                                     )}
-                                    {sl.shiftsPerWeek && (
-                                      <span className="text-[#94949e]">
-                                        Ca: {sl.shiftsPerWeek}
-                                      </span>
+
+                                    {isBaito ? (
+                                      <>
+                                        {sl.commuteAllowance && (
+                                          <span className="text-[#94949e]">
+                                            Đi lại: {sl.commuteAllowance}
+                                          </span>
+                                        )}
+                                        {sl.shiftsPerWeek && (
+                                          <span className="text-[#94949e]">
+                                            Ca: {sl.shiftsPerWeek}
+                                          </span>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <>
+                                        {sl.estimatedNetSalary && (
+                                          <span className="font-mono text-[11px] text-[#38bdf8]">
+                                            Thực nhận: {sl.estimatedNetSalary}
+                                          </span>
+                                        )}
+                                        {sl.nightShiftAllowance && (
+                                          <span className="text-[11px] text-[#94949e]">
+                                            Ca đêm: {sl.nightShiftAllowance}
+                                          </span>
+                                        )}
+                                        {sl.bonus === '賞与あり' && (
+                                          <span className="font-semibold text-[#f59e0b]">
+                                            Thưởng{sl.bonusDetail ? ` (${sl.bonusDetail})` : ''}
+                                          </span>
+                                        )}
+                                      </>
                                     )}
-                                  </>
-                                ) : (
-                                  <>
-                                    <span className="font-mono font-bold text-[#22c55e] tabular-nums">
-                                      Lương: {sl.salary}
-                                    </span>
-                                    {sl.estimatedNetSalary && (
-                                      <span className="font-mono text-[11px] text-[#38bdf8]">
-                                        Thực nhận: {sl.estimatedNetSalary}
-                                      </span>
-                                    )}
-                                    {sl.nightShiftAllowance && (
-                                      <span className="text-[11px] text-[#94949e]">
-                                        Ca đêm: {sl.nightShiftAllowance}
-                                      </span>
-                                    )}
-                                    {sl.bonus === '賞与あり' && (
-                                      <span className="font-semibold text-[#f59e0b]">
-                                        Thưởng{sl.bonusDetail ? ` (${sl.bonusDetail})` : ''}
-                                      </span>
-                                    )}
-                                  </>
-                                )}
-                              </div>
+                                  </div>
+                                );
+                              })()}
 
                               {sl.experienceRequirement && (
                                 <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[11px]">

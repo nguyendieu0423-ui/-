@@ -99,6 +99,8 @@ export interface KyujinSlot {
   experienceRequirement?: string;
   experienceDetail?: string;
   jobDescription?: string;
+  salaryManuallyEdited?: boolean;
+  manualProtectedFields?: string[];
 }
 
 export interface KyujinCompany {
