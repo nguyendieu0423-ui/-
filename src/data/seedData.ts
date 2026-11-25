@@ -34,6 +34,17 @@ export const RESIGNATION_STATUSES = [
   'Hoàn tất',
 ];
 
+export const RESIGNATION_NATIONALITIES = [
+  'ベトナム',
+  'インドネシア',
+  'ミャンマー',
+  'フィリピン',
+  'カンボジア',
+  'ネパール',
+  'その他',
+  '国籍不明',
+] as const;
+
 export const INDUSTRIES = [
   '介護',
   '外食業',

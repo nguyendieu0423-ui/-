@@ -22,6 +22,7 @@ import {
   auth,
   clearCachedCalendarAccessToken,
   getCachedCalendarAccessToken,
+  mapGoogleOAuthErrorToVietnamese,
   signInWithGooglePopup,
 } from './lib/firebase';
 import { HomePage } from './components/HomePage';
@@ -102,10 +103,13 @@ import {
   extractFirstImageFromClipboard,
 } from './utils/imageCompression';
 import {
+  applyManualProtectionOnResignationSave,
   assessResignationDeadline,
   buildResignationReminderMessages,
   convertResignationToCandidate,
   getJstTodayYmd,
+  mergeResignationWithGasProtection,
+  normalizeResignationNationality,
 } from './utils/resignationHelpers';
 
 const MESSENGER_WEBHOOK_URL = 'https://fb-crm.ai.studio/api/webhooks/messenger';
@@ -170,7 +174,12 @@ function readFallbackResignations(): ResignationRecord[] {
     const saved = localStorage.getItem(STORAGE_KEYS.RESIGNATIONS);
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) return parsed;
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => ({
+          ...item,
+          nationality: normalizeResignationNationality(item?.nationality),
+        }));
+      }
     }
   } catch {
     // ignore storage parse errors
@@ -354,22 +363,36 @@ export default function App() {
     }
   }, []);
 
-  const ensureGoogleCalendarToken = useCallback(async (): Promise<string | null> => {
-    const existing = getCachedCalendarAccessToken();
-    if (existing) {
-      setHasCalendarToken(true);
-      return existing;
-    }
-    try {
-      const { calendarAccessToken } = await signInWithGooglePopup();
-      setHasCalendarToken(Boolean(calendarAccessToken));
-      return calendarAccessToken;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Không thể xác thực Google Calendar';
-      showToast(`⚠️ ${msg}`);
-      return null;
-    }
-  }, [showToast]);
+  const ensureGoogleCalendarToken = useCallback(
+    async (forceReauth = false): Promise<string | null> => {
+      if (!forceReauth) {
+        const existing = getCachedCalendarAccessToken();
+        if (existing) {
+          setHasCalendarToken(true);
+          return existing;
+        }
+      } else {
+        clearCachedCalendarAccessToken();
+        setHasCalendarToken(false);
+      }
+
+      try {
+        const { calendarAccessToken } = await signInWithGooglePopup(forceReauth);
+        setHasCalendarToken(Boolean(calendarAccessToken));
+        if (!calendarAccessToken) {
+          showToast(
+            '⚠️ Bạn chưa cấp quyền Google Calendar (calendar.events). Vui lòng tích chọn cấp quyền Calendar khi đăng nhập Google.'
+          );
+          return null;
+        }
+        return calendarAccessToken;
+      } catch (err) {
+        showToast(`⚠️ ${mapGoogleOAuthErrorToVietnamese(err)}`);
+        return null;
+      }
+    },
+    [showToast]
+  );
 
   const applyCalendarEventResultToState = useCallback(
     (
@@ -417,25 +440,27 @@ export default function App() {
         setSyncingCalendarId(draft.candidateId);
       }
       try {
+        // Request OAuth token FIRST inside user gesture to avoid popup-blocker issues
+        let googleToken = await ensureGoogleCalendarToken(false);
+        if (!googleToken) return;
+
         let firebaseToken = await getFirebaseIdToken();
         if (!firebaseToken) {
-          const res = await signInWithGooglePopup().catch(() => null);
-          if (res?.calendarAccessToken) setHasCalendarToken(true);
+          googleToken = await ensureGoogleCalendarToken(true);
+          if (!googleToken) return;
           firebaseToken = await getFirebaseIdToken();
           if (!firebaseToken) {
             showToast('⚠️ Vui lòng đăng nhập Google để đồng bộ Google Calendar');
             return;
           }
         }
-        let googleToken = await ensureGoogleCalendarToken();
-        if (!googleToken) return;
 
-        const callSyncApi = async (gToken: string) =>
+        const callSyncApi = async (gToken: string, fbToken: string) =>
           fetch('/api/calendar/sync-candidate', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              Authorization: `Bearer ${firebaseToken}`,
+              Authorization: `Bearer ${fbToken}`,
               'X-Google-Access-Token': gToken,
             },
             body: JSON.stringify({
@@ -443,6 +468,7 @@ export default function App() {
               entityType,
               eventTitle: draft.eventTitle,
               description: draft.description,
+              dateIso: draft.dateIso,
               startIso: draft.startIso,
               endIso: draft.endIso,
               existingEventId: draft.existingEventId,
@@ -450,14 +476,14 @@ export default function App() {
             }),
           });
 
-        let resp = await callSyncApi(googleToken);
+        let resp = await callSyncApi(googleToken, firebaseToken);
         if (resp.status === 401) {
           clearCachedCalendarAccessToken();
           setHasCalendarToken(false);
-          const refreshed = await ensureGoogleCalendarToken();
-          if (!refreshed) return;
-          googleToken = refreshed;
-          resp = await callSyncApi(googleToken);
+          const refreshedGoogle = await ensureGoogleCalendarToken(true);
+          if (!refreshedGoogle) return;
+          const refreshedFb = (await getFirebaseIdToken()) || firebaseToken;
+          resp = await callSyncApi(refreshedGoogle, refreshedFb);
         }
 
         const data = await resp.json().catch(() => ({}));
@@ -630,29 +656,39 @@ export default function App() {
         setConfirmDialog(null);
         setIsBulkSyncingCalendar(true);
         try {
-          const firebaseToken = await getFirebaseIdToken();
-          if (!firebaseToken) return;
-          let googleToken = await ensureGoogleCalendarToken();
+          let googleToken = await ensureGoogleCalendarToken(false);
           if (!googleToken) return;
 
-          const callBulkApi = (gToken: string) =>
+          let firebaseToken = await getFirebaseIdToken();
+          if (!firebaseToken) {
+            googleToken = await ensureGoogleCalendarToken(true);
+            if (!googleToken) return;
+            firebaseToken = await getFirebaseIdToken();
+            if (!firebaseToken) {
+              showToast('⚠️ Vui lòng đăng nhập Google để đồng bộ Google Calendar');
+              return;
+            }
+          }
+
+          const callBulkApi = (gToken: string, fbToken: string) =>
             fetch('/api/calendar/sync-bulk', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${firebaseToken}`,
+                Authorization: `Bearer ${fbToken}`,
                 'X-Google-Access-Token': gToken,
               },
               body: JSON.stringify({ items: drafts }),
             });
 
-          let resp = await callBulkApi(googleToken);
+          let resp = await callBulkApi(googleToken, firebaseToken);
           if (resp.status === 401) {
             clearCachedCalendarAccessToken();
             setHasCalendarToken(false);
-            const refreshed = await ensureGoogleCalendarToken();
-            if (!refreshed) return;
-            resp = await callBulkApi(refreshed);
+            const refreshedGoogle = await ensureGoogleCalendarToken(true);
+            if (!refreshedGoogle) return;
+            const refreshedFb = (await getFirebaseIdToken()) || firebaseToken;
+            resp = await callBulkApi(refreshedGoogle, refreshedFb);
           }
 
           const data = (await resp.json().catch(() => ({}))) as {
@@ -670,28 +706,36 @@ export default function App() {
           }
 
           const syncedList = Array.isArray(data.synced) ? data.synced : [];
+          const failedList = Array.isArray(data.failed) ? data.failed : [];
           const syncedMap = new Map(syncedList.map((s) => [s.candidateId, s]));
 
-          const applyBulk = (list: Candidate[]) =>
-            list.map((c) => {
-              const hit = syncedMap.get(c.id);
-              return hit
-                ? {
-                    ...c,
-                    googleCalendarEventId: hit.eventId,
-                    googleCalendarEventLink: hit.htmlLink,
-                  }
-                : c;
-            });
-          setCandidates(applyBulk);
-          setSchoolStudents(applyBulk);
+          if (syncedList.length > 0) {
+            const applyBulk = (list: Candidate[]) =>
+              list.map((c) => {
+                const hit = syncedMap.get(c.id);
+                return hit
+                  ? {
+                      ...c,
+                      googleCalendarEventId: hit.eventId,
+                      googleCalendarEventLink: hit.htmlLink,
+                    }
+                  : c;
+              });
+            setCandidates(applyBulk);
+            setSchoolStudents(applyBulk);
+          }
 
-          const failCount = Array.isArray(data.failed) ? data.failed.length : 0;
-          showToast(
-            failCount > 0
-              ? `✅ Đã đồng bộ ${syncedList.length} lịch (${failCount} lịch gặp lỗi)`
-              : `✅ Đã đồng bộ toàn bộ ${syncedList.length} lịch hẹn lên Google Calendar`
-          );
+          if (syncedList.length === 0 && failedList.length > 0) {
+            showToast(`❌ Lỗi đồng bộ hàng loạt: ${failedList[0].error}`);
+          } else if (failedList.length > 0) {
+            showToast(
+              `⚠️ Đã đồng bộ ${syncedList.length} lịch (${failedList.length} lịch lỗi: ${failedList[0].error})`
+            );
+          } else {
+            showToast(
+              `✅ Đã đồng bộ toàn bộ ${syncedList.length} lịch hẹn lên Google Calendar`
+            );
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Đồng bộ thất bại';
           showToast(`❌ Lỗi đồng bộ hàng loạt: ${msg}`);
@@ -770,113 +814,197 @@ export default function App() {
 
   const handleSyncResignationCalendarSingle = useCallback(
     async (record: ResignationRecord) => {
-      const draft = buildResignationCalendarEventDraft(record);
-      if (!draft) {
-        showToast('⚠️ Hồ sơ đã hoàn tất hoặc chưa có Hạn chót nộp giấy tờ (YYYY-MM-DD)');
+      if (record.paperworkStatus === 'Hoàn tất') {
+        showToast('ℹ️ Hồ sơ này đã hoàn tất giấy tờ nên không cần đồng bộ lịch nhắc.');
         return;
       }
-      await executeCalendarSyncForDraft(draft);
+      const draft = buildResignationCalendarEventDraft(record);
+      if (!draft) {
+        showToast(
+          '⚠️ Vui lòng cập nhật Ngày nghỉ việc hoặc Hạn giấy tờ trước khi đồng bộ lịch.'
+        );
+        return;
+      }
+
+      const isUpdate = Boolean(draft.existingEventId);
+      setConfirmDialog({
+        title: isUpdate
+          ? 'Cập nhật lịch nhắc giấy tờ trên Google Calendar'
+          : 'Đồng bộ lịch nhắc giấy tờ lên Google Calendar',
+        message: `${
+          isUpdate
+            ? 'Cập nhật lại sự kiện hiện có (tránh tạo trùng)'
+            : 'Tạo mới sự kiện nhắc hạn trên Google Calendar'
+        }:\n• Tiêu đề: ${draft.eventTitle}\n• Thời gian (Asia/Tokyo): ${
+          draft.displayDateTime
+        }\n• Nhắc nhở tự động: 3 ngày, 1 ngày và 2 giờ trước hạn.`,
+        confirmLabel: isUpdate ? 'Cập nhật Calendar' : 'Đồng bộ ngay',
+        cancelLabel: 'Hủy',
+        tone: 'accent',
+        onConfirm: () => {
+          setConfirmDialog(null);
+          void executeCalendarSyncForDraft(draft);
+        },
+      });
     },
     [executeCalendarSyncForDraft, showToast]
   );
 
   const handleBulkSyncResignationsCalendar = useCallback(async () => {
-    const drafts = resignations
+    const activeRecords = resignations.filter((r) => r.paperworkStatus !== 'Hoàn tất');
+    if (activeRecords.length === 0) {
+      showToast('ℹ️ Không có hồ sơ nghỉ việc nào đang chờ hạn nộp giấy tờ.');
+      return;
+    }
+
+    const drafts = activeRecords
       .map((r) => buildResignationCalendarEventDraft(r))
       .filter((d): d is CalendarEventDraft => Boolean(d));
 
     if (drafts.length === 0) {
-      showToast('⚠️ Không có hồ sơ nghỉ việc nào đang chờ hạn nộp giấy tờ');
+      showToast(
+        '⚠️ Vui lòng cập nhật Ngày nghỉ việc hoặc Hạn giấy tờ trước khi đồng bộ lịch.'
+      );
       return;
     }
 
-    setIsBulkSyncingResignationsCal(true);
-    try {
-      let firebaseToken = await getFirebaseIdToken();
-      if (!firebaseToken) {
-        const res = await signInWithGooglePopup().catch(() => null);
-        if (res?.calendarAccessToken) setHasCalendarToken(true);
-        firebaseToken = await getFirebaseIdToken();
-        if (!firebaseToken) {
-          showToast('⚠️ Vui lòng đăng nhập Google để đồng bộ Google Calendar');
-          return;
+    const skippedCount = activeRecords.length - drafts.length;
+    const previewNames = drafts
+      .slice(0, 6)
+      .map((d) => `• ${d.eventTitle} (${d.displayDateTime})`)
+      .join('\n');
+    const extraCount =
+      drafts.length > 6 ? `\n...và ${drafts.length - 6} hồ sơ khác.` : '';
+    const skippedNote =
+      skippedCount > 0
+        ? `\n(Bỏ qua ${skippedCount} hồ sơ chưa có Ngày nghỉ việc và Hạn giấy tờ)`
+        : '';
+
+    setConfirmDialog({
+      title: `Đồng bộ ${drafts.length} lịch nghỉ việc lên Google Calendar`,
+      message: `Xác nhận tạo mới hoặc cập nhật ${drafts.length} sự kiện (múi giờ Asia/Tokyo, nhắc trước 3 ngày / 1 ngày / 2 giờ):\n${previewNames}${extraCount}${skippedNote}`,
+      confirmLabel: `Đồng bộ ${drafts.length} lịch`,
+      cancelLabel: 'Hủy',
+      tone: 'accent',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setIsBulkSyncingResignationsCal(true);
+        try {
+          let googleToken = await ensureGoogleCalendarToken(false);
+          if (!googleToken) return;
+
+          let firebaseToken = await getFirebaseIdToken();
+          if (!firebaseToken) {
+            googleToken = await ensureGoogleCalendarToken(true);
+            if (!googleToken) return;
+            firebaseToken = await getFirebaseIdToken();
+            if (!firebaseToken) {
+              showToast('⚠️ Vui lòng đăng nhập Google để đồng bộ Google Calendar');
+              return;
+            }
+          }
+
+          const callBulk = (gToken: string, fbToken: string) =>
+            fetch('/api/calendar/sync-bulk', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${fbToken}`,
+                'X-Google-Access-Token': gToken,
+              },
+              body: JSON.stringify({ items: drafts }),
+            });
+
+          let resp = await callBulk(googleToken, firebaseToken);
+          if (resp.status === 401) {
+            clearCachedCalendarAccessToken();
+            setHasCalendarToken(false);
+            const refreshedGoogle = await ensureGoogleCalendarToken(true);
+            if (!refreshedGoogle) return;
+            const refreshedFb = (await getFirebaseIdToken()) || firebaseToken;
+            resp = await callBulk(refreshedGoogle, refreshedFb);
+          }
+
+          const data = (await resp.json().catch(() => ({}))) as {
+            synced?: Array<{ candidateId: string; eventId: string; htmlLink: string }>;
+            failed?: Array<{ candidateId: string; error: string }>;
+            error?: string;
+          };
+          if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+          const syncedList = Array.isArray(data.synced) ? data.synced : [];
+          const failedList = Array.isArray(data.failed) ? data.failed : [];
+          const syncedMap = new Map(syncedList.map((s) => [s.candidateId, s]));
+
+          if (syncedList.length > 0) {
+            setResignations((prev) =>
+              prev.map((r) => {
+                const hit = syncedMap.get(r.id);
+                return hit
+                  ? {
+                      ...r,
+                      googleCalendarEventId: hit.eventId,
+                      googleCalendarEventLink: hit.htmlLink,
+                    }
+                  : r;
+              })
+            );
+          }
+
+          if (syncedList.length === 0 && failedList.length > 0) {
+            showToast(`❌ Lỗi đồng bộ Calendar nghỉ việc: ${failedList[0].error}`);
+          } else if (failedList.length > 0) {
+            showToast(
+              `⚠️ Đã đồng bộ ${syncedList.length} hồ sơ (${failedList.length} hồ sơ lỗi: ${failedList[0].error})`
+            );
+          } else {
+            showToast(
+              `✅ Đã đồng bộ ${syncedList.length} hạn giấy tờ nghỉ việc lên Google Calendar (nhắc 3 ngày / 1 ngày / 2 giờ)`
+            );
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Đồng bộ thất bại';
+          showToast(`❌ Lỗi đồng bộ Calendar nghỉ việc: ${msg}`);
+        } finally {
+          setIsBulkSyncingResignationsCal(false);
         }
-      }
-      let googleToken = await ensureGoogleCalendarToken();
-      if (!googleToken) return;
-
-      const callBulk = (gToken: string) =>
-        fetch('/api/calendar/sync-bulk', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${firebaseToken}`,
-            'X-Google-Access-Token': gToken,
-          },
-          body: JSON.stringify({ items: drafts }),
-        });
-
-      let resp = await callBulk(googleToken);
-      if (resp.status === 401) {
-        clearCachedCalendarAccessToken();
-        setHasCalendarToken(false);
-        const refreshed = await ensureGoogleCalendarToken();
-        if (!refreshed) return;
-        resp = await callBulk(refreshed);
-      }
-
-      const data = (await resp.json().catch(() => ({}))) as {
-        synced?: Array<{ candidateId: string; eventId: string; htmlLink: string }>;
-        failed?: Array<{ candidateId: string; error: string }>;
-        error?: string;
-      };
-      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-
-      const syncedList = Array.isArray(data.synced) ? data.synced : [];
-      const syncedMap = new Map(syncedList.map((s) => [s.candidateId, s]));
-      setResignations((prev) =>
-        prev.map((r) => {
-          const hit = syncedMap.get(r.id);
-          return hit
-            ? {
-                ...r,
-                googleCalendarEventId: hit.eventId,
-                googleCalendarEventLink: hit.htmlLink,
-              }
-            : r;
-        })
-      );
-      showToast(`✅ Đã đồng bộ ${syncedList.length} hạn giấy tờ nghỉ việc lên Google Calendar`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Đồng bộ thất bại';
-      showToast(`❌ Lỗi đồng bộ Calendar nghỉ việc: ${msg}`);
-    } finally {
-      setIsBulkSyncingResignationsCal(false);
-    }
+      },
+    });
   }, [resignations, ensureGoogleCalendarToken, getFirebaseIdToken, showToast]);
 
   const handleSaveResignation = useCallback(
     async (record: ResignationRecord, isNew: boolean) => {
-      const nextRec: ResignationRecord = {
-        ...record,
-        updatedAt: new Date().toISOString(),
-      };
-      setResignations((prev) =>
-        isNew ? [nextRec, ...prev] : prev.map((r) => (r.id === nextRec.id ? nextRec : r))
-      );
+      let protectedRec: ResignationRecord = record;
+      setResignations((prev) => {
+        const existing = prev.find((r) => r.id === record.id) || null;
+        protectedRec = applyManualProtectionOnResignationSave(existing, {
+          ...record,
+          updatedAt: new Date().toISOString(),
+        });
+        return isNew
+          ? [protectedRec, ...prev]
+          : prev.map((r) => (r.id === protectedRec.id ? protectedRec : r));
+      });
       showToast(
-        isNew ? '✅ Đã thêm hồ sơ nghỉ việc mới' : `✅ Đã cập nhật hồ sơ: ${nextRec.fullName}`
+        isNew
+          ? '✅ Đã thêm hồ sơ nghỉ việc mới'
+          : `✅ Đã cập nhật hồ sơ (đã bật bảo vệ chống ghi đè GAS): ${protectedRec.fullName}`
       );
 
-      if (nextRec.paperworkStatus === 'Hoàn tất' && nextRec.googleCalendarEventId) {
-        void executeCalendarDelete(nextRec.id, nextRec.googleCalendarEventId, true, 'resignation');
+      if (protectedRec.paperworkStatus === 'Hoàn tất' && protectedRec.googleCalendarEventId) {
+        void executeCalendarDelete(
+          protectedRec.id,
+          protectedRec.googleCalendarEventId,
+          true,
+          'resignation'
+        );
       } else if (
-        nextRec.paperworkDeadline &&
-        nextRec.paperworkStatus !== 'Hoàn tất' &&
+        (protectedRec.paperworkDeadline || protectedRec.resignationDate) &&
+        protectedRec.paperworkStatus !== 'Hoàn tất' &&
         auth.currentUser &&
         getCachedCalendarAccessToken()
       ) {
-        const draft = buildResignationCalendarEventDraft(nextRec);
+        const draft = buildResignationCalendarEventDraft(protectedRec);
         if (draft) {
           void executeCalendarSyncForDraft(draft);
         }
@@ -916,10 +1044,36 @@ export default function App() {
   const handleBulkImportResignations = useCallback(
     (rows: ResignationRecord[]) => {
       if (!rows.length) return;
-      setResignations((prev) => [...rows, ...prev]);
+      setResignations((prev) => {
+        const nextList = [...prev];
+        const newEntries: ResignationRecord[] = [];
+        rows.forEach((rawRow) => {
+          const rowWithNat: ResignationRecord = {
+            ...rawRow,
+            nationality: normalizeResignationNationality(rawRow.nationality),
+          };
+          const matchIdx = nextList.findIndex(
+            (item) =>
+              item.id === rowWithNat.id ||
+              (item.fullName.trim().toLowerCase() === rowWithNat.fullName.trim().toLowerCase() &&
+                item.previousCompany.trim().toLowerCase() ===
+                  rowWithNat.previousCompany.trim().toLowerCase())
+          );
+          if (matchIdx >= 0) {
+            nextList[matchIdx] = mergeResignationWithGasProtection(
+              nextList[matchIdx],
+              rowWithNat as ResignationRecord & Record<string, unknown>,
+              gasWriteLocked
+            );
+          } else {
+            newEntries.push(rowWithNat);
+          }
+        });
+        return [...newEntries, ...nextList];
+      });
       showToast(`✅ Đã nhập ${rows.length} hồ sơ nghỉ việc từ Excel/CSV`);
     },
-    [showToast]
+    [gasWriteLocked, showToast]
   );
 
   const handleConvertResignationToCandidate = useCallback(
@@ -1131,10 +1285,33 @@ export default function App() {
           Array.isArray(data.resignations)
         ) {
           setResignations((prev) => {
-            const nextJson = JSON.stringify(data.resignations);
+            const prevMap = new Map(prev.map((item) => [item.id, item]));
+            const merged = data.resignations!.map((incoming) => {
+              const existing = prevMap.get(incoming.id);
+              if (
+                existing &&
+                (existing.gasProtected ||
+                  (existing.manualProtectedFields && existing.manualProtectedFields.length > 0))
+              ) {
+                const existingTs = existing.updatedAt ? Date.parse(existing.updatedAt) : 0;
+                const incomingTs = incoming.updatedAt ? Date.parse(incoming.updatedAt) : 0;
+                if (existingTs > incomingTs) {
+                  return mergeResignationWithGasProtection(
+                    existing,
+                    incoming as ResignationRecord & Record<string, unknown>,
+                    true
+                  );
+                }
+              }
+              return {
+                ...incoming,
+                nationality: normalizeResignationNationality(incoming.nationality),
+              };
+            });
+            const nextJson = JSON.stringify(merged);
             if (JSON.stringify(prev) === nextJson) return prev;
             skipNextSqlSaveRef.current = true;
-            return data.resignations!;
+            return merged;
           });
         }
 
@@ -1217,7 +1394,12 @@ export default function App() {
           );
           setPtPartners(Array.isArray(data.ptPartners) ? data.ptPartners : []);
           if (Array.isArray(data.resignations) && data.resignations.length > 0) {
-            setResignations(data.resignations);
+            setResignations(
+              data.resignations.map((r) => ({
+                ...r,
+                nationality: normalizeResignationNationality(r.nationality),
+              }))
+            );
           }
         } else {
           const seedCandidates = mergePendingWebhookCandidates(
@@ -1666,10 +1848,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'syncAll',
+          respectManualProtection: true,
           candidates,
           schoolStudents,
           kyujins,
           ptPartners,
+          resignations: resignations.map((r) => ({
+            ...r,
+            nationality: normalizeResignationNationality(r.nationality),
+          })),
         }),
       });
       showToast('☁️ Google Apps Scriptへデータを送信しました');
@@ -1757,7 +1944,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         setPtPartners(importedPt);
       }
       if (Array.isArray(parsed.resignations)) {
-        setResignations(parsed.resignations);
+        setResignations((prev) => {
+          const prevById = new Map(prev.map((item) => [item.id, item]));
+          return parsed.resignations.map(
+            (rawRow: Partial<ResignationRecord> & Record<string, unknown>) =>
+              mergeResignationWithGasProtection(
+                rawRow.id ? prevById.get(String(rawRow.id)) : undefined,
+                rawRow,
+                gasWriteLocked
+              )
+          );
+        });
       }
 
       setGasWriteLocked(true);
@@ -2590,7 +2787,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         fbName: extracted.fbName || '',
         fbProfileUrl: extracted.fbProfileUrl || '',
         channel: fbChatChannel,
-        nationality: extracted.nationality || 'ベトナム',
+        nationality: extracted.nationality || '国籍不明',
         gender: extracted.gender || '',
         age: extracted.age || '',
         birthDate: extracted.birthDate || '',
@@ -4004,7 +4201,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                 : activeTab === 'school'
                                 ? 'school'
                                 : 'personal',
-                            nationality: 'ベトナム',
+                            nationality: '',
                             gender: '',
                             age: '',
                             birthDate: '',

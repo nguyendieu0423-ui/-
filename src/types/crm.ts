@@ -130,6 +130,11 @@ export type ResignationPaperworkStatus =
   | 'Đã gửi công ty'
   | 'Hoàn tất';
 
+export type ResignationProtectedField =
+  | 'nationality'
+  | 'resignationDate'
+  | 'paperworkDeadline';
+
 export interface ResignationRecord {
   id: string;
   fullName: string;
@@ -148,6 +153,8 @@ export interface ResignationRecord {
   convertedCandidateId?: string;
   googleCalendarEventId?: string;
   googleCalendarEventLink?: string;
+  manualProtectedFields?: ResignationProtectedField[];
+  gasProtected?: boolean;
   updatedAt?: string;
 }
 

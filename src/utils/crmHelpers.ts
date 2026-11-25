@@ -173,7 +173,8 @@ export const createInitialRirekishoDraft = (cand: Partial<Candidate> = {}): Rire
     address: cand.address || '',
     phone: cand.phone || '',
     email: cand.email || '',
-    nationality: cand.nationality || 'ベトナム',
+    nationality:
+      cand.nationality && cand.nationality !== '国籍不明' ? cand.nationality : '',
     visaExpiry: cand.visaExpiry || '',
     visaStatus: cand.visaStatus || '特定技能1号',
     educationRows: [

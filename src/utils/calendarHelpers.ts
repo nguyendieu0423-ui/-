@@ -5,6 +5,7 @@ import {
 } from './crmHelpers';
 
 export interface ParsedScheduleJst {
+  dateIso: string;
   startIso: string;
   endIso: string;
   displayDateTime: string;
@@ -19,6 +20,7 @@ export interface CalendarEventDraft {
   candidateName: string;
   eventTitle: string;
   description: string;
+  dateIso?: string;
   startIso: string;
   endIso: string;
   displayDateTime: string;
@@ -27,19 +29,38 @@ export interface CalendarEventDraft {
   reminderMinutes?: number[];
 }
 
-export function parseScheduleDateTimeJst(rawInput?: string): ParsedScheduleJst | null {
+const UNSET_DATE_PLACEHOLDER_RX =
+  /^(?:chưa\s*(?:đặt\s*hạn|cập\s*nhật|có|rõ)|未設定|未定|不明|n\/a|-+|none|null)$/i;
+
+export function parseScheduleDateTimeJst(
+  rawInput?: string,
+  defaultHour = 10
+): ParsedScheduleJst | null {
   const text = String(rawInput || '').trim();
-  if (!text) return null;
+  if (!text || UNSET_DATE_PLACEHOLDER_RX.test(text)) return null;
 
   let year: number | null = null;
   let month: number | null = null;
   let day: number | null = null;
 
-  const fullMatch = text.match(/(\d{4})\s*[年\/\-]\s*(\d{1,2})\s*[月\/\-]\s*(\d{1,2})/);
-  if (fullMatch) {
-    year = Number(fullMatch[1]);
-    month = Number(fullMatch[2]);
-    day = Number(fullMatch[3]);
+  const fullYmdMatch = text.match(/(\d{4})\s*[年\/.\-]\s*(\d{1,2})\s*[月\/.\-]\s*(\d{1,2})/);
+  const fullDmyMatch = text.match(/^(\d{1,2})\s*[\/.\-]\s*(\d{1,2})\s*[\/.\-]\s*(\d{4})(?:\s|$|T)/);
+
+  if (fullYmdMatch) {
+    year = Number(fullYmdMatch[1]);
+    month = Number(fullYmdMatch[2]);
+    day = Number(fullYmdMatch[3]);
+  } else if (fullDmyMatch) {
+    const p1 = Number(fullDmyMatch[1]);
+    const p2 = Number(fullDmyMatch[2]);
+    year = Number(fullDmyMatch[3]);
+    if (p2 > 12 && p1 <= 12) {
+      month = p1;
+      day = p2;
+    } else {
+      day = p1;
+      month = p2;
+    }
   } else {
     const shortMatch = text.match(/(\d{1,2})\s*[月\/]\s*(\d{1,2})/);
     if (!shortMatch) return null;
@@ -48,20 +69,22 @@ export function parseScheduleDateTimeJst(rawInput?: string): ParsedScheduleJst |
     day = Number(shortMatch[2]);
   }
 
+  if (!year || !month || !day || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+
+  // Reject impossible calendar days such as 2026-02-30 or 2026-04-31
+  const verifyUtc = new Date(Date.UTC(year, month - 1, day));
   if (
-    !year ||
-    !month ||
-    !day ||
-    month < 1 ||
-    month > 12 ||
-    day < 1 ||
-    day > 31
+    verifyUtc.getUTCFullYear() !== year ||
+    verifyUtc.getUTCMonth() !== month - 1 ||
+    verifyUtc.getUTCDate() !== day
   ) {
     return null;
   }
 
   // Extract optional HH:mm or HH時mm分
-  let hour = 10;
+  let hour = defaultHour;
   let minute = 0;
   const timeMatch = text.match(/(?:^|\s|T)(\d{1,2})\s*[:時]\s*(\d{1,2})?/);
   if (timeMatch) {
@@ -84,10 +107,12 @@ export function parseScheduleDateTimeJst(rawInput?: string): ParsedScheduleJst |
     )}T${pad(jst.getUTCHours())}:${pad(jst.getUTCMinutes())}:00+09:00`;
   };
 
+  const dateIso = `${year}-${pad(month)}-${pad(day)}`;
   return {
+    dateIso,
     startIso: formatJstIso(startDate),
     endIso: formatJstIso(endDate),
-    displayDateTime: `${year}-${pad(month)}-${pad(day)} ${pad(hour)}:${pad(minute)} (JST)`,
+    displayDateTime: `${dateIso} ${pad(hour)}:${pad(minute)} (JST)`,
     year,
     month,
     day,
@@ -170,6 +195,7 @@ export function buildCandidateCalendarEventDraft(
     candidateName: person.name || 'Ứng viên',
     eventTitle,
     description: descriptionLines.join('\n'),
+    dateIso: parsedSchedule.dateIso,
     startIso: parsedSchedule.startIso,
     endIso: parsedSchedule.endIso,
     displayDateTime: parsedSchedule.displayDateTime,
@@ -182,27 +208,39 @@ export function buildCandidateCalendarEventDraft(
 export function buildResignationCalendarEventDraft(
   record: ResignationRecord
 ): CalendarEventDraft | null {
-  if (!record.paperworkDeadline || record.paperworkStatus === 'Hoàn tất') {
+  if (record.paperworkStatus === 'Hoàn tất') {
     return null;
   }
-  const hasExplicitTime = /[:時]/.test(record.paperworkDeadline);
-  const parsed = parseScheduleDateTimeJst(
-    hasExplicitTime ? record.paperworkDeadline : `${record.paperworkDeadline} 09:00`
-  );
-  if (!parsed) return null;
 
-  const eventTitle = `[Hạn giấy tờ nghỉ việc] ${record.fullName || 'Ứng viên'} - ${
+  // Priority order: 1. Hạn giấy tờ (提出期限) -> 2. Ngày nghỉ việc (退職日)
+  const parsedDeadline = parseScheduleDateTimeJst(record.paperworkDeadline, 9);
+  const parsedResignation = parseScheduleDateTimeJst(record.resignationDate, 9);
+  const parsedTarget = parsedDeadline || parsedResignation;
+  if (!parsedTarget) {
+    return null;
+  }
+
+  const dateSourceLabel = parsedDeadline
+    ? 'Hạn nộp giấy tờ (提出期限)'
+    : 'Ngày nghỉ việc (退職日 — tạm lấy do chưa đặt hạn giấy tờ)';
+
+  const eventTitle = `[Nghỉ việc / Giấy tờ] ${record.fullName || 'Ứng viên'} - ${
     record.previousCompany || 'Công ty cũ'
   }`;
 
   const descriptionLines = [
     `Họ tên: ${record.fullName || 'Chưa rõ'}`,
-    `Quốc tịch: ${record.nationality || 'Chưa rõ'}`,
-    `Công ty cũ đang làm việc: ${record.previousCompany || 'Chưa rõ'}`,
-    `Ngày nghỉ việc chính thức (退職日): ${record.resignationDate || 'Chưa cập nhật'}`,
-    `Hạn chót làm & nộp giấy tờ (書類提出期限): ${record.paperworkDeadline}`,
+    `Quốc tịch: ${record.nationality || 'Chưa cập nhật'}`,
+    `Trình độ tiếng Nhật: ${record.jlpt || 'Chưa cập nhật'}`,
+    `Công ty cũ: ${record.previousCompany || 'Chưa cập nhật'}`,
+    `Ngày nghỉ việc (退職日): ${parsedResignation?.dateIso || record.resignationDate || 'Chưa cập nhật'}`,
+    `Hạn nộp giấy tờ (提出期限 - 退職証明書・源泉徴収票): ${
+      parsedDeadline?.dateIso || record.paperworkDeadline || 'Chưa đặt hạn'
+    }`,
+    `Mốc lịch đang theo dõi: ${dateSourceLabel}`,
     `Trạng thái giấy tờ: ${record.paperworkStatus || 'Chưa làm'}`,
-    record.phone ? `SĐT: ${record.phone}` : '',
+    record.phone ? `SĐT / Liên hệ: ${record.phone}` : '',
+    record.fbName ? `Tên Facebook: ${record.fbName}` : '',
     record.newJobNeed ? `Nhu cầu chuyển việc mới: ${record.newJobNeed}` : '',
     '',
     'Ghi chú bàn giao:',
@@ -218,12 +256,13 @@ export function buildResignationCalendarEventDraft(
     candidateName: record.fullName,
     eventTitle,
     description: descriptionLines.join('\n'),
-    startIso: parsed.startIso,
-    endIso: parsed.endIso,
-    displayDateTime: parsed.displayDateTime,
+    dateIso: parsedTarget.dateIso,
+    startIso: parsedTarget.startIso,
+    endIso: parsedTarget.endIso,
+    displayDateTime: parsedTarget.displayDateTime,
     existingEventId: record.googleCalendarEventId,
     appointmentType: 'resignation_deadline',
-    reminderMinutes: [4320, 1440, 120], // 3 ngày, 1 ngày, 2 giờ trước
+    reminderMinutes: [4320, 1440, 120], // 3 ngày, 1 ngày, 2 giờ trước hạn
   };
 }
 

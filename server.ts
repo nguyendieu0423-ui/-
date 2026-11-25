@@ -1153,17 +1153,61 @@ async function startServer() {
   // =========================================================================
   // GOOGLE CALENDAR SYNC ROUTES
   // =========================================================================
-  const SAFE_CALENDAR_EVENT_ID_RX = /^[A-Za-z0-9_-]{4,128}$/;
+  const SAFE_CALENDAR_EVENT_ID_RX = /^[A-Za-z0-9_@.-]{4,256}$/;
 
   interface CalendarSyncInputItem {
     candidateId: string;
     entityType?: 'candidate' | 'resignation';
     eventTitle: string;
     description: string;
+    dateIso?: string;
     startIso: string;
     endIso: string;
     existingEventId?: string;
     reminderMinutes?: number[];
+  }
+
+  function mapGoogleCalendarHttpError(
+    statusCode: number | undefined,
+    rawMessage: string,
+    reason = ''
+  ): { httpStatus: number; code: string; message: string } {
+    const lower = `${rawMessage} ${reason}`.toLowerCase();
+    if (statusCode === 401) {
+      return {
+        httpStatus: 401,
+        code: 'CALENDAR_TOKEN_EXPIRED',
+        message: 'Phiên xác thực Google Calendar đã hết hạn (401 Unauthorized). Vui lòng đăng nhập lại Google.',
+      };
+    }
+    if (statusCode === 403) {
+      if (lower.includes('accessnotconfigured') || lower.includes('has not been used')) {
+        return {
+          httpStatus: 403,
+          code: 'CALENDAR_API_DISABLED',
+          message:
+            'Lỗi 403: Google Calendar API chưa được kích hoạt trên Google Cloud Console. Vui lòng bật Google Calendar API rồi thử lại.',
+        };
+      }
+      return {
+        httpStatus: 403,
+        code: 'CALENDAR_FORBIDDEN',
+        message:
+          'Lỗi 403 (access_denied / insufficientPermissions): Tài khoản Google chưa được thêm vào danh sách Test Users trên Google Cloud Console hoặc chưa cấp quyền https://www.googleapis.com/auth/calendar.events.',
+      };
+    }
+    if (statusCode === 400) {
+      return {
+        httpStatus: 400,
+        code: 'CALENDAR_BAD_REQUEST',
+        message: `Dữ liệu ngày giờ gửi lên Google Calendar chưa hợp lệ (400 Invalid Request): ${rawMessage}`,
+      };
+    }
+    return {
+      httpStatus: 502,
+      code: 'CALENDAR_API_ERROR',
+      message: rawMessage || 'Không thể kết nối Google Calendar API.',
+    };
   }
 
   async function upsertSingleGoogleCalendarEvent(
@@ -1183,15 +1227,32 @@ async function startServer() {
             .filter((n) => !Number.isNaN(n))
         : [30, 10];
 
+    let startIso = String(item.startIso || '').trim();
+    let endIso = String(item.endIso || '').trim();
+    if (!startIso && item.dateIso && /^\d{4}-\d{2}-\d{2}$/.test(item.dateIso)) {
+      startIso = `${item.dateIso}T09:00:00+09:00`;
+      endIso = `${item.dateIso}T10:00:00+09:00`;
+    }
+    if (
+      Number.isNaN(Date.parse(startIso)) ||
+      Number.isNaN(Date.parse(endIso))
+    ) {
+      const err = new Error(
+        `Ngày giờ không đúng chuẩn ISO Asia/Tokyo (${startIso || 'trống'})`
+      ) as Error & { statusCode?: number };
+      err.statusCode = 400;
+      throw err;
+    }
+
     const bodyPayload = {
       summary: String(item.eventTitle).slice(0, 300),
       description: String(item.description || '').slice(0, 8000),
       start: {
-        dateTime: item.startIso,
+        dateTime: startIso,
         timeZone: 'Asia/Tokyo',
       },
       end: {
-        dateTime: item.endIso,
+        dateTime: endIso,
         timeZone: 'Asia/Tokyo',
       },
       reminders: {
@@ -1243,8 +1304,15 @@ async function startServer() {
         typeof errJson?.error?.message === 'string'
           ? errJson.error.message
           : `Google Calendar HTTP ${calResp.status}`;
-      const error = new Error(errMsg) as Error & { statusCode?: number };
+      const errReason =
+        typeof errJson?.error?.errors?.[0]?.reason === 'string'
+          ? errJson.error.errors[0].reason
+          : typeof errJson?.error?.status === 'string'
+          ? errJson.error.status
+          : '';
+      const error = new Error(errMsg) as Error & { statusCode?: number; reason?: string };
       error.statusCode = calResp.status;
+      error.reason = errReason;
       throw error;
     }
 
@@ -1294,7 +1362,7 @@ async function startServer() {
     ).trim();
     if (!googleAccessToken) {
       res.status(401).json({
-        error: 'Thiếu quyền truy cập Google Calendar. Vui lòng kết nối lại Google.',
+        error: 'Thiếu quyền truy cập Google Calendar (chưa có Access Token). Vui lòng kết nối lại Google.',
         code: 'MISSING_CALENDAR_TOKEN',
       });
       return;
@@ -1305,6 +1373,7 @@ async function startServer() {
       entityType,
       eventTitle,
       description,
+      dateIso,
       startIso,
       endIso,
       existingEventId,
@@ -1316,10 +1385,7 @@ async function startServer() {
       !candidateId.trim() ||
       typeof eventTitle !== 'string' ||
       !eventTitle.trim() ||
-      typeof startIso !== 'string' ||
-      !startIso.trim() ||
-      typeof endIso !== 'string' ||
-      !endIso.trim()
+      (typeof startIso !== 'string' && typeof dateIso !== 'string')
     ) {
       res.status(400).json({ error: 'Thiếu thông tin lịch hẹn để đồng bộ Google Calendar.' });
       return;
@@ -1334,8 +1400,9 @@ async function startServer() {
           entityType: entityType === 'resignation' ? 'resignation' : 'candidate',
           eventTitle: eventTitle.trim(),
           description: typeof description === 'string' ? description : '',
-          startIso: startIso.trim(),
-          endIso: endIso.trim(),
+          dateIso: typeof dateIso === 'string' ? dateIso.trim() : undefined,
+          startIso: typeof startIso === 'string' ? startIso.trim() : '',
+          endIso: typeof endIso === 'string' ? endIso.trim() : '',
           existingEventId:
             typeof existingEventId === 'string' ? existingEventId : undefined,
           reminderMinutes: Array.isArray(reminderMinutes)
@@ -1346,15 +1413,10 @@ async function startServer() {
       res.json(result);
     } catch (err) {
       const status = (err as { statusCode?: number }).statusCode;
+      const reason = (err as { reason?: string }).reason || '';
       const msg = err instanceof Error ? err.message : 'Calendar sync failed';
-      if (status === 401) {
-        res.status(401).json({
-          error: 'Phiên Google Calendar đã hết hạn. Vui lòng đăng nhập lại Google.',
-          code: 'CALENDAR_TOKEN_EXPIRED',
-        });
-        return;
-      }
-      res.status(502).json({ error: msg });
+      const mapped = mapGoogleCalendarHttpError(status, msg, reason);
+      res.status(mapped.httpStatus).json({ error: mapped.message, code: mapped.code });
     }
   });
 
@@ -1364,7 +1426,7 @@ async function startServer() {
     ).trim();
     if (!googleAccessToken) {
       res.status(401).json({
-        error: 'Thiếu quyền truy cập Google Calendar. Vui lòng kết nối lại Google.',
+        error: 'Thiếu quyền truy cập Google Calendar (chưa có Access Token). Vui lòng kết nối lại Google.',
         code: 'MISSING_CALENDAR_TOKEN',
       });
       return;
@@ -1389,8 +1451,7 @@ async function startServer() {
         !rawItem ||
         typeof rawItem.candidateId !== 'string' ||
         typeof rawItem.eventTitle !== 'string' ||
-        typeof rawItem.startIso !== 'string' ||
-        typeof rawItem.endIso !== 'string'
+        (typeof rawItem.startIso !== 'string' && typeof rawItem.dateIso !== 'string')
       ) {
         continue;
       }
@@ -1405,8 +1466,9 @@ async function startServer() {
             eventTitle: rawItem.eventTitle.trim(),
             description:
               typeof rawItem.description === 'string' ? rawItem.description : '',
-            startIso: rawItem.startIso.trim(),
-            endIso: rawItem.endIso.trim(),
+            dateIso: typeof rawItem.dateIso === 'string' ? rawItem.dateIso.trim() : undefined,
+            startIso: typeof rawItem.startIso === 'string' ? rawItem.startIso.trim() : '',
+            endIso: typeof rawItem.endIso === 'string' ? rawItem.endIso.trim() : '',
             existingEventId:
               typeof rawItem.existingEventId === 'string'
                 ? rawItem.existingEventId
@@ -1419,16 +1481,20 @@ async function startServer() {
         synced.push(result);
       } catch (err) {
         const status = (err as { statusCode?: number }).statusCode;
-        if (status === 401) {
-          res.status(401).json({
-            error: 'Phiên Google Calendar đã hết hạn. Vui lòng đăng nhập lại Google.',
-            code: 'CALENDAR_TOKEN_EXPIRED',
+        const reason = (err as { reason?: string }).reason || '';
+        const msg = err instanceof Error ? err.message : 'Sync failed';
+        const mapped = mapGoogleCalendarHttpError(status, msg, reason);
+        if (status === 401 || status === 403) {
+          res.status(mapped.httpStatus).json({
+            error: mapped.message,
+            code: mapped.code,
+            partialSynced: synced,
           });
           return;
         }
         failed.push({
           candidateId: rawItem.candidateId,
-          error: err instanceof Error ? err.message : 'Sync failed',
+          error: mapped.message,
         });
       }
     }
@@ -1475,11 +1541,14 @@ async function startServer() {
           }
         );
 
-        if (delResp.status === 401) {
-          res.status(401).json({
-            error: 'Phiên Google Calendar đã hết hạn. Vui lòng đăng nhập lại Google.',
-            code: 'CALENDAR_TOKEN_EXPIRED',
-          });
+        if (delResp.status === 401 || delResp.status === 403) {
+          const errJson = await delResp.json().catch(() => ({}));
+          const rawMsg =
+            typeof errJson?.error?.message === 'string'
+              ? errJson.error.message
+              : `Google Calendar DELETE HTTP ${delResp.status}`;
+          const mapped = mapGoogleCalendarHttpError(delResp.status, rawMsg);
+          res.status(mapped.httpStatus).json({ error: mapped.message, code: mapped.code });
           return;
         }
 

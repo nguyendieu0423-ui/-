@@ -8,20 +8,30 @@ import {
   ExternalLink,
   FileSpreadsheet,
   Loader2,
+  Lock,
   MessageSquare,
   Plus,
   Search,
+  Sparkles,
   Trash2,
   UserPlus,
   AlertTriangle,
   X,
 } from 'lucide-react';
 import type { ResignationRecord } from '../types/crm';
-import { INDUSTRIES, JLPT_LEVELS, RESIGNATION_STATUSES } from '../data/seedData';
 import {
+  INDUSTRIES,
+  JLPT_LEVELS,
+  RESIGNATION_NATIONALITIES,
+  RESIGNATION_STATUSES,
+} from '../data/seedData';
+import {
+  applyManualProtectionOnResignationSave,
   assessResignationDeadline,
   buildResignationReminderMessages,
+  normalizeResignationNationality,
   parseResignationSpreadsheetFile,
+  suggestNationalityFromName,
   type ResignationImportPreviewRow,
 } from '../utils/resignationHelpers';
 import { copyTextSafely } from '../utils/crmHelpers';
@@ -43,7 +53,7 @@ interface ResignationTabProps {
 
 const EMPTY_FORM: Omit<ResignationRecord, 'id'> = {
   fullName: '',
-  nationality: 'ベトナム',
+  nationality: '国籍不明',
   previousCompany: '',
   resignationDate: '',
   paperworkDeadline: '',
@@ -72,6 +82,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [nationalityFilter, setNationalityFilter] = useState('all');
 
   const [editingRecord, setEditingRecord] = useState<ResignationRecord | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -84,17 +95,29 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
 
   const [reminderTarget, setReminderTarget] = useState<ResignationRecord | null>(null);
 
+  const needsNationalityReview = (r: ResignationRecord): boolean => {
+    const nat = normalizeResignationNationality(r.nationality);
+    if (nat === '国籍不明') return true;
+    if (nat === 'ベトナム' && !r.manualProtectedFields?.includes('nationality')) {
+      const suggested = suggestNationalityFromName(r.fullName);
+      if (suggested && suggested !== 'ベトナム') return true;
+    }
+    return false;
+  };
+
   const stats = useMemo(() => {
     let overdueOrUrgent = 0;
     let warn7 = 0;
     let done = 0;
+    let reviewNatCount = 0;
     records.forEach((r) => {
       const a = assessResignationDeadline(r.paperworkDeadline, r.paperworkStatus);
       if (a.urgency === 'done') done += 1;
       else if (a.urgency === 'overdue' || a.urgency === 'urgent3') overdueOrUrgent += 1;
       else if (a.urgency === 'warn7') warn7 += 1;
+      if (needsNationalityReview(r)) reviewNatCount += 1;
     });
-    return { total: records.length, overdueOrUrgent, warn7, done };
+    return { total: records.length, overdueOrUrgent, warn7, done, reviewNatCount };
   }, [records]);
 
   const filteredRecords = useMemo(() => {
@@ -102,11 +125,17 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
     return [...records]
       .filter((r) => {
         if (statusFilter !== 'all' && r.paperworkStatus !== statusFilter) return false;
+        const normalizedNat = normalizeResignationNationality(r.nationality);
+        if (nationalityFilter === 'needs_review') {
+          if (!needsNationalityReview(r)) return false;
+        } else if (nationalityFilter !== 'all' && normalizedNat !== nationalityFilter) {
+          return false;
+        }
         if (!q) return true;
         return [
           r.fullName,
           r.previousCompany,
-          r.nationality,
+          normalizedNat,
           r.handoverNotes,
           r.newJobNeed,
           r.fbName,
@@ -126,7 +155,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
         };
         return rank(a) - rank(b);
       });
-  }, [records, searchQuery, statusFilter]);
+  }, [records, searchQuery, statusFilter, nationalityFilter]);
 
   const openAddModal = () => {
     setEditingRecord(null);
@@ -138,7 +167,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
     setEditingRecord(rec);
     setFormState({
       fullName: rec.fullName,
-      nationality: rec.nationality || 'ベトナム',
+      nationality: normalizeResignationNationality(rec.nationality),
       previousCompany: rec.previousCompany,
       resignationDate: rec.resignationDate || '',
       paperworkDeadline: rec.paperworkDeadline || '',
@@ -153,8 +182,27 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
       convertedCandidateId: rec.convertedCandidateId,
       googleCalendarEventId: rec.googleCalendarEventId,
       googleCalendarEventLink: rec.googleCalendarEventLink,
+      manualProtectedFields: rec.manualProtectedFields,
+      gasProtected: rec.gasProtected,
     });
     setIsModalOpen(true);
+  };
+
+  const handleQuickNationalityChange = async (
+    rec: ResignationRecord,
+    nextNationality: string
+  ) => {
+    const normalized = normalizeResignationNationality(nextNationality);
+    const updated = applyManualProtectionOnResignationSave(
+      rec,
+      {
+        ...rec,
+        nationality: normalized,
+        updatedAt: new Date().toISOString(),
+      },
+      ['nationality']
+    );
+    await onSaveRecord(updated, false);
   };
 
   const handleSubmitForm = async (e: React.FormEvent) => {
@@ -164,13 +212,15 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
       return;
     }
     const isNew = !editingRecord;
-    const saved: ResignationRecord = {
+    const rawSaved: ResignationRecord = {
       id: editingRecord?.id || `resig_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       ...formState,
+      nationality: normalizeResignationNationality(formState.nationality),
       fullName: formState.fullName.trim(),
       previousCompany: formState.previousCompany.trim(),
       updatedAt: new Date().toISOString(),
     };
+    const saved = applyManualProtectionOnResignationSave(editingRecord, rawSaved);
     setIsModalOpen(false);
     await onSaveRecord(saved, isNew);
   };
@@ -300,10 +350,27 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Tìm theo Họ tên, Công ty cũ, Ghi chú bàn giao, Nhu cầu chuyển việc..."
+            placeholder="Tìm theo Họ tên, Công ty cũ, Quốc tịch, Ghi chú bàn giao..."
             className="w-full rounded-lg border border-zinc-800 bg-zinc-950 py-1.5 pl-8 pr-3 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-emerald-500 focus:outline-none"
           />
         </div>
+        <select
+          value={nationalityFilter}
+          onChange={(e) => setNationalityFilter(e.target.value)}
+          className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-200 focus:border-emerald-500 focus:outline-none"
+        >
+          <option value="all">Tất cả quốc tịch</option>
+          {stats.reviewNatCount > 0 && (
+            <option value="needs_review">
+              ⚠️ Cần rà soát quốc tịch ({stats.reviewNatCount})
+            </option>
+          )}
+          {RESIGNATION_NATIONALITIES.map((nat) => (
+            <option key={nat} value={nat}>
+              {nat === '国籍不明' ? '国籍不明 (Chưa rõ)' : nat}
+            </option>
+          ))}
+        </select>
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
@@ -332,6 +399,20 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
             );
             const isSyncing = Boolean(syncingCalendarIds[rec.id]);
             const hasCalendarLink = Boolean(rec.googleCalendarEventId);
+            const currentNat = normalizeResignationNationality(rec.nationality);
+            const isCustomNat = !RESIGNATION_NATIONALITIES.includes(
+              currentNat as (typeof RESIGNATION_NATIONALITIES)[number]
+            );
+            const suggestedNat = suggestNationalityFromName(rec.fullName);
+            const showNatSuggestion =
+              Boolean(suggestedNat) &&
+              ((currentNat === '国籍不明' && suggestedNat !== null) ||
+                (currentNat === 'ベトナム' &&
+                  suggestedNat !== 'ベトナム' &&
+                  !rec.manualProtectedFields?.includes('nationality')));
+            const isProtected =
+              Boolean(rec.gasProtected) ||
+              Boolean(rec.manualProtectedFields && rec.manualProtectedFields.length > 0);
 
             const urgencyClass =
               deadlineInfo.urgency === 'overdue' || deadlineInfo.urgency === 'urgent3'
@@ -351,14 +432,50 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                   <div className="space-y-1.5">
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className="text-sm font-bold text-zinc-100">{rec.fullName}</h3>
-                      {rec.nationality && (
-                        <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-300">
-                          {rec.nationality}
-                        </span>
+                      <select
+                        aria-label={`Quốc tịch của ${rec.fullName}`}
+                        value={currentNat}
+                        onChange={(e) =>
+                          void handleQuickNationalityChange(rec, e.target.value)
+                        }
+                        className={`rounded border px-1.5 py-0.5 text-[11px] font-medium focus:border-emerald-500 focus:outline-none ${
+                          currentNat === '国籍不明'
+                            ? 'border-amber-500/50 bg-amber-500/15 text-amber-300'
+                            : 'border-zinc-700 bg-zinc-800 text-zinc-200'
+                        }`}
+                      >
+                        {isCustomNat && <option value={currentNat}>{currentNat}</option>}
+                        {RESIGNATION_NATIONALITIES.map((nat) => (
+                          <option key={nat} value={nat}>
+                            {nat === '国籍不明' ? '国籍不明 (Chưa rõ)' : nat}
+                          </option>
+                        ))}
+                      </select>
+                      {showNatSuggestion && suggestedNat && (
+                        <button
+                          type="button"
+                          onClick={() => void handleQuickNationalityChange(rec, suggestedNat)}
+                          title="Nhận diện theo tên — bấm để sửa nhanh và khóa bảo vệ GAS"
+                          className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
+                        >
+                          <Sparkles className="h-2.5 w-2.5" />
+                          Gợi ý: {suggestedNat} (Sửa nhanh)
+                        </button>
                       )}
                       {rec.jlpt && (
                         <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[11px] font-semibold text-emerald-300">
                           {rec.jlpt}
+                        </span>
+                      )}
+                      {isProtected && (
+                        <span
+                          title={`Trường đã chỉnh thủ công không bị GAS ghi đè: ${(
+                            rec.manualProtectedFields || ['nationality']
+                          ).join(', ')}`}
+                          className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300"
+                        >
+                          <Lock className="h-2.5 w-2.5" />
+                          Bảo vệ GAS
                         </span>
                       )}
                       <span
@@ -437,7 +554,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                       <button
                         type="button"
                         onClick={() => onSyncCalendarSingle(rec)}
-                        disabled={isSyncing || !rec.paperworkDeadline || rec.paperworkStatus === 'Hoàn tất'}
+                        disabled={isSyncing || rec.paperworkStatus === 'Hoàn tất'}
                         className={`flex flex-1 items-center justify-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] font-medium transition disabled:opacity-45 ${
                           hasCalendarLink
                             ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
@@ -544,16 +661,47 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-zinc-400">Quốc tịch</label>
-                  <input
-                    type="text"
-                    value={formState.nationality || ''}
+                  <label className="mb-1 block text-zinc-400">Quốc tịch (国籍)</label>
+                  <select
+                    value={normalizeResignationNationality(formState.nationality)}
                     onChange={(e) =>
                       setFormState((s) => ({ ...s, nationality: e.target.value }))
                     }
-                    placeholder="ベトナム / ミャンマー / インドネシア..."
                     className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-emerald-500 focus:outline-none"
-                  />
+                  >
+                    {formState.nationality &&
+                      !RESIGNATION_NATIONALITIES.includes(
+                        normalizeResignationNationality(
+                          formState.nationality
+                        ) as (typeof RESIGNATION_NATIONALITIES)[number]
+                      ) && (
+                        <option value={formState.nationality}>{formState.nationality}</option>
+                      )}
+                    {RESIGNATION_NATIONALITIES.map((nat) => (
+                      <option key={nat} value={nat}>
+                        {nat === '国籍不明' ? '国籍不明 (Chưa rõ quốc tịch)' : nat}
+                      </option>
+                    ))}
+                  </select>
+                  {(() => {
+                    const suggested = suggestNationalityFromName(formState.fullName);
+                    const cur = normalizeResignationNationality(formState.nationality);
+                    if (suggested && cur !== suggested && cur === '国籍不明') {
+                      return (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFormState((s) => ({ ...s, nationality: suggested }))
+                          }
+                          className="mt-1 inline-flex items-center gap-1 text-[11px] text-sky-400 hover:text-sky-300"
+                        >
+                          <Sparkles className="h-3 w-3" />
+                          Gợi ý theo tên: chọn {suggested}
+                        </button>
+                      );
+                    }
+                    return null;
+                  })()}
                 </div>
                 <div className="sm:col-span-2">
                   <label className="mb-1 block text-zinc-400">
@@ -749,24 +897,58 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/80 text-zinc-200">
-                  {importPreviewRows.map((row) => (
-                    <tr key={row.id} className="hover:bg-zinc-900/50">
-                      <td className="px-2.5 py-2 text-zinc-500">{row._rowIndex}</td>
-                      <td className="px-2.5 py-2 font-semibold">{row.fullName}</td>
-                      <td className="px-2.5 py-2">{row.nationality}</td>
-                      <td className="px-2.5 py-2">{row.previousCompany}</td>
-                      <td className="px-2.5 py-2">{row.resignationDate || '-'}</td>
-                      <td className="px-2.5 py-2 text-amber-300">
-                        {row.paperworkDeadline || '-'}
-                      </td>
-                      <td className="px-2.5 py-2">{row.paperworkStatus}</td>
-                      <td className="max-w-xs px-2.5 py-2 text-[11px] text-zinc-400">
-                        {[row.handoverNotes, row.newJobNeed, row._warning]
-                          .filter(Boolean)
-                          .join(' | ') || '-'}
-                      </td>
-                    </tr>
-                  ))}
+                  {importPreviewRows.map((row, idx) => {
+                    const rowNat = normalizeResignationNationality(row.nationality);
+                    return (
+                      <tr key={row.id} className="hover:bg-zinc-900/50">
+                        <td className="px-2.5 py-2 text-zinc-500">{row._rowIndex}</td>
+                        <td className="px-2.5 py-2 font-semibold">{row.fullName}</td>
+                        <td className="px-2.5 py-2">
+                          <select
+                            aria-label={`Quốc tịch dòng ${row._rowIndex}`}
+                            value={rowNat}
+                            onChange={(e) => {
+                              const nextNat = normalizeResignationNationality(e.target.value);
+                              setImportPreviewRows((prev) =>
+                                prev.map((item, i) =>
+                                  i === idx
+                                    ? {
+                                        ...item,
+                                        nationality: nextNat,
+                                        manualProtectedFields: ['nationality'],
+                                        gasProtected: true,
+                                      }
+                                    : item
+                                )
+                              );
+                            }}
+                            className={`rounded border px-1.5 py-1 text-[11px] focus:border-emerald-500 focus:outline-none ${
+                              rowNat === '国籍不明'
+                                ? 'border-amber-500/50 bg-amber-500/15 text-amber-300'
+                                : 'border-zinc-700 bg-zinc-950 text-zinc-100'
+                            }`}
+                          >
+                            {RESIGNATION_NATIONALITIES.map((nat) => (
+                              <option key={nat} value={nat}>
+                                {nat === '国籍不明' ? '国籍不明 (Chưa rõ)' : nat}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="px-2.5 py-2">{row.previousCompany}</td>
+                        <td className="px-2.5 py-2">{row.resignationDate || '-'}</td>
+                        <td className="px-2.5 py-2 text-amber-300">
+                          {row.paperworkDeadline || '-'}
+                        </td>
+                        <td className="px-2.5 py-2">{row.paperworkStatus}</td>
+                        <td className="max-w-xs px-2.5 py-2 text-[11px] text-zinc-400">
+                          {[row.handoverNotes, row.newJobNeed, row._warning]
+                            .filter(Boolean)
+                            .join(' | ') || '-'}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
