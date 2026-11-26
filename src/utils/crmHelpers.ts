@@ -10,7 +10,9 @@ import type {
   KyujinMatchResult,
   KyujinSlot,
   MissingInfoItem,
+  PtPartner,
   ReplyScenario,
+  ResignationRecord,
   RirekishoDraft,
   RirekishoRow,
   SavedRirekishoRecord,
@@ -243,47 +245,108 @@ const sanitizeRirekishoRows = (rows: unknown, fallback: RirekishoRow[]): Rirekis
   });
 };
 
+export const toSafeStringArray = (val: unknown): string[] => {
+  if (Array.isArray(val)) {
+    return val
+      .map((item) => cleanLegacyStr(item))
+      .filter(Boolean);
+  }
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed.map((item) => cleanLegacyStr(item)).filter(Boolean);
+        }
+      } catch {
+        // Fallback to delimiter split
+      }
+    }
+    return trimmed
+      .split(/[,、，;\n]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+};
+
 export const sanitizeSavedRirekishoRecord = (
   rawInput: unknown,
   fallbackCandidate?: Partial<Candidate>
 ): SavedRirekishoRecord | undefined => {
-  if (!rawInput || typeof rawInput !== 'object') return undefined;
-  const raw = rawInput as Record<string, unknown>;
-  const rawDraft = raw.draft && typeof raw.draft === 'object' ? (raw.draft as Record<string, unknown>) : null;
+  if (!rawInput) return undefined;
+  let resolvedInput: unknown = rawInput;
+  if (typeof resolvedInput === 'string') {
+    const trimmed = resolvedInput.trim();
+    if (!trimmed) return undefined;
+    try {
+      resolvedInput = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!resolvedInput || typeof resolvedInput !== 'object' || Array.isArray(resolvedInput)) {
+    return undefined;
+  }
+  const raw = resolvedInput as Record<string, unknown>;
+  const nestedDraft =
+    raw.draft && typeof raw.draft === 'object' && !Array.isArray(raw.draft)
+      ? (raw.draft as Record<string, unknown>)
+      : null;
+  // Support legacy saved_cv where draft fields sit directly on the object
+  const looksLikeFlatDraft =
+    !nestedDraft &&
+    (raw.fullName !== undefined ||
+      raw.full_name !== undefined ||
+      raw.name !== undefined ||
+      raw.educationRows !== undefined ||
+      raw.workRows !== undefined ||
+      raw.motivation !== undefined ||
+      raw.selfPr !== undefined ||
+      raw.photoDataUrl !== undefined ||
+      raw.photo !== undefined);
+  const rawDraft = nestedDraft || (looksLikeFlatDraft ? raw : null);
   if (!rawDraft) return undefined;
 
   const base = createInitialRirekishoDraft(fallbackCandidate || {});
-  const rawPhoto = typeof rawDraft.photoDataUrl === 'string' ? rawDraft.photoDataUrl.trim() : '';
-  const photoDataUrl = rawPhoto.startsWith('data:image/') ? rawPhoto : '';
+  const rawPhotoCandidate =
+    typeof rawDraft.photoDataUrl === 'string'
+      ? rawDraft.photoDataUrl.trim()
+      : typeof rawDraft.photo === 'string'
+      ? rawDraft.photo.trim()
+      : '';
+  const photoDataUrl = rawPhotoCandidate.startsWith('data:image/') ? rawPhotoCandidate : '';
 
   const draft: RirekishoDraft = {
-    dateStr: cleanLegacyStr(rawDraft.dateStr) || base.dateStr,
+    dateStr: cleanLegacyStr(rawDraft.dateStr ?? rawDraft.date_str) || base.dateStr,
     furigana: cleanLegacyStr(rawDraft.furigana),
-    fullName: cleanLegacyStr(rawDraft.fullName),
-    birthDate: cleanLegacyStr(rawDraft.birthDate),
+    fullName: cleanLegacyStr(rawDraft.fullName ?? rawDraft.full_name ?? rawDraft.name) || base.fullName,
+    birthDate: cleanLegacyStr(rawDraft.birthDate ?? rawDraft.birth_date),
     age: cleanLegacyStr(rawDraft.age),
     gender: cleanLegacyStr(rawDraft.gender),
-    postalCode: cleanLegacyStr(rawDraft.postalCode),
+    postalCode: cleanLegacyStr(rawDraft.postalCode ?? rawDraft.postal_code),
     address: cleanLegacyStr(rawDraft.address),
     phone: cleanLegacyStr(rawDraft.phone),
     email: cleanLegacyStr(rawDraft.email),
     nationality: cleanLegacyStr(rawDraft.nationality),
-    visaExpiry: cleanLegacyStr(rawDraft.visaExpiry),
-    visaStatus: cleanLegacyStr(rawDraft.visaStatus),
-    educationRows: sanitizeRirekishoRows(rawDraft.educationRows, base.educationRows),
-    workRows: sanitizeRirekishoRows(rawDraft.workRows, base.workRows),
-    licenseRows: sanitizeRirekishoRows(rawDraft.licenseRows, base.licenseRows),
-    nativeLanguage: cleanLegacyStr(rawDraft.nativeLanguage),
-    availableLanguages: cleanLegacyStr(rawDraft.availableLanguages),
-    caSpeaking: cleanLegacyStr(rawDraft.caSpeaking),
-    caListening: cleanLegacyStr(rawDraft.caListening),
+    visaExpiry: cleanLegacyStr(rawDraft.visaExpiry ?? rawDraft.visa_expiry),
+    visaStatus: cleanLegacyStr(rawDraft.visaStatus ?? rawDraft.visa_status),
+    educationRows: sanitizeRirekishoRows(rawDraft.educationRows ?? rawDraft.education_rows, base.educationRows),
+    workRows: sanitizeRirekishoRows(rawDraft.workRows ?? rawDraft.work_rows, base.workRows),
+    licenseRows: sanitizeRirekishoRows(rawDraft.licenseRows ?? rawDraft.license_rows, base.licenseRows),
+    nativeLanguage: cleanLegacyStr(rawDraft.nativeLanguage ?? rawDraft.native_language),
+    availableLanguages: cleanLegacyStr(rawDraft.availableLanguages ?? rawDraft.available_languages),
+    caSpeaking: cleanLegacyStr(rawDraft.caSpeaking ?? rawDraft.ca_speaking),
+    caListening: cleanLegacyStr(rawDraft.caListening ?? rawDraft.ca_listening),
     motivation: cleanLegacyStr(rawDraft.motivation),
-    selfPr: cleanLegacyStr(rawDraft.selfPr),
-    personalRequests: cleanLegacyStr(rawDraft.personalRequests),
+    selfPr: cleanLegacyStr(rawDraft.selfPr ?? rawDraft.self_pr),
+    personalRequests: cleanLegacyStr(rawDraft.personalRequests ?? rawDraft.personal_requests),
     allergy: cleanLegacyStr(rawDraft.allergy),
-    dependentsCount: cleanLegacyStr(rawDraft.dependentsCount),
+    dependentsCount: cleanLegacyStr(rawDraft.dependentsCount ?? rawDraft.dependents_count),
     spouse: cleanLegacyStr(rawDraft.spouse),
-    spouseSupport: cleanLegacyStr(rawDraft.spouseSupport),
+    spouseSupport: cleanLegacyStr(rawDraft.spouseSupport ?? rawDraft.spouse_support),
     photoDataUrl,
   };
 
@@ -405,12 +468,14 @@ export const classifyProposedSubTab = (
 
 export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
   const raw =
-    rawInput && typeof rawInput === 'object' ? (rawInput as Record<string, unknown>) : {};
-  const schoolName = cleanLegacyStr(raw.schoolName ?? raw.school);
+    rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput)
+      ? (rawInput as Record<string, unknown>)
+      : {};
+  const schoolName = cleanLegacyStr(raw.schoolName ?? raw.school ?? raw.school_name);
   const rawChannel = cleanLegacyStr(raw.channel);
   const isSchool =
     rawChannel === 'school' ||
-    Boolean(raw._isSchool) ||
+    Boolean(raw._isSchool ?? raw.is_school) ||
     Boolean(schoolName);
   const channel: ChannelType | string = isSchool
     ? 'school'
@@ -418,13 +483,27 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
     ? 'company'
     : 'personal';
 
-  const name = cleanLegacyStr(raw.name ?? raw.fullName);
-  const fbName = cleanLegacyStr(raw.fbName ?? raw.facebookName);
-  const proposedCompany = cleanLegacyStr(raw.proposedCompany ?? raw.company);
-  let naiteiCompany = cleanLegacyStr(raw.naiteiCompany);
-  const progressStatus = cleanLegacyStr(raw.progressStatus ?? raw.status) || '新規相談';
-  const memo = cleanLegacyStr(raw.memo ?? raw.notes);
-  let declineReason = cleanLegacyStr(raw.declineReason);
+  const name = cleanLegacyStr(raw.name ?? raw.fullName ?? raw.full_name ?? raw.candidate_name);
+  const fbName = cleanLegacyStr(raw.fbName ?? raw.fb_name ?? raw.facebookName ?? raw.facebook_name);
+  const furigana = cleanLegacyStr(raw.furigana ?? raw.kana);
+  const nationality = cleanLegacyStr(raw.nationality ?? raw.kokuseki ?? raw.country);
+  const gender = cleanLegacyStr(raw.gender ?? raw.sex);
+  const age = cleanLegacyStr(raw.age);
+  const birthDate = cleanLegacyStr(raw.birthDate ?? raw.birth_date ?? raw.dob);
+  const postalCode = cleanLegacyStr(raw.postalCode ?? raw.postal_code ?? raw.zip);
+  const visaStatus = cleanLegacyStr(raw.visaStatus ?? raw.visaType ?? raw.visa_status ?? raw.visa_type);
+  const visaExpiry = cleanLegacyStr(raw.visaExpiry ?? raw.visa_expiry);
+  const phone = cleanLegacyStr(raw.phone ?? raw.tel);
+  const email = cleanLegacyStr(raw.email ?? raw.mail);
+  const address = cleanLegacyStr(raw.address);
+  const proposedCompany = cleanLegacyStr(raw.proposedCompany ?? raw.company ?? raw.proposed_company);
+  let naiteiCompany = cleanLegacyStr(raw.naiteiCompany ?? raw.naitei_company);
+  const progressStatus =
+    cleanLegacyStr(raw.progressStatus ?? raw.status ?? raw.progress_status) || '新規相談';
+  const memo = cleanLegacyStr(raw.memo ?? raw.notes ?? raw.note);
+  let declineReason = cleanLegacyStr(
+    raw.declineReason ?? raw.decline_reason ?? raw.jitaiReason ?? raw.jitai_reason
+  );
 
   if (
     ['内定', '内定承諾', '入社手続き中', '入社済み'].includes(progressStatus) &&
@@ -442,65 +521,350 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
     declineReason = extractDeclineReason({ progressStatus, memo, declineReason: '' });
   }
 
+  const rawSavedCv =
+    raw.savedRirekisho ?? raw.saved_rirekisho ?? raw.saved_cv ?? raw.savedCv;
+
   return {
     ...(raw as Partial<Candidate>),
     id:
       cleanLegacyStr(raw.id) ||
       `cand_mig_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-    fbSenderId: cleanLegacyStr(raw.fbSenderId),
-    fbProfileUrl: cleanLegacyStr(raw.fbProfileUrl),
+    fbSenderId: cleanLegacyStr(raw.fbSenderId ?? raw.fb_sender_id),
+    fbProfileUrl: cleanLegacyStr(raw.fbProfileUrl ?? raw.fb_profile_url),
     name,
     fbName,
-    furigana: cleanLegacyStr(raw.furigana),
+    furigana,
     channel,
     schoolName,
-    graduationDate: cleanLegacyStr(raw.graduationDate),
-    nationality: cleanLegacyStr(raw.nationality),
-    gender: cleanLegacyStr(raw.gender),
-    age: cleanLegacyStr(raw.age),
-    birthDate: cleanLegacyStr(raw.birthDate),
-    postalCode: cleanLegacyStr(raw.postalCode),
-    jlpt: cleanLegacyStr(raw.jlpt ?? raw.japaneseLevel) || '要確認',
-    desiredIndustry: cleanLegacyStr(raw.desiredIndustry ?? raw.desiredField),
-    desiredArea: cleanLegacyStr(raw.desiredArea),
-    conversionGoal: cleanLegacyStr(raw.conversionGoal ?? raw.goal),
-    visaStatus: cleanLegacyStr(raw.visaStatus ?? raw.visaType),
-    visaExpiry: cleanLegacyStr(raw.visaExpiry),
-    passedExam: cleanLegacyStr(raw.passedExam ?? raw.certifications),
-    japanExperience: cleanLegacyStr(raw.japanExperience),
-    salaryExpectation: cleanLegacyStr(raw.salaryExpectation),
-    negotiationLog: cleanLegacyStr(raw.negotiationLog ?? raw.rawLog),
-    startDate: cleanLegacyStr(raw.startDate),
-    phone: cleanLegacyStr(raw.phone),
-    email: cleanLegacyStr(raw.email),
-    address: cleanLegacyStr(raw.address),
+    graduationDate: cleanLegacyStr(raw.graduationDate ?? raw.graduation_date),
+    nationality,
+    gender,
+    age,
+    birthDate,
+    postalCode,
+    jlpt:
+      cleanLegacyStr(raw.jlpt ?? raw.japaneseLevel ?? raw.japanese_level ?? raw.jlpt_level) ||
+      '要確認',
+    desiredIndustry: cleanLegacyStr(
+      raw.desiredIndustry ?? raw.desiredField ?? raw.desired_industry ?? raw.desired_field ?? raw.industry
+    ),
+    desiredArea: cleanLegacyStr(raw.desiredArea ?? raw.desired_area ?? raw.area),
+    conversionGoal: cleanLegacyStr(raw.conversionGoal ?? raw.goal ?? raw.conversion_goal),
+    visaStatus,
+    visaExpiry,
+    passedExam: cleanLegacyStr(raw.passedExam ?? raw.certifications ?? raw.passed_exam),
+    japanExperience: cleanLegacyStr(raw.japanExperience ?? raw.japan_experience),
+    salaryExpectation: cleanLegacyStr(raw.salaryExpectation ?? raw.salary_expectation),
+    negotiationLog: cleanLegacyStr(
+      raw.negotiationLog ?? raw.rawLog ?? raw.negotiation_log ?? raw.raw_log
+    ),
+    startDate: cleanLegacyStr(raw.startDate ?? raw.start_date),
+    phone,
+    email,
+    address,
     progressStatus,
     proposedCompany,
     naiteiCompany,
-    expectedJoinDate: cleanLegacyStr(raw.expectedJoinDate),
-    visaSubmissionDeadline: cleanLegacyStr(raw.visaSubmissionDeadline),
-    mendanDate: cleanLegacyStr(raw.mendanDate),
-    interviewDate: cleanLegacyStr(raw.interviewDate),
-    lastContactDate: cleanLegacyStr(raw.lastContactDate),
+    expectedJoinDate: cleanLegacyStr(raw.expectedJoinDate ?? raw.expected_join_date),
+    visaSubmissionDeadline: cleanLegacyStr(
+      raw.visaSubmissionDeadline ?? raw.visa_submission_deadline ?? raw.visa_deadline
+    ),
+    mendanDate: cleanLegacyStr(raw.mendanDate ?? raw.mendan_date),
+    interviewDate: cleanLegacyStr(raw.interviewDate ?? raw.interview_date),
+    lastContactDate: cleanLegacyStr(raw.lastContactDate ?? raw.last_contact_date),
     declineReason,
     memo,
-    googleCalendarEventId: cleanLegacyStr(raw.googleCalendarEventId),
-    googleCalendarEventLink: cleanLegacyStr(raw.googleCalendarEventLink),
-    savedRirekisho: sanitizeSavedRirekishoRecord(raw.savedRirekisho, {
+    googleCalendarEventId: cleanLegacyStr(
+      raw.googleCalendarEventId ?? raw.google_calendar_event_id
+    ),
+    googleCalendarEventLink: cleanLegacyStr(
+      raw.googleCalendarEventLink ?? raw.google_calendar_event_link
+    ),
+    savedRirekisho: sanitizeSavedRirekishoRecord(rawSavedCv, {
       name,
-      furigana: cleanLegacyStr(raw.furigana),
-      birthDate: cleanLegacyStr(raw.birthDate),
-      age: cleanLegacyStr(raw.age),
-      gender: cleanLegacyStr(raw.gender),
-      nationality: cleanLegacyStr(raw.nationality),
-      visaStatus: cleanLegacyStr(raw.visaStatus ?? raw.visaType),
-      visaExpiry: cleanLegacyStr(raw.visaExpiry),
-      phone: cleanLegacyStr(raw.phone),
-      email: cleanLegacyStr(raw.email),
-      address: cleanLegacyStr(raw.address),
-      postalCode: cleanLegacyStr(raw.postalCode),
+      furigana,
+      birthDate,
+      age,
+      gender,
+      nationality,
+      visaStatus,
+      visaExpiry,
+      phone,
+      email,
+      address,
+      postalCode,
     }),
     _isSchool: isSchool,
+  };
+};
+
+export interface MigratedLegacyDataResult {
+  candidates: Candidate[];
+  schoolStudents: Candidate[];
+  kyujins: KyujinCompany[];
+  ptPartners: PtPartner[];
+  resignations: Array<Partial<ResignationRecord> & Record<string, unknown>>;
+  hasCandidatesSection: boolean;
+  hasStudentsSection: boolean;
+  hasKyujinsSection: boolean;
+  hasPtSection: boolean;
+  hasResignationsSection: boolean;
+  recognizedKeys: string[];
+  warnings: string[];
+}
+
+const isRecordObject = (v: unknown): v is Record<string, unknown> =>
+  Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+
+const pickFirstArrayField = (
+  obj: Record<string, unknown>,
+  keys: string[]
+): { key: string; arr: unknown[] } | null => {
+  for (const key of keys) {
+    if (Array.isArray(obj[key])) {
+      return { key, arr: obj[key] as unknown[] };
+    }
+  }
+  return null;
+};
+
+const looksLikeKyujinArray = (arr: unknown[]): boolean => {
+  const sample = arr.find((item) => isRecordObject(item)) as Record<string, unknown> | undefined;
+  if (!sample) return false;
+  const hasKyujinSignal = Boolean(
+    sample.companyName ||
+      sample.company_name ||
+      Array.isArray(sample.areaBreakdown) ||
+      Array.isArray(sample.area_breakdown) ||
+      sample.jobCode ||
+      sample.job_code ||
+      sample.hourlyWage ||
+      sample.hourly_wage
+  );
+  const hasCandidateSignal = Boolean(
+    sample.fbName ||
+      sample.fb_name ||
+      sample.progressStatus ||
+      sample.progress_status ||
+      sample.jlpt ||
+      sample.visaStatus ||
+      sample.visa_status
+  );
+  return hasKyujinSignal && !hasCandidateSignal;
+};
+
+export const migrateLegacyData = (rawData: unknown): MigratedLegacyDataResult => {
+  if (rawData === null || rawData === undefined) {
+    throw new Error('File backup rỗng (null/undefined), không có dữ liệu để khôi phục.');
+  }
+
+  // Direct array backup (legacy export containing only candidates/users or kyujins)
+  if (Array.isArray(rawData)) {
+    const validObjects = rawData.filter((item) => isRecordObject(item));
+    if (looksLikeKyujinArray(validObjects)) {
+      return {
+        candidates: [],
+        schoolStudents: [],
+        kyujins: validObjects.map((item) => normalizeKyujinItem(item)),
+        ptPartners: [],
+        resignations: [],
+        hasCandidatesSection: false,
+        hasStudentsSection: false,
+        hasKyujinsSection: true,
+        hasPtSection: false,
+        hasResignationsSection: false,
+        recognizedKeys: ['rootArray(kyujins)'],
+        warnings: [],
+      };
+    }
+
+    const regularCandidates: Candidate[] = [];
+    const schoolStudents: Candidate[] = [];
+    validObjects.forEach((rawItem) => {
+      const migrated = migrateCandidateRecord(rawItem);
+      if (migrated.channel === 'school' || migrated.schoolName) {
+        schoolStudents.push({ ...migrated, channel: 'school', _isSchool: true });
+      } else {
+        regularCandidates.push({ ...migrated, _isSchool: false });
+      }
+    });
+
+    return {
+      candidates: regularCandidates,
+      schoolStudents,
+      kyujins: [],
+      ptPartners: [],
+      resignations: [],
+      hasCandidatesSection: true,
+      hasStudentsSection: schoolStudents.length > 0,
+      hasKyujinsSection: false,
+      hasPtSection: false,
+      hasResignationsSection: false,
+      recognizedKeys: ['rootArray(candidates)'],
+      warnings:
+        validObjects.length < rawData.length
+          ? [`Đã bỏ qua ${rawData.length - validObjects.length} dòng bị rỗng/null trong mảng gốc.`]
+          : [],
+    };
+  }
+
+  if (!isRecordObject(rawData)) {
+    throw new Error(
+      `Định dạng JSON không hợp lệ (nhận được kiểu "${typeof rawData}", cần Object hoặc Array).`
+    );
+  }
+
+  // Unwrap nested { data: {...} } / { payload: {...} } / { backup: {...} } if top level doesn't have CRM arrays
+  let rootObj: Record<string, unknown> = rawData;
+  const candidateKeys = ['candidates', 'users', 'applicants', 'members', 'candidateList', 'candidate_list'];
+  const studentKeys = ['schoolStudents', 'students', 'school_students', 'ryugakusei'];
+  const kyujinKeys = ['kyujins', 'jobs', 'companies', 'kyujinList', 'kyujin_list', 'kyujin'];
+  const ptKeys = ['ptPartners', 'partners', 'ptList', 'pt_partners', 'pt'];
+  const resignationKeys = [
+    'resignations',
+    'resignationList',
+    'resignation_list',
+    'resignationsList',
+    'taishokusha',
+  ];
+
+  const allKnownSectionKeys = [
+    ...candidateKeys,
+    ...studentKeys,
+    ...kyujinKeys,
+    ...ptKeys,
+    ...resignationKeys,
+  ];
+
+  const hasTopLevelMatch = allKnownSectionKeys.some((k) => Array.isArray(rootObj[k]));
+  if (!hasTopLevelMatch) {
+    for (const wrapperKey of ['data', 'payload', 'backup', 'backupData', 'crmData']) {
+      const inner = rootObj[wrapperKey];
+      if (isRecordObject(inner) && allKnownSectionKeys.some((k) => Array.isArray(inner[k]))) {
+        rootObj = inner;
+        break;
+      }
+      if (Array.isArray(inner)) {
+        return migrateLegacyData(inner);
+      }
+    }
+  }
+
+  const foundCandidates = pickFirstArrayField(rootObj, candidateKeys);
+  const foundStudents = pickFirstArrayField(rootObj, studentKeys);
+  const foundKyujins = pickFirstArrayField(rootObj, kyujinKeys);
+  const foundPt = pickFirstArrayField(rootObj, ptKeys);
+  const foundResignations = pickFirstArrayField(rootObj, resignationKeys);
+
+  const recognizedKeys = [
+    foundCandidates?.key,
+    foundStudents?.key,
+    foundKyujins?.key,
+    foundPt?.key,
+    foundResignations?.key,
+  ].filter(Boolean) as string[];
+
+  if (recognizedKeys.length === 0) {
+    const existingKeys = Object.keys(rawData).slice(0, 10).join(', ') || '(trống)';
+    throw new Error(
+      `Không nhận diện được cấu trúc backup CRM hợp lệ. Các key tìm thấy trong file: [${existingKeys}]. Cần có ít nhất một mảng như candidates/users, schoolStudents/students, kyujins/jobs/companies, ptPartners hoặc resignations.`
+    );
+  }
+
+  const warnings: string[] = [];
+  const separatedStudents: Candidate[] = [];
+  const regularCandidates: Candidate[] = [];
+
+  if (foundStudents) {
+    const validStudents = foundStudents.arr.filter((item) => isRecordObject(item));
+    if (validStudents.length < foundStudents.arr.length) {
+      warnings.push(
+        `Đã bỏ qua ${foundStudents.arr.length - validStudents.length} bản ghi du học sinh null/lỗi.`
+      );
+    }
+    validStudents.forEach((rawStudent) => {
+      const migrated = migrateCandidateRecord(rawStudent);
+      separatedStudents.push({ ...migrated, channel: 'school', _isSchool: true });
+    });
+  }
+
+  if (foundCandidates) {
+    const validCands = foundCandidates.arr.filter((item) => isRecordObject(item));
+    if (validCands.length < foundCandidates.arr.length) {
+      warnings.push(
+        `Đã bỏ qua ${foundCandidates.arr.length - validCands.length} bản ghi ứng viên null/lỗi.`
+      );
+    }
+    validCands.forEach((rawItem) => {
+      const migrated = migrateCandidateRecord(rawItem);
+      if (migrated.channel === 'school' || migrated.schoolName) {
+        separatedStudents.push({ ...migrated, channel: 'school', _isSchool: true });
+      } else {
+        regularCandidates.push({ ...migrated, _isSchool: false });
+      }
+    });
+  }
+
+  const normalizedKyujins: KyujinCompany[] = foundKyujins
+    ? foundKyujins.arr
+        .filter((item) => isRecordObject(item))
+        .map((item) => normalizeKyujinItem(item))
+    : [];
+
+  if (foundKyujins && normalizedKyujins.length < foundKyujins.arr.length) {
+    warnings.push(
+      `Đã bỏ qua ${foundKyujins.arr.length - normalizedKyujins.length} bản ghi tin tuyển dụng null/lỗi.`
+    );
+  }
+
+  const normalizedPt: PtPartner[] = foundPt
+    ? (foundPt.arr.filter((item) => isRecordObject(item)) as unknown as PtPartner[])
+    : [];
+
+  const normalizedResignations: Array<Partial<ResignationRecord> & Record<string, unknown>> =
+    foundResignations
+      ? foundResignations.arr
+          .filter((item) => isRecordObject(item))
+          .map((item, idx) => {
+            const rec = item as Record<string, unknown>;
+            return {
+              ...rec,
+              id: cleanLegacyStr(rec.id) || `res_mig_${Date.now()}_${idx}`,
+              name: cleanLegacyStr(rec.name ?? rec.fullName ?? rec.full_name),
+              fbName: cleanLegacyStr(rec.fbName ?? rec.fb_name),
+              nationality: cleanLegacyStr(rec.nationality ?? rec.kokuseki),
+              previousCompany: cleanLegacyStr(
+                rec.previousCompany ?? rec.previous_company ?? rec.company ?? rec.company_name
+              ),
+              resignationDate: cleanLegacyStr(
+                rec.resignationDate ?? rec.resignation_date ?? rec.taishokubi
+              ),
+              paperworkDeadline: cleanLegacyStr(
+                rec.paperworkDeadline ?? rec.paperwork_deadline ?? rec.deadline
+              ),
+              handoverNote: cleanLegacyStr(
+                rec.handoverNote ?? rec.handover_note ?? rec.memo ?? rec.notes
+              ),
+              paperworkStatus: cleanLegacyStr(
+                rec.paperworkStatus ?? rec.paperwork_status ?? rec.status
+              ),
+            };
+          })
+      : [];
+
+  return {
+    candidates: regularCandidates,
+    schoolStudents: separatedStudents,
+    kyujins: normalizedKyujins,
+    ptPartners: normalizedPt,
+    resignations: normalizedResignations,
+    hasCandidatesSection: Boolean(foundCandidates),
+    hasStudentsSection: Boolean(foundStudents) || separatedStudents.length > 0,
+    hasKyujinsSection: Boolean(foundKyujins),
+    hasPtSection: Boolean(foundPt),
+    hasResignationsSection: Boolean(foundResignations),
+    recognizedKeys,
+    warnings,
   };
 };
 
@@ -1827,123 +2191,226 @@ export const sanitizeJobDescriptionForCandidate = (desc = ''): string => {
 };
 
 export const normalizeKyujinItem = (
-  comp: Partial<KyujinCompany> & Partial<KyujinSlot> = {}
+  compInput: (Partial<KyujinCompany> & Partial<KyujinSlot>) | unknown = {}
 ): KyujinCompany => {
-  const rawSlots: Partial<KyujinSlot>[] =
-    Array.isArray(comp.areaBreakdown) && comp.areaBreakdown.length > 0
-      ? comp.areaBreakdown
+  const rawCompObj =
+    compInput && typeof compInput === 'object' && !Array.isArray(compInput)
+      ? (compInput as Record<string, unknown>)
+      : {};
+  const comp = rawCompObj as Partial<KyujinCompany> & Partial<KyujinSlot> & Record<string, unknown>;
+
+  const compId = cleanLegacyStr(comp.id) || `kj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const compCompanyName = cleanLegacyStr(comp.companyName ?? comp.company_name ?? comp.name);
+  const compSector = cleanLegacyStr(comp.sector);
+  const compIndustry = cleanLegacyStr(comp.industry);
+  const compEmploymentType = cleanLegacyStr(comp.employmentType ?? comp.employment_type);
+  const compJobCode = cleanLegacyStr(comp.jobCode ?? comp.job_code);
+  const compArea = cleanLegacyStr(comp.area);
+  const compShiftTime = cleanLegacyStr(comp.shiftTime ?? comp.shift_time);
+  const compSalary = cleanLegacyStr(comp.salary);
+  const compNightShiftAllowance = cleanLegacyStr(
+    comp.nightShiftAllowance ?? comp.night_shift_allowance
+  );
+  const compEstimatedNetSalary = cleanLegacyStr(
+    comp.estimatedNetSalary ?? comp.estimated_net_salary
+  );
+  const compHourlyWage = cleanLegacyStr(comp.hourlyWage ?? comp.hourly_wage);
+  const compCommuteAllowance = cleanLegacyStr(
+    comp.commuteAllowance ?? comp.commute_allowance
+  );
+  const compShiftsPerWeek = cleanLegacyStr(comp.shiftsPerWeek ?? comp.shifts_per_week);
+  const compBonus = cleanLegacyStr(comp.bonus);
+  const compBonusDetail = cleanLegacyStr(comp.bonusDetail ?? comp.bonus_detail);
+  const compMinJlpt = cleanLegacyStr(comp.minJlpt ?? comp.min_jlpt);
+  const compHousingSupport = cleanLegacyStr(comp.housingSupport ?? comp.housing_support);
+  const compRecruitmentStatus = cleanLegacyStr(
+    comp.recruitmentStatus ?? comp.recruitment_status
+  );
+  const compCareQualification = cleanLegacyStr(
+    comp.careQualification ?? comp.care_qualification
+  );
+  const compExperienceRequirement = cleanLegacyStr(
+    comp.experienceRequirement ?? comp.experience_requirement
+  );
+  const compExperienceDetail = cleanLegacyStr(
+    comp.experienceDetail ?? comp.experience_detail
+  );
+  const compJobDescription = cleanLegacyStr(
+    comp.jobDescription ?? comp.job_description ?? comp.description
+  );
+  const compExcludedNats = toSafeStringArray(
+    comp.excludedNationalities ?? comp.excluded_nationalities
+  );
+  const compExcludedGenders = toSafeStringArray(
+    comp.excludedGenders ?? comp.excluded_genders
+  );
+  const compRequiredConditions = toSafeStringArray(
+    comp.requiredConditions ?? comp.required_conditions
+  );
+  const compNgConditions = toSafeStringArray(comp.ngConditions ?? comp.ng_conditions);
+  const compRequiresInJapan = Boolean(comp.requiresInJapan ?? comp.requires_in_japan);
+  const compRequiresTokutei = Boolean(comp.requiresTokutei ?? comp.requires_tokutei);
+
+  const candidateSlotArray = Array.isArray(comp.areaBreakdown)
+    ? comp.areaBreakdown
+    : Array.isArray(comp.area_breakdown)
+    ? comp.area_breakdown
+    : Array.isArray(comp.slots)
+    ? comp.slots
+    : Array.isArray(comp.jobs)
+    ? comp.jobs
+    : [];
+
+  const validSlots = candidateSlotArray.filter(
+    (s): s is Partial<KyujinSlot> & Record<string, unknown> =>
+      Boolean(s) && typeof s === 'object' && !Array.isArray(s)
+  );
+
+  const rawSlots: Array<Partial<KyujinSlot> & Record<string, unknown>> =
+    validSlots.length > 0
+      ? validSlots
       : [
           {
-            slotId: `${comp.id || 'kj'}_slot_1`,
-            sector: comp.sector,
-            industry: comp.industry,
-            employmentType: comp.employmentType,
-            jobCode: comp.jobCode,
-            area: comp.area,
-            shiftTime: comp.shiftTime,
-            salary: comp.salary,
-            nightShiftAllowance: comp.nightShiftAllowance,
-            estimatedNetSalary: comp.estimatedNetSalary,
-            hourlyWage: comp.hourlyWage,
-            commuteAllowance: comp.commuteAllowance,
-            shiftsPerWeek: comp.shiftsPerWeek,
-            bonus: comp.bonus,
-            bonusDetail: comp.bonusDetail,
-            minJlpt: comp.minJlpt,
-            housingSupport: comp.housingSupport,
-            recruitmentStatus: comp.recruitmentStatus || '募集中',
-            careQualification: comp.careQualification || '',
-            experienceRequirement: comp.experienceRequirement,
-            experienceDetail: comp.experienceDetail,
-            jobDescription: comp.jobDescription || '',
+            slotId: `${compId}_slot_1`,
+            sector: compSector,
+            industry: compIndustry,
+            employmentType: compEmploymentType,
+            jobCode: compJobCode,
+            area: compArea,
+            shiftTime: compShiftTime,
+            salary: compSalary,
+            nightShiftAllowance: compNightShiftAllowance,
+            estimatedNetSalary: compEstimatedNetSalary,
+            hourlyWage: compHourlyWage,
+            commuteAllowance: compCommuteAllowance,
+            shiftsPerWeek: compShiftsPerWeek,
+            bonus: compBonus,
+            bonusDetail: compBonusDetail,
+            minJlpt: compMinJlpt,
+            housingSupport: compHousingSupport,
+            recruitmentStatus: compRecruitmentStatus || '募集中',
+            careQualification: compCareQualification || '',
+            experienceRequirement: compExperienceRequirement,
+            experienceDetail: compExperienceDetail,
+            jobDescription: compJobDescription || '',
           },
         ];
 
-  const normalizedSlots: KyujinSlot[] = rawSlots.map((sl, idx) => {
-    const cleanDesc = sanitizeJobDescriptionForCandidate(
-      sl.jobDescription || comp.jobDescription || ''
-    );
-    const slIndustry = sl.industry || comp.industry || '特定技能';
+  const normalizedSlots: KyujinSlot[] = rawSlots.map((slObj, idx) => {
+    const sl = slObj as Partial<KyujinSlot> & Record<string, unknown>;
+    const slJobDescRaw = cleanLegacyStr(sl.jobDescription ?? sl.job_description ?? sl.description);
+    const cleanDesc = sanitizeJobDescriptionForCandidate(slJobDescRaw || compJobDescription || '');
+    const slIndustry = cleanLegacyStr(sl.industry) || compIndustry || '特定技能';
     const slSector =
-      sl.sector ||
-      comp.sector ||
+      cleanLegacyStr(sl.sector) ||
+      compSector ||
       detectSectorFromIndustryOrText(slIndustry, cleanDesc);
+    const slSalaryRaw = cleanLegacyStr(sl.salary);
+    const slHourlyRaw = cleanLegacyStr(sl.hourlyWage ?? sl.hourly_wage);
     const slEmploymentType =
-      sl.employmentType ||
-      comp.employmentType ||
-      detectEmploymentTypeFromText(`${sl.salary || ''} ${sl.hourlyWage || ''} ${cleanDesc}`);
+      cleanLegacyStr(sl.employmentType ?? sl.employment_type) ||
+      compEmploymentType ||
+      detectEmploymentTypeFromText(
+        `${slSalaryRaw || compSalary} ${slHourlyRaw || compHourlyWage} ${cleanDesc}`
+      );
     const facilityType =
-      sl.facilityType ||
+      cleanLegacyStr(sl.facilityType ?? sl.facility_type) ||
       extractSingleKaigoFacilityTypeForSlot(
         { ...sl, jobDescription: cleanDesc },
         slIndustry
       );
     const bonusNorm = normalizeBonusInfo(
-      sl.bonus || comp.bonus,
-      sl.bonusDetail || comp.bonusDetail,
-      `${sl.jobDescription || ''} ${comp.jobDescription || ''}`
+      cleanLegacyStr(sl.bonus) || compBonus,
+      cleanLegacyStr(sl.bonusDetail ?? sl.bonus_detail) || compBonusDetail,
+      `${slJobDescRaw} ${compJobDescription}`
     );
+    const slCareQual =
+      cleanLegacyStr(sl.careQualification ?? sl.care_qualification) || compCareQualification;
     const expReq =
-      sl.experienceRequirement ||
-      comp.experienceRequirement ||
+      cleanLegacyStr(sl.experienceRequirement ?? sl.experience_requirement) ||
+      compExperienceRequirement ||
       (/経験者必須|経験あり必須|要経験/.test(cleanDesc)
         ? 'Yêu cầu có kinh nghiệm (経験者必須)'
-        : /未経験OK|未経験歓迎|不問/.test(`${cleanDesc} ${sl.careQualification || ''}`)
+        : /未経験OK|未経験歓迎|不問/.test(`${cleanDesc} ${slCareQual}`)
         ? 'Không yêu cầu kinh nghiệm (未経験OK)'
         : '');
 
-    const slotMinJlpt = String(sl.minJlpt || comp.minJlpt || '要確認').trim();
+    const slotMinJlpt =
+      cleanLegacyStr(sl.minJlpt ?? sl.min_jlpt) || compMinJlpt || '要確認';
+    const slExpDetail =
+      cleanLegacyStr(sl.experienceDetail ?? sl.experience_detail) || compExperienceDetail;
     const conds = extractNormalizedKyujinConditions({
-      text: `${cleanDesc} ${sl.experienceDetail || comp.experienceDetail || ''} ${sl.careQualification || comp.careQualification || ''}`,
+      text: `${cleanDesc} ${slExpDetail} ${slCareQual}`,
       minJlpt: slotMinJlpt,
       employmentType: slEmploymentType,
       existingExcludedNationalities: [
-        ...(comp.excludedNationalities || []),
-        ...(sl.excludedNationalities || []),
+        ...compExcludedNats,
+        ...toSafeStringArray(sl.excludedNationalities ?? sl.excluded_nationalities),
       ],
       existingExcludedGenders: [
-        ...(comp.excludedGenders || []),
-        ...(sl.excludedGenders || []),
+        ...compExcludedGenders,
+        ...toSafeStringArray(sl.excludedGenders ?? sl.excluded_genders),
       ],
-      existingRequiresInJapan: Boolean(sl.requiresInJapan ?? comp.requiresInJapan),
-      existingRequiresTokutei: Boolean(sl.requiresTokutei ?? comp.requiresTokutei),
+      existingRequiresInJapan: Boolean(
+        sl.requiresInJapan ?? sl.requires_in_japan ?? compRequiresInJapan
+      ),
+      existingRequiresTokutei: Boolean(
+        sl.requiresTokutei ?? sl.requires_tokutei ?? compRequiresTokutei
+      ),
       existingRequiredConditions: [
-        ...(comp.requiredConditions || []),
-        ...(sl.requiredConditions || []),
+        ...compRequiredConditions,
+        ...toSafeStringArray(sl.requiredConditions ?? sl.required_conditions),
       ],
       existingNgConditions: [
-        ...(comp.ngConditions || []),
-        ...(sl.ngConditions || []),
+        ...compNgConditions,
+        ...toSafeStringArray(sl.ngConditions ?? sl.ng_conditions),
       ],
     });
 
+    const slRecStatus =
+      cleanLegacyStr(sl.recruitmentStatus ?? sl.recruitment_status) === '募集終了' ||
+      compRecruitmentStatus === '募集終了'
+        ? '募集終了'
+        : '募集中';
+
+    const effectiveHourly = slHourlyRaw || compHourlyWage;
+    const effectiveSalary =
+      slSalaryRaw ||
+      compSalary ||
+      (effectiveHourly ? `時給 ${effectiveHourly}` : '給与要確認');
+
     return {
       ...sl,
-      slotId: sl.slotId || `${comp.id || 'kj'}_slot_${idx + 1}`,
+      slotId: cleanLegacyStr(sl.slotId ?? sl.slot_id) || `${compId}_slot_${idx + 1}`,
       sector: slSector,
       industry: slIndustry,
       employmentType: slEmploymentType,
-      jobCode: String(sl.jobCode || comp.jobCode || '').trim(),
-      area: String(sl.area || comp.area || '').trim(),
-      shiftTime: String(sl.shiftTime || comp.shiftTime || '').trim(),
-      salary: String(sl.salary || comp.salary || (sl.hourlyWage ? `時給 ${sl.hourlyWage}` : '給与要確認')).trim(),
-      nightShiftAllowance: String(sl.nightShiftAllowance || comp.nightShiftAllowance || '').trim(),
-      estimatedNetSalary: String(sl.estimatedNetSalary || comp.estimatedNetSalary || '').trim(),
-      hourlyWage: String(sl.hourlyWage || comp.hourlyWage || '').trim(),
-      commuteAllowance: String(sl.commuteAllowance || comp.commuteAllowance || '').trim(),
-      shiftsPerWeek: String(sl.shiftsPerWeek || comp.shiftsPerWeek || '').trim(),
+      jobCode: cleanLegacyStr(sl.jobCode ?? sl.job_code) || compJobCode,
+      area: cleanLegacyStr(sl.area) || compArea,
+      shiftTime: cleanLegacyStr(sl.shiftTime ?? sl.shift_time) || compShiftTime,
+      salary: effectiveSalary,
+      nightShiftAllowance:
+        cleanLegacyStr(sl.nightShiftAllowance ?? sl.night_shift_allowance) ||
+        compNightShiftAllowance,
+      estimatedNetSalary:
+        cleanLegacyStr(sl.estimatedNetSalary ?? sl.estimated_net_salary) ||
+        compEstimatedNetSalary,
+      hourlyWage: effectiveHourly,
+      commuteAllowance:
+        cleanLegacyStr(sl.commuteAllowance ?? sl.commute_allowance) || compCommuteAllowance,
+      shiftsPerWeek:
+        cleanLegacyStr(sl.shiftsPerWeek ?? sl.shifts_per_week) || compShiftsPerWeek,
       bonus: bonusNorm.bonus,
       bonusDetail: bonusNorm.bonusDetail,
       minJlpt: slotMinJlpt,
-      housingSupport: normalizeHousingDisplay(sl.housingSupport || comp.housingSupport),
-      recruitmentStatus:
-        sl.recruitmentStatus === '募集終了' || comp.recruitmentStatus === '募集終了'
-          ? '募集終了'
-          : '募集中',
-      careQualification: sl.careQualification || comp.careQualification || '',
+      housingSupport: normalizeHousingDisplay(
+        cleanLegacyStr(sl.housingSupport ?? sl.housing_support) || compHousingSupport
+      ),
+      recruitmentStatus: slRecStatus,
+      careQualification: slCareQual,
       facilityType,
       experienceRequirement: expReq,
-      experienceDetail: String(sl.experienceDetail || comp.experienceDetail || '').trim(),
+      experienceDetail: slExpDetail,
       jobDescription: cleanDesc,
       excludedNationalities: conds.excludedNationalities,
       excludedGenders: conds.excludedGenders,
@@ -1953,50 +2420,50 @@ export const normalizeKyujinItem = (
       ngConditions: conds.ngConditions,
       ...(sl.salaryManuallyEdited ? { salaryManuallyEdited: true } : {}),
       ...(Array.isArray(sl.manualProtectedFields) && sl.manualProtectedFields.length > 0
-        ? { manualProtectedFields: sl.manualProtectedFields }
+        ? { manualProtectedFields: toSafeStringArray(sl.manualProtectedFields) }
         : {}),
     };
   });
 
   const hasAnyOpen = normalizedSlots.some((s) => s.recruitmentStatus !== '募集終了');
   const primaryIndustry =
-    normalizedSlots[0]?.industry || String(comp.industry || '特定技能').trim();
+    normalizedSlots[0]?.industry || compIndustry || '特定技能';
   const primarySector =
     normalizedSlots[0]?.sector ||
-    comp.sector ||
+    compSector ||
     detectSectorFromIndustryOrText(primaryIndustry);
   const primaryEmpType =
     normalizedSlots[0]?.employmentType ||
-    comp.employmentType ||
+    compEmploymentType ||
     'Tokutei Ginou (特定技能)';
   const mergedExcludedNationalities = Array.from(
     new Set([
-      ...(comp.excludedNationalities || []).map((n) => normalizeCanonicalNationality(n)).filter(Boolean),
-      ...normalizedSlots.flatMap((s) => s.excludedNationalities || []),
+      ...compExcludedNats.map((n) => normalizeCanonicalNationality(n)).filter(Boolean),
+      ...normalizedSlots.flatMap((s) => toSafeStringArray(s.excludedNationalities)),
     ])
   );
   const mergedExcludedGenders = Array.from(
     new Set([
-      ...(comp.excludedGenders || []).map((g) => normalizeCanonicalGender(g)).filter(Boolean),
-      ...normalizedSlots.flatMap((s) => s.excludedGenders || []),
+      ...compExcludedGenders.map((g) => normalizeCanonicalGender(g)).filter(Boolean),
+      ...normalizedSlots.flatMap((s) => toSafeStringArray(s.excludedGenders)),
     ])
   );
   const mergedRequiredConditions = Array.from(
     new Set([
-      ...(comp.requiredConditions || []),
-      ...normalizedSlots.flatMap((s) => s.requiredConditions || []),
+      ...compRequiredConditions,
+      ...normalizedSlots.flatMap((s) => toSafeStringArray(s.requiredConditions)),
     ])
   );
   const mergedNgConditions = Array.from(
     new Set([
-      ...(comp.ngConditions || []),
-      ...normalizedSlots.flatMap((s) => s.ngConditions || []),
+      ...compNgConditions,
+      ...normalizedSlots.flatMap((s) => toSafeStringArray(s.ngConditions)),
     ])
   );
 
   return {
-    id: comp.id || `kj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    companyName: String(comp.companyName || '名称未設定企業')
+    id: compId,
+    companyName: (compCompanyName || '名称未設定企業')
       .replace(/\s*代表者.*$/, '')
       .trim(),
     sector: primarySector,
@@ -2005,8 +2472,12 @@ export const normalizeKyujinItem = (
     recruitmentStatus: hasAnyOpen ? '募集中' : '募集終了',
     excludedNationalities: mergedExcludedNationalities,
     excludedGenders: mergedExcludedGenders,
-    requiresInJapan: Boolean(comp.requiresInJapan || normalizedSlots.some((s) => s.requiresInJapan)),
-    requiresTokutei: Boolean(comp.requiresTokutei || normalizedSlots.some((s) => s.requiresTokutei)),
+    requiresInJapan: Boolean(
+      compRequiresInJapan || normalizedSlots.some((s) => s.requiresInJapan)
+    ),
+    requiresTokutei: Boolean(
+      compRequiresTokutei || normalizedSlots.some((s) => s.requiresTokutei)
+    ),
     requiredConditions: mergedRequiredConditions,
     ngConditions: mergedNgConditions,
     areaBreakdown: normalizedSlots,

@@ -102,6 +102,7 @@ import {
   getUrgentFollowUpReason,
   isActualProposedRecord,
   migrateCandidateRecord,
+  migrateLegacyData,
   normalizeBonusInfo,
   normalizeHousingDisplay,
   normalizeKyujinItem,
@@ -113,6 +114,12 @@ import {
   recognizeCandidateImageWithTesseract,
   sanitizeJobDescriptionForCandidate,
 } from './utils/crmHelpers';
+import {
+  compressSavedRirekishoInCandidates,
+  loadCandidateCvsFromIdb,
+  persistCandidatesWithIdbFallback,
+  persistJsonWithQuotaCheck,
+} from './utils/cvStorage';
 import {
   buildCandidateCalendarEventDraft,
   buildGoogleCalendarTemplateUrl,
@@ -486,8 +493,9 @@ export default function App() {
   const sqlSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skipNextSqlSaveRef = useRef(false);
 
-  // Toast Notification
+  // Toast Notification & Backup Restore Diagnostic Alert
   const [toastMsg, setToastMsg] = useState('');
+  const [backupRestoreError, setBackupRestoreError] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backupInputRef = useRef<HTMLInputElement | null>(null);
   const kyujinFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1726,44 +1734,66 @@ export default function App() {
     };
   }, [authStatus, authUser, candidates, schoolStudents, kyujins, ptPartners, resignations]);
 
+  // Hydrate any offloaded CV / portrait photo payloads stored in IndexedDB on startup
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.CANDIDATES, JSON.stringify(candidates));
-    } catch {
-      // ignore quota errors
-    }
+    let cancelled = false;
+    void loadCandidateCvsFromIdb().then((cvMap) => {
+      if (cancelled || !cvMap || Object.keys(cvMap).length === 0) return;
+      const mergeCv = (list: Candidate[]): Candidate[] => {
+        let changed = false;
+        const next = list.map((cand) => {
+          const storedCv = cvMap[cand.id];
+          if (!storedCv) return cand;
+          const missingEntireCv = !cand.savedRirekisho;
+          const missingPhoto =
+            Boolean(storedCv.draft?.photoDataUrl) && !cand.savedRirekisho?.draft?.photoDataUrl;
+          if (missingEntireCv) {
+            changed = true;
+            return { ...cand, savedRirekisho: storedCv };
+          }
+          if (missingPhoto && cand.savedRirekisho) {
+            changed = true;
+            return {
+              ...cand,
+              savedRirekisho: {
+                ...cand.savedRirekisho,
+                draft: {
+                  ...cand.savedRirekisho.draft,
+                  photoDataUrl: storedCv.draft.photoDataUrl,
+                },
+              },
+            };
+          }
+          return cand;
+        });
+        return changed ? next : list;
+      };
+      setCandidates((prev) => mergeCv(prev));
+      setSchoolStudents((prev) => mergeCv(prev));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    void persistCandidatesWithIdbFallback(STORAGE_KEYS.CANDIDATES, candidates);
   }, [candidates]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.SCHOOL_STUDENTS, JSON.stringify(schoolStudents));
-    } catch {
-      // ignore quota errors
-    }
+    void persistCandidatesWithIdbFallback(STORAGE_KEYS.SCHOOL_STUDENTS, schoolStudents);
   }, [schoolStudents]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.KYUJINS, JSON.stringify(kyujins));
-    } catch {
-      // ignore quota errors
-    }
+    persistJsonWithQuotaCheck(STORAGE_KEYS.KYUJINS, kyujins);
   }, [kyujins]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.PT_PARTNERS, JSON.stringify(ptPartners));
-    } catch {
-      // ignore quota errors
-    }
+    persistJsonWithQuotaCheck(STORAGE_KEYS.PT_PARTNERS, ptPartners);
   }, [ptPartners]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.RESIGNATIONS, JSON.stringify(resignations));
-    } catch {
-      // ignore quota errors
-    }
+    persistJsonWithQuotaCheck(STORAGE_KEYS.RESIGNATIONS, resignations);
   }, [resignations]);
 
   useEffect(() => {
@@ -2376,21 +2406,31 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
   const handleImportBackupJson = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setBackupRestoreError(null);
     try {
-      const text = await file.text();
+      const rawText = await file.text();
+      // Strip UTF-8 BOM and NUL characters commonly left by older exports
+      const cleanText = rawText.replace(/^\uFEFF/, '').replace(/\u0000/g, '').trim();
+      if (!cleanText) {
+        throw new Error(
+          uiLang === 'jp'
+            ? '選択されたファイルは空です（データが含まれていません）。'
+            : 'File backup được chọn đang rỗng (không có nội dung).'
+        );
+      }
+
       const isCsvFile =
         file.name.toLowerCase().endsWith('.csv') ||
-        (!text.trim().startsWith('{') && !text.trim().startsWith('['));
+        (!cleanText.startsWith('{') && !cleanText.startsWith('['));
 
       if (isCsvFile) {
-        const migratedRows = parseBackupCsvToCandidates(text);
+        const migratedRows = parseBackupCsvToCandidates(cleanText);
         if (migratedRows.length === 0) {
-          showToast(
+          throw new Error(
             uiLang === 'jp'
-              ? '⚠️ CSVファイルに有効な相談者データが見つかりません'
-              : '⚠️ Không tìm thấy dữ liệu ứng viên hợp lệ trong file CSV'
+              ? 'CSVファイルに有効な相談者データが見つかりません（ヘッダー行またはデータ行が空です）。'
+              : 'Không tìm thấy dữ liệu ứng viên hợp lệ trong file CSV (thiếu dòng tiêu đề hoặc dòng dữ liệu).'
           );
-          return;
         }
         const csvStudents: Candidate[] = [];
         const csvCandidates: Candidate[] = [];
@@ -2403,9 +2443,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         });
         if (csvCandidates.length > 0) {
           setCandidates(csvCandidates);
+          await persistCandidatesWithIdbFallback(STORAGE_KEYS.CANDIDATES, csvCandidates);
         }
         if (csvStudents.length > 0) {
           setSchoolStudents(csvStudents);
+          await persistCandidatesWithIdbFallback(STORAGE_KEYS.SCHOOL_STUDENTS, csvStudents);
         }
         setGasWriteLocked(true);
         showToast(
@@ -2416,78 +2458,124 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         return;
       }
 
-      const parsed = JSON.parse(text);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(cleanText);
+      } catch (jsonErr) {
+        const detail = jsonErr instanceof Error ? jsonErr.message : String(jsonErr);
+        throw new Error(
+          uiLang === 'jp'
+            ? `JSON構文エラーのためファイルを読み込めませんでした（${detail}）。`
+            : `Lỗi cú pháp JSON không thể đọc file (${detail}).`
+        );
+      }
 
-      const rawCandidates: unknown[] = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed.candidates)
-        ? parsed.candidates
+      const migrated = migrateLegacyData(parsed);
+
+      const compressedCandidates = migrated.hasCandidatesSection
+        ? await compressSavedRirekishoInCandidates(migrated.candidates)
         : [];
-      const explicitStudents: Candidate[] = Array.isArray(parsed.schoolStudents)
-        ? parsed.schoolStudents.map(migrateCandidateRecord)
+      const compressedStudents = migrated.hasStudentsSection
+        ? await compressSavedRirekishoInCandidates(migrated.schoolStudents)
         : [];
 
-      const separatedStudents = [...explicitStudents];
-      const regularCandidates: Candidate[] = [];
-      rawCandidates.forEach((rawItem) => {
-        const migrated = migrateCandidateRecord(rawItem);
-        if (migrated.channel === 'school' || migrated.schoolName) {
-          separatedStudents.push({ ...migrated, channel: 'school', _isSchool: true });
-        } else {
-          regularCandidates.push({ ...migrated, _isSchool: false });
+      let usedIndexedDbOffload = false;
+      const storageErrors: string[] = [];
+
+      if (migrated.hasCandidatesSection) {
+        setCandidates(compressedCandidates);
+        const persistRes = await persistCandidatesWithIdbFallback(
+          STORAGE_KEYS.CANDIDATES,
+          compressedCandidates
+        );
+        if (persistRes.mode === 'indexeddb_offload') usedIndexedDbOffload = true;
+        if (persistRes.mode === 'error' && persistRes.errorMessage) {
+          storageErrors.push(persistRes.errorMessage);
         }
-      });
+      }
 
-      if (regularCandidates.length > 0 || Array.isArray(parsed.candidates) || Array.isArray(parsed)) {
-        setCandidates(regularCandidates);
+      if (migrated.hasStudentsSection) {
+        setSchoolStudents(compressedStudents);
+        const persistStuRes = await persistCandidatesWithIdbFallback(
+          STORAGE_KEYS.SCHOOL_STUDENTS,
+          compressedStudents
+        );
+        if (persistStuRes.mode === 'indexeddb_offload') usedIndexedDbOffload = true;
+        if (persistStuRes.mode === 'error' && persistStuRes.errorMessage) {
+          storageErrors.push(persistStuRes.errorMessage);
+        }
       }
-      if (separatedStudents.length > 0 || Array.isArray(parsed.schoolStudents)) {
-        setSchoolStudents(separatedStudents);
+
+      if (migrated.hasKyujinsSection) {
+        setKyujins(migrated.kyujins);
+        const kjPersist = persistJsonWithQuotaCheck(STORAGE_KEYS.KYUJINS, migrated.kyujins);
+        if (!kjPersist.ok && kjPersist.errorMessage) {
+          storageErrors.push(`Kyujins: ${kjPersist.errorMessage}`);
+        }
       }
-      if (Array.isArray(parsed.kyujins)) {
-        setKyujins(parsed.kyujins.map(normalizeKyujinItem));
+
+      if (migrated.hasPtSection) {
+        setPtPartners(migrated.ptPartners);
+        persistJsonWithQuotaCheck(STORAGE_KEYS.PT_PARTNERS, migrated.ptPartners);
       }
-      const importedPt = Array.isArray(parsed.ptPartners)
-        ? parsed.ptPartners
-        : Array.isArray(parsed.partners)
-        ? parsed.partners
-        : Array.isArray(parsed.ptList)
-        ? parsed.ptList
-        : null;
-      if (importedPt) {
-        setPtPartners(importedPt);
-      }
-      if (Array.isArray(parsed.resignations)) {
+
+      if (migrated.hasResignationsSection) {
         setResignations((prev) => {
           const prevById = new Map(prev.map((item) => [item.id, item]));
-          return parsed.resignations.map(
-            (rawRow: Partial<ResignationRecord> & Record<string, unknown>) =>
-              normalizeAndAutoComputeResignationDates(
-                mergeResignationWithGasProtection(
-                  rawRow.id ? prevById.get(String(rawRow.id)) : undefined,
-                  rawRow,
-                  gasWriteLocked
-                )
+          return migrated.resignations.map((rawRow) =>
+            normalizeAndAutoComputeResignationDates(
+              mergeResignationWithGasProtection(
+                rawRow.id ? prevById.get(String(rawRow.id)) : undefined,
+                {
+                  ...rawRow,
+                  nationality: normalizeResignationNationality(
+                    typeof rawRow.nationality === 'string' ? rawRow.nationality : ''
+                  ),
+                },
+                gasWriteLocked
               )
+            )
           );
         });
       }
 
+      if (storageErrors.length > 0) {
+        throw new Error(
+          uiLang === 'jp'
+            ? `ブラウザの保存容量上限（localStorage）を超えました：${storageErrors.join(' / ')}`
+            : `Vượt quá giới hạn lưu trữ trình duyệt (localStorage): ${storageErrors.join(' / ')}`
+        );
+      }
+
       setGasWriteLocked(true);
+      const candCount = migrated.hasCandidatesSection
+        ? compressedCandidates.length
+        : candidates.length;
+      const stuCount = migrated.hasStudentsSection
+        ? compressedStudents.length
+        : schoolStudents.length;
+      const kyujinCount = migrated.hasKyujinsSection
+        ? migrated.kyujins.length
+        : kyujins.length;
+      const idbNote = usedIndexedDbOffload
+        ? uiLang === 'jp'
+          ? ' ・大容量CV/写真はIndexedDBへ退避済'
+          : ' (Ảnh/CV dung lượng lớn đã tự động lưu sang IndexedDB)'
+        : '';
+
       showToast(
         uiLang === 'jp'
-          ? `📂 データ復元完了（自動移行済）：相談者 ${regularCandidates.length}名 ／ 留学生 ${separatedStudents.length}名 ／ 求人 ${
-              Array.isArray(parsed.kyujins) ? parsed.kyujins.length : kyujins.length
-            }社`
-          : `📂 Khôi phục & chuẩn hóa xong: ${regularCandidates.length} ứng viên / ${separatedStudents.length} DHS / ${
-              Array.isArray(parsed.kyujins) ? parsed.kyujins.length : kyujins.length
-            } công ty`
+          ? `📂 データ復元完了（自動移行済）：相談者 ${candCount}名 ／ 留学生 ${stuCount}名 ／ 求人 ${kyujinCount}社${idbNote}`
+          : `📂 Khôi phục & chuẩn hóa xong: ${candCount} ứng viên / ${stuCount} DHS / ${kyujinCount} công ty${idbNote}`
       );
-    } catch {
+    } catch (err) {
+      const errorDetail =
+        err instanceof Error ? err.message : String(err || 'Lỗi không xác định');
+      setBackupRestoreError(errorDetail);
       showToast(
         uiLang === 'jp'
-          ? '⚠️ バックアップファイル（JSON/CSV）の読み込みに失敗しました'
-          : '⚠️ Lỗi đọc file backup (JSON/CSV)'
+          ? `⚠️ データ復元エラー：${errorDetail}`
+          : `⚠️ Lỗi khôi phục backup: ${errorDetail}`
       );
     } finally {
       e.target.value = '';
@@ -5262,8 +5350,39 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-[#0F172A]">
       {toastMsg && (
-        <div className="fixed bottom-20 right-5 z-[10000] rounded-lg border border-emerald-200 bg-white px-4 py-3 text-xs font-bold text-emerald-700 shadow-lg">
+        <div className="fixed bottom-20 right-5 z-[10000] max-w-md rounded-lg border border-emerald-200 bg-white px-4 py-3 text-xs font-bold text-emerald-700 shadow-lg">
           {toastMsg}
+        </div>
+      )}
+
+      {backupRestoreError && (
+        <div
+          role="alert"
+          className="fixed bottom-5 right-5 z-[10001] max-w-lg rounded-xl border border-rose-300 bg-white p-4 shadow-xl"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" aria-hidden="true" />
+              <div className="space-y-1">
+                <p className="text-xs font-bold text-rose-700">
+                  {uiLang === 'jp'
+                    ? 'データ復元（データ復元）に失敗しました'
+                    : 'Lỗi chi tiết khi khôi phục file backup (データ復元)'}
+                </p>
+                <p className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[#334155]">
+                  {backupRestoreError}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setBackupRestoreError(null)}
+              className="rounded p-1 text-[#64748B] hover:bg-[#F1F5F9] hover:text-[#0F172A] cursor-pointer"
+              aria-label="Close"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
       )}
 
