@@ -49,6 +49,7 @@ import {
   PROPOSED_NAITEI_STATUSES,
   PROPOSED_JITAI_STATUSES,
   JLPT_LEVELS,
+  CANDIDATE_NATIONALITIES,
   INITIAL_CANDIDATES,
   INITIAL_SCHOOL_STUDENTS,
   INITIAL_KYUJINS,
@@ -74,6 +75,7 @@ import type {
   SavedRirekishoRecord,
 } from './types/crm';
 import {
+  autoFixCandidatesNationalities,
   buildAnonymousJobPostText,
   buildRirekishoFallbackFromText,
   buildRirekishoStandaloneHtml,
@@ -83,6 +85,7 @@ import {
   copyTextSafely,
   detectEmploymentTypeFromText,
   detectIndustryFromText,
+  detectKyujinShiftType,
   detectSectorFromIndustryOrText,
   doesAreaMatchFilter,
   evaluateCandidateKyujinMatches,
@@ -95,15 +98,18 @@ import {
   extractNormalizedMendanInfo,
   extractRirekishoTextFromLocalFile,
   extractRirekishoViaServer,
+  findDuplicateCandidate,
   formatPublicArea,
   getEffectiveProposedCompany,
   getInitialRirekishoDraftForCandidate,
   getMissingInfoForCandidate,
   getUrgentFollowUpReason,
   isActualProposedRecord,
+  isStale7DayProposal,
   migrateCandidateRecord,
   migrateLegacyData,
   normalizeBonusInfo,
+  normalizeCandidateNationality,
   normalizeHousingDisplay,
   normalizeKyujinItem,
   parseBackupCsvToCandidates,
@@ -140,6 +146,8 @@ import {
   buildResignationReminderMessages,
   convertResignationToCandidate,
   getJstTodayYmd,
+  getResignationCompanyLabel,
+  hasUnconfirmedResignationDate,
   mergeResignationWithGasProtection,
   normalizeAndAutoComputeResignationDates,
   normalizeResignationNationality,
@@ -342,10 +350,19 @@ export default function App() {
   const [kyujinIndustryFilter, setKyujinIndustryFilter] = useState('all');
   const [kyujinEmploymentTypeFilter, setKyujinEmploymentTypeFilter] = useState('all');
   const [kyujinFacilityFilter, setKyujinFacilityFilter] = useState('all');
+  const [kyujinShiftTypeFilter, setKyujinShiftTypeFilter] = useState<
+    'all' | '日勤のみ' | 'シフト制' | '夜勤あり'
+  >('all');
   const [selectedSlotIds, setSelectedSlotIds] = useState<string[]>([]);
   const [editingKyujinSalary, setEditingKyujinSalary] = useState<{
     companyId: string;
     slotId: string;
+    value: string;
+  } | null>(null);
+  const [editingKyujinField, setEditingKyujinField] = useState<{
+    companyId: string;
+    slotId: string;
+    field: 'shiftTime' | 'jobCode' | 'area';
     value: string;
   } | null>(null);
   const salaryEditCommitLockRef = useRef<string | null>(null);
@@ -1285,6 +1302,17 @@ export default function App() {
     },
     [gasWriteLocked, showToast, uiLang]
   );
+
+  const handleBulkUpdateResignations = useCallback((updatedRecords: ResignationRecord[]) => {
+    setResignations(
+      updatedRecords.map((item) =>
+        normalizeAndAutoComputeResignationDates({
+          ...item,
+          nationality: normalizeResignationNationality(item.nationality),
+        })
+      )
+    );
+  }, []);
 
   const handleConvertResignationToCandidate = useCallback(
     (record: ResignationRecord) => {
@@ -2586,12 +2614,29 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
   // DERIVED COLLECTIONS
   // ==========================================================================
   const personalCandidates = useMemo(
-    () => candidates.filter((c) => c.channel !== 'company' && c.channel !== 'school'),
+    () =>
+      candidates.filter(
+        (c) =>
+          c.channel !== 'company' &&
+          c.channel !== 'school' &&
+          c.channel !== 'line' &&
+          c.channel !== 'other'
+      ),
     [candidates]
   );
 
   const companyCandidates = useMemo(
     () => candidates.filter((c) => c.channel === 'company'),
+    [candidates]
+  );
+
+  const lineCandidates = useMemo(
+    () => candidates.filter((c) => c.channel === 'line'),
+    [candidates]
+  );
+
+  const otherCandidates = useMemo(
+    () => candidates.filter((c) => c.channel === 'other'),
     [candidates]
   );
 
@@ -2704,7 +2749,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           record,
           assessment: assessResignationDeadline(
             record.paperworkDeadline,
-            record.paperworkStatus
+            record.paperworkStatus,
+            uiLang
           ),
         };
       })
@@ -2715,7 +2761,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           assessment.urgency === 'warn7'
       )
       .sort((a, b) => (a.assessment.daysLeft ?? 999) - (b.assessment.daysLeft ?? 999));
-  }, [resignations, periodicScanTick]);
+  }, [resignations, periodicScanTick, uiLang]);
 
   const urgentResignationAlerts = useMemo(
     () =>
@@ -2826,6 +2872,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     // 0. URGENT (<= 3 days or overdue) Resignation paperwork deadlines pinned at VERY TOP
     urgentResignationAlerts.forEach(({ record, assessment }) => {
       const displayName = getResignationDisplayName(record, uiLang);
+      const compLabel = getResignationCompanyLabel(record.previousCompany, uiLang);
       const urgentTitle =
         assessment.daysLeft !== null && assessment.daysLeft < 0
           ? dfLabels.overdue(Math.abs(assessment.daysLeft), displayName)
@@ -2839,13 +2886,59 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         subtitle: dfLabels.resigSub(
           record.paperworkDeadline || '-',
           record.resignationDate || '-',
-          record.previousCompany
+          compLabel
         ),
         urgency: 'critical',
         targetTab: 'resignation',
         entityId: record.id,
       });
     });
+
+    // 0b. Unconfirmed resignation dates (退職日未確定)
+    resignations
+      .map((r) => normalizeAndAutoComputeResignationDates(r))
+      .filter(hasUnconfirmedResignationDate)
+      .slice(0, 5)
+      .forEach((record) => {
+        const displayName = getResignationDisplayName(record, uiLang);
+        const compLabel = getResignationCompanyLabel(record.previousCompany, uiLang);
+        items.push({
+          id: `focus_resig_unconf_${record.id}`,
+          category: 'resignation_unconfirmed',
+          title:
+            uiLang === 'jp'
+              ? `⚠️ 退職日未確定・要確認: ${displayName}`
+              : `⚠️ Chưa rõ ngày nghỉ việc: ${displayName}`,
+          subtitle:
+            uiLang === 'jp'
+              ? `${compLabel} · 本人へ最終出社日を確認してください`
+              : `${compLabel} · Cần nhắn xác nhận ngày nghỉ chính thức`,
+          urgency: 'warning',
+          targetTab: 'resignation',
+          entityId: record.id,
+        });
+      });
+
+    // 0c. Stale proposed candidates (> 7 days in 企業提案中 / 面接待ち)
+    allPeopleCombined
+      .filter((p) => isStale7DayProposal(p))
+      .slice(0, 5)
+      .forEach((p) => {
+        const displayName = getCandidateDisplayName(p, uiLang);
+        const comp = getEffectiveProposedCompany(p) || '-';
+        items.push({
+          id: `focus_stale_prop_${p.id}`,
+          category: 'stale_proposed',
+          title:
+            uiLang === 'jp'
+              ? `⏰ 推薦後7日経過・要確認: ${displayName}`
+              : `⏰ Quá 7 ngày chưa có KQ: ${displayName}`,
+          subtitle: `${comp} · ${p.proposalDate || p.lastContactDate || '-'}`,
+          urgency: 'critical',
+          targetTab: 'proposed',
+          entityId: p.id,
+        });
+      });
 
     // 1. Mendan / Interview today or tomorrow
     allPeopleCombined.forEach((p) => {
@@ -2878,11 +2971,12 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       .filter(({ assessment }) => assessment.urgency === 'warn7')
       .forEach(({ record, assessment }) => {
         const displayName = getResignationDisplayName(record, uiLang);
+        const compLabel = getResignationCompanyLabel(record.previousCompany, uiLang);
         items.push({
           id: `focus_resig_${record.id}`,
           category: 'resignation',
           title: dfLabels.resigWarn(displayName),
-          subtitle: `${assessment.label} · ${record.previousCompany}`,
+          subtitle: `${assessment.label} · ${compLabel}`,
           urgency: 'warning',
           targetTab: 'resignation',
           entityId: record.id,
@@ -2960,9 +3054,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       }
     });
 
-    return items.slice(0, 16);
+    return items.slice(0, 20);
   }, [
     allPeopleCombined,
+    resignations,
     resignationAlerts,
     urgentResignationAlerts,
     urgentFollowUpList,
@@ -3021,6 +3116,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       baseList = personalCandidates.map((c) => ({ ...c, _isSchool: false }));
     } else if (activeTab === 'company') {
       baseList = companyCandidates.map((c) => ({ ...c, _isSchool: false }));
+    } else if (activeTab === 'line') {
+      baseList = lineCandidates.map((c) => ({ ...c, _isSchool: false }));
+    } else if (activeTab === 'other') {
+      baseList = otherCandidates.map((c) => ({ ...c, _isSchool: false }));
     } else if (activeTab === 'school') {
       baseList = schoolStudents.map((s) => ({ ...s, channel: 'school', _isSchool: true }));
     } else if (activeTab === 'mendan') {
@@ -3149,6 +3248,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     candidates,
     personalCandidates,
     companyCandidates,
+    lineCandidates,
+    otherCandidates,
     schoolStudents,
     mendanPeopleSorted,
     allProposedPeople,
@@ -3232,6 +3333,20 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             return false;
           }
 
+          if (kyujinShiftTypeFilter !== 'all') {
+            const effectiveShiftType =
+              sl.shiftType || detectKyujinShiftType(sl.shiftTime, sl.jobDescription);
+            if (kyujinShiftTypeFilter === '日勤のみ' && !/日勤/.test(effectiveShiftType)) {
+              return false;
+            }
+            if (kyujinShiftTypeFilter === 'シフト制' && !/シフト/.test(effectiveShiftType)) {
+              return false;
+            }
+            if (kyujinShiftTypeFilter === '夜勤あり' && !/夜勤/.test(effectiveShiftType)) {
+              return false;
+            }
+          }
+
           if (q) {
             const hay = [
               comp.companyName,
@@ -3241,9 +3356,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               sl.jobCode,
               sl.area,
               sl.shiftTime,
+              sl.shiftType,
+              sl.holidays,
+              sl.overtimeHours,
               sl.salary,
               sl.hourlyWage,
               sl.estimatedNetSalary,
+              sl.annualSalary,
               sl.nightShiftAllowance,
               sl.minJlpt,
               sl.facilityType,
@@ -3272,6 +3391,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     kyujinIndustryFilter,
     kyujinEmploymentTypeFilter,
     kyujinFacilityFilter,
+    kyujinShiftTypeFilter,
   ]);
 
   // ==========================================================================
@@ -3290,10 +3410,18 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
   };
 
   const handleQuickStatusChange = (personId: string, isSchool: boolean, newStatus: string) => {
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = getJstTodayYmd();
     const updater = (list: Candidate[]) =>
       list.map((p) =>
-        p.id === personId ? { ...p, progressStatus: newStatus, lastContactDate: todayIso } : p
+        p.id === personId
+          ? {
+              ...p,
+              progressStatus: newStatus,
+              proposalDate:
+                newStatus === '企業提案中' && !p.proposalDate ? todayIso : p.proposalDate,
+              lastContactDate: todayIso,
+            }
+          : p
       );
     if (isSchool) setSchoolStudents(updater);
     else setCandidates(updater);
@@ -3469,7 +3597,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     isSchool: boolean,
     companyName: string
   ) => {
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = getJstTodayYmd();
     const updater = (list: Candidate[]) =>
       list.map((p) =>
         p.id === person.id
@@ -3477,6 +3605,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               ...p,
               proposedCompany: companyName,
               progressStatus: '企業提案中',
+              proposalDate: p.proposalDate || todayIso,
               lastContactDate: todayIso,
               memo: `${p.memo ? p.memo + '\n' : ''}[${todayIso}] ${companyName} へ提案`,
             }
@@ -3506,7 +3635,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     const rawTrimmed = String(rawSourceText || '').trim();
     const rawArchive = rawTrimmed ? `[${todayIso} Nguyên văn đoạn chat]\n${rawTrimmed}` : '';
 
-    // Guarantee 100% verbatim preservation in BOTH negotiationLog and memo
+    // Guarantee 100% verbatim preservation in negotiationLog and concise summary in memo
     let incomingLog = String(extracted.negotiationLog || '').trim();
     if (rawTrimmed) {
       if (!incomingLog) {
@@ -3516,7 +3645,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       }
     }
 
-    const incomingMemo = rawArchive || String(extracted.memoLine || incomingLog || '').trim();
+    const incomingMemo = String(extracted.memoLine || rawArchive || incomingLog || '').trim();
 
     const shouldReplaceName =
       Boolean(extracted.name) &&
@@ -3526,13 +3655,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       extractedJlpt && extractedJlpt !== '要確認'
         ? extractedJlpt
         : base.jlpt || extractedJlpt || '要確認';
+    const normalizedExtractedNat = normalizeCandidateNationality(extracted.nationality);
 
     return {
       ...base,
+      channel: extracted.channel || base.channel,
       name: shouldReplaceName ? extracted.name! : base.name,
       fbName: extracted.fbName || base.fbName,
       fbProfileUrl: extracted.fbProfileUrl || extracted.fbUrl || base.fbProfileUrl,
-      nationality: extracted.nationality || base.nationality,
+      nationality: normalizedExtractedNat || base.nationality,
       gender: extracted.gender || base.gender,
       birthDate: extracted.birthDate || base.birthDate,
       age: extracted.age || base.age,
@@ -3944,7 +4075,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         fbName: extracted.fbName || '',
         fbProfileUrl: extracted.fbProfileUrl || '',
         channel: fbChatChannel,
-        nationality: extracted.nationality || '国籍不明',
+        nationality: normalizeCandidateNationality(extracted.nationality) || '国籍不明',
         gender: extracted.gender || '',
         age: extracted.age || '',
         birthDate: extracted.birthDate || '',
@@ -3968,7 +4099,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         interviewDate: extracted.interviewDate || '',
         lastContactDate: extracted.lastContactDate || todayIso,
         negotiationLog: fullNegLog,
-        memo: rawArchive,
+        memo: String(extracted.memoLine || rawArchive || '').trim(),
       };
 
       if (fbChatChannel === 'school') {
@@ -3976,19 +4107,33 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         setActiveTab('school');
       } else {
         setCandidates((prev) => [newPerson, ...prev]);
-        setActiveTab(fbChatChannel === 'company' ? 'company' : 'personal');
+        setActiveTab(
+          fbChatChannel === 'company'
+            ? 'company'
+            : fbChatChannel === 'line'
+            ? 'line'
+            : fbChatChannel === 'other'
+            ? 'other'
+            : 'personal'
+        );
       }
 
       setFbChatModalOpen(false);
       setFbChatRawText('');
+      const channelToastLabel =
+        fbChatChannel === 'company'
+          ? t.tabs.company
+          : fbChatChannel === 'line'
+          ? t.tabs.line
+          : fbChatChannel === 'other'
+          ? t.tabs.other
+          : fbChatChannel === 'school'
+          ? t.tabs.school
+          : t.tabs.personal;
       showToast(
-        `✅ Đã tạo hồ sơ mới tại ${
-          fbChatChannel === 'company'
-            ? 'FB会社公式'
-            : fbChatChannel === 'school'
-            ? 'Trường Nhật ngữ'
-            : 'FB個人'
-        }: ${newPerson.name}${usedAi ? '' : ' (bộ lọc dự phòng)'}`
+        uiLang === 'jp'
+          ? `✅ ${channelToastLabel} に新規相談者を登録しました: ${newPerson.name}${usedAi ? '' : '（フォールバック解析）'}`
+          : `✅ Đã tạo hồ sơ mới tại ${channelToastLabel}: ${newPerson.name}${usedAi ? '' : ' (bộ lọc dự phòng)'}`
       );
     } finally {
       setIsExtractingFbChatAi(false);
@@ -4020,6 +4165,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     const label =
       nextChannel === 'company'
         ? t.tabs.company
+        : nextChannel === 'line'
+        ? t.tabs.line
+        : nextChannel === 'other'
+        ? t.tabs.other
         : nextChannel === 'school'
         ? t.tabs.school
         : t.tabs.personal;
@@ -4029,6 +4178,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         ? `🔄 「${displayName}」さんのチャネルを ${label} に変更しました（データ保持100%）`
         : `🔄 Đã chuyển "${displayName}" sang kênh ${label} (bảo toàn 100% dữ liệu)`
     );
+  };
+
+  const handleBulkAutoFixCandidateNationalities = () => {
+    const fixedCand = autoFixCandidatesNationalities(candidates);
+    const fixedStu = autoFixCandidatesNationalities(schoolStudents);
+    const totalChanged = fixedCand.changedCount + fixedStu.changedCount;
+    if (fixedCand.changedCount > 0) setCandidates(fixedCand.updated);
+    if (fixedStu.changedCount > 0) setSchoolStudents(fixedStu.updated);
+    showToast(t.autoFixNatToast(totalChanged));
   };
 
   const handleSaveEditingPerson = () => {
@@ -4221,6 +4379,55 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     if (field === 'industry') {
       showToast(`🏭 分野を「${value}」に変更しました`);
     }
+  };
+
+  const handleToggleCompanyRecruitmentStatus = (
+    companyId: string,
+    companyName: string,
+    nextStatus: '募集中' | '募集終了'
+  ) => {
+    setKyujins((prev) =>
+      prev.map((comp) => {
+        if (comp.id !== companyId) return comp;
+        const updatedSlots = (comp.areaBreakdown || []).map((sl) => ({
+          ...sl,
+          recruitmentStatus: nextStatus,
+        }));
+        return normalizeKyujinItem({
+          ...comp,
+          recruitmentStatus: nextStatus,
+          areaBreakdown: updatedSlots,
+        });
+      })
+    );
+    showToast(
+      uiLang === 'jp'
+        ? nextStatus === '募集終了'
+          ? `⏸ 「${companyName}」の全ポジションを一時停止（募集終了）にしました`
+          : `▶️ 「${companyName}」の全ポジションを再開（募集中）にしました`
+        : nextStatus === '募集終了'
+        ? `⏸ Đã tạm dừng toàn bộ vị trí của "${companyName}"`
+        : `▶️ Đã mở lại toàn bộ vị trí của "${companyName}"`
+    );
+  };
+
+  const handleSaveInlineKyujinField = (
+    companyId: string,
+    slotId: string,
+    field: 'shiftTime' | 'jobCode' | 'area',
+    rawValue: string
+  ) => {
+    setEditingKyujinField(null);
+    const trimmed = String(rawValue || '').trim();
+    if (!trimmed) return;
+    handleQuickUpdateSlotField(companyId, slotId, field, trimmed);
+    if (field === 'shiftTime') {
+      const detected = detectKyujinShiftType(trimmed, '');
+      handleQuickUpdateSlotField(companyId, slotId, 'shiftType', detected);
+    }
+    showToast(
+      uiLang === 'jp' ? '✅ 求人情報を更新しました' : '✅ Đã cập nhật thông tin tin tuyển dụng'
+    );
   };
 
   const handleStartInlineKyujinSalaryEdit = (
@@ -4558,9 +4765,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           jobCode: derivedCode,
           area: cleanArea || '勤務地要確認',
           shiftTime: shiftLabel,
+          shiftType: str('shiftType') || detectKyujinShiftType(shiftLabel, cleanDesc),
+          holidays: str('holidays'),
+          overtimeHours: str('overtimeHours'),
           salary: resolvedSalary,
           nightShiftAllowance: str('nightShiftAllowance'),
           estimatedNetSalary: str('estimatedNetSalary'),
+          annualSalary: str('annualSalary'),
           hourlyWage: resolvedHourlyWage,
           commuteAllowance: str('commuteAllowance'),
           shiftsPerWeek: str('shiftsPerWeek'),
@@ -4569,6 +4780,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           minJlpt: normalizedJlpt,
           housingSupport: normalizeHousingDisplay(str('housingSupport')),
           recruitmentStatus: '募集中',
+          recruitCount: str('recruitCount'),
+          interviewProcess: str('interviewProcess'),
+          specialBenefits: str('specialBenefits'),
           careQualification: str('careQualification'),
           experienceRequirement: str('experienceRequirement'),
           experienceDetail: str('experienceDetail'),
@@ -4750,7 +4964,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 </span>
               )}
               <select
-                value={isSchool ? 'school' : person.channel === 'company' ? 'company' : 'personal'}
+                value={
+                  isSchool
+                    ? 'school'
+                    : person.channel === 'company'
+                    ? 'company'
+                    : person.channel === 'line'
+                    ? 'line'
+                    : person.channel === 'other'
+                    ? 'other'
+                    : 'personal'
+                }
                 onChange={(e) =>
                   handleQuickChannelChange(person, e.target.value as ChannelType)
                 }
@@ -4759,6 +4983,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               >
                 <option value="personal">{t.channelPersonal}</option>
                 <option value="company">{t.channelCompany}</option>
+                <option value="line">{t.channelLine}</option>
+                <option value="other">{t.channelOther}</option>
                 <option value="school">{t.channelSchool}</option>
               </select>
               {isContactedToday ? (
@@ -4773,8 +4999,21 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 )
               )}
               {proposedComp && (
-                <span className="rounded bg-sky-50 border border-sky-200 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-sky-700">
-                  {t.proposedPrefix} {proposedComp}
+                <span
+                  className={`rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                    isActualProposedRecord(person)
+                      ? 'border-sky-200 bg-sky-50 text-sky-700'
+                      : 'border-amber-200 bg-amber-50 text-amber-800'
+                  }`}
+                >
+                  {isActualProposedRecord(person)
+                    ? `${t.proposedPrefix} ${proposedComp}`
+                    : `${t.proposedCandidateBadge} ${proposedComp}`}
+                </span>
+              )}
+              {isStale7DayProposal(person) && (
+                <span className="rounded border border-rose-300 bg-rose-50 px-1.5 py-0.5 font-mono text-[10px] font-bold text-rose-700">
+                  {t.stale7DaysBadge}
                 </span>
               )}
             </div>
@@ -5157,190 +5396,277 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </div>
         )}
 
-        {(matchingKyujins.length > 0 || Boolean(matchEval.noticeMessage)) && (
-          <div className="mt-3 border-t border-[#E2E8F0] pt-2.5">
-            <div className="mb-1.5 flex items-center justify-between gap-2">
-              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
-                {t.jobMatch.title} ({matchingKyujins.length})
-              </span>
-              {matchingKyujins.length > 2 && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    setExpandedJobMatchIds((prev) => ({
-                      ...prev,
-                      [person.id]: !prev[person.id],
-                    }))
-                  }
-                  className="rounded border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-0.5 text-[11px] font-semibold text-sky-700 hover:border-sky-300 hover:bg-sky-50 whitespace-nowrap cursor-pointer"
-                >
-                  {isJobMatchExpanded
-                    ? t.jobMatch.collapse
-                    : t.jobMatch.showMore(matchingKyujins.length - 2)}
-                </button>
-              )}
-            </div>
-            {matchEval.noticeMessage && (
-              <div
-                className={`mb-2 rounded-md border px-3 py-2 text-[11px] ${
-                  matchingKyujins.length > 0
-                    ? 'border-amber-300 bg-amber-50 text-amber-800'
-                    : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B]'
-                }`}
-              >
-                {matchEval.noticeMessage}
-              </div>
-            )}
-            {visibleMatches.length > 0 && (
-              <div className="space-y-1.5">
-                {visibleMatches.map(({ company, slot, score, reasons }) => {
-                  const isBaito = /baito|アルバイト|パート/i.test(
-                    slot.employmentType || company.employmentType || ''
-                  );
-                  return (
-                    <div
-                      key={slot.slotId}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs"
-                    >
-                      <div className="min-w-0 flex-1 space-y-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span
-                            className={`rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums ${
-                              score >= 75
-                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                                : score >= 55
-                                ? 'border-sky-200 bg-sky-50 text-sky-700'
-                                : 'border-amber-300 bg-amber-50 text-amber-800'
-                            }`}
-                          >
-                            {t.jobMatch.matchPct(score)}
-                          </span>
-                          <span className="font-semibold text-[#0F172A]">
-                            {company.companyName}
-                          </span>
-                          <span
-                            className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${
-                              isBaito
-                                ? 'bg-sky-50 text-sky-700 border border-sky-200'
-                                : 'bg-slate-200/70 text-[#475569]'
-                            }`}
-                          >
-                            {isBaito ? 'Baito' : slot.employmentType || 'Tokutei'}
-                          </span>
-                          <span className="text-[#475569]">{formatPublicArea(slot.area)}</span>
-                          <span className="font-mono font-semibold text-emerald-700 tabular-nums">
-                            {(() => {
-                              const m = getKyujinSlotSalaryDisplayMeta(
-                                slot,
-                                slot.employmentType || company.employmentType || ''
-                              );
-                              return m.isHourly
-                                ? `${t.jobMatch.hourlyPrefix} ${m.displayValue}`
-                                : m.displayValue;
-                            })()}
-                          </span>
-                          <span className="font-mono text-[11px] text-[#64748B]">
-                            {slot.minJlpt}
-                          </span>
-                        </div>
-                        {reasons && reasons.length > 0 && (
-                          <div className="flex flex-wrap gap-1.5">
-                            {reasons.map((rs, rIdx) => (
-                              <span
-                                key={rIdx}
-                                className="rounded border border-[#E2E8F0] bg-white px-1.5 py-0.5 text-[10px] text-[#475569]"
-                              >
-                                {rs}
-                              </span>
-                            ))}
-                          </div>
-                        )}
+        {(matchingKyujins.length > 0 || Boolean(matchEval.noticeMessage)) &&
+          (() => {
+            const isInterviewOrWaiting = [
+              '1次面接予定',
+              '2次面接予定',
+              '面接調整中',
+              '結果待ち',
+            ].includes(person.progressStatus || '');
+            const showMatches = !isInterviewOrWaiting || isJobMatchExpanded;
+
+            return (
+              <div className="mt-3 border-t border-[#E2E8F0] pt-2.5">
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                    {t.jobMatch.title} ({matchingKyujins.length})
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {isInterviewOrWaiting && matchingKyujins.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedJobMatchIds((prev) => ({
+                            ...prev,
+                            [person.id]: !prev[person.id],
+                          }))
+                        }
+                        className="rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap cursor-pointer"
+                      >
+                        {isJobMatchExpanded
+                          ? t.jobMatch.hideMatchesBtn
+                          : t.jobMatch.showMatchesBtn(matchingKyujins.length)}
+                      </button>
+                    )}
+                    {!isInterviewOrWaiting && matchingKyujins.length > 2 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedJobMatchIds((prev) => ({
+                            ...prev,
+                            [person.id]: !prev[person.id],
+                          }))
+                        }
+                        className="rounded border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-0.5 text-[11px] font-semibold text-sky-700 hover:border-sky-300 hover:bg-sky-50 whitespace-nowrap cursor-pointer"
+                      >
+                        {isJobMatchExpanded
+                          ? t.jobMatch.collapse
+                          : t.jobMatch.showMore(matchingKyujins.length - 2)}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {showMatches && (
+                  <>
+                    {matchEval.noticeMessage && (
+                      <div
+                        className={`mb-2 rounded-md border px-3 py-2 text-[11px] ${
+                          matchingKyujins.length > 0
+                            ? 'border-amber-300 bg-amber-50 text-amber-800'
+                            : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B]'
+                        }`}
+                      >
+                        {matchEval.noticeMessage}
                       </div>
-                      <div className="inline-flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const post = buildAnonymousJobPostText(company, slot, uiLang);
-                            const ok = await copyTextSafely(post);
-                            showToast(
-                              ok ? t.toasts.copiedInvite(score) : t.toasts.copyFailed
-                            );
-                          }}
-                          className="rounded border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap cursor-pointer"
-                        >
-                          {t.jobMatch.createInviteBtn}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setPreviewModal({ company, slot })}
-                          className="rounded border border-[#E2E8F0] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#475569] hover:border-[#CBD5E1] hover:text-[#0F172A] whitespace-nowrap cursor-pointer"
-                        >
-                          {t.jobMatch.previewAnonBtn}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleProposeCompanyToCandidate(
-                              person,
-                              isSchool,
-                              company.companyName
-                            )
-                          }
-                          className="rounded border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100 whitespace-nowrap cursor-pointer"
-                        >
-                          {t.jobMatch.proposeBtn}
-                        </button>
+                    )}
+                    {visibleMatches.length > 0 && (
+                      <div className="space-y-1.5">
+                        {visibleMatches.map(({ company, slot, score, reasons }) => {
+                          const isBaito = /baito|アルバイト|パート/i.test(
+                            slot.employmentType || company.employmentType || ''
+                          );
+                          const isAlreadyProposedHere =
+                            isActualProposedRecord(person) &&
+                            String(proposedComp || '')
+                              .toLowerCase()
+                              .includes(company.companyName.toLowerCase());
+
+                          return (
+                            <div
+                              key={slot.slotId}
+                              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs"
+                            >
+                              <div className="min-w-0 flex-1 space-y-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span
+                                    className={`rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums ${
+                                      score >= 75
+                                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                        : score >= 55
+                                        ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                        : 'border-amber-300 bg-amber-50 text-amber-800'
+                                    }`}
+                                  >
+                                    {t.jobMatch.matchPct(score)}
+                                  </span>
+                                  <span className="font-semibold text-[#0F172A]">
+                                    {company.companyName}
+                                  </span>
+                                  {isAlreadyProposedHere && (
+                                    <span className="rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                                      {t.jobMatch.alreadyProposedTag}
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+                                      isBaito
+                                        ? 'bg-sky-50 text-sky-700 border border-sky-200'
+                                        : 'bg-slate-200/70 text-[#475569]'
+                                    }`}
+                                  >
+                                    {isBaito ? 'Baito' : slot.employmentType || 'Tokutei'}
+                                  </span>
+                                  <span className="text-[#475569]">
+                                    {formatPublicArea(slot.area)}
+                                  </span>
+                                  <span className="font-mono font-semibold text-emerald-700 tabular-nums">
+                                    {(() => {
+                                      const m = getKyujinSlotSalaryDisplayMeta(
+                                        slot,
+                                        slot.employmentType || company.employmentType || ''
+                                      );
+                                      return m.isHourly
+                                        ? `${t.jobMatch.hourlyPrefix} ${m.displayValue}`
+                                        : m.displayValue;
+                                    })()}
+                                  </span>
+                                  <span className="font-mono text-[11px] text-[#64748B]">
+                                    {slot.minJlpt}
+                                  </span>
+                                </div>
+                                {reasons && reasons.length > 0 && (
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {reasons.map((rs, rIdx) => (
+                                      <span
+                                        key={rIdx}
+                                        className="rounded border border-[#E2E8F0] bg-white px-1.5 py-0.5 text-[10px] text-[#475569]"
+                                      >
+                                        {rs}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="inline-flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    const post = buildAnonymousJobPostText(company, slot, uiLang);
+                                    const ok = await copyTextSafely(post);
+                                    showToast(
+                                      ok ? t.toasts.copiedInvite(score) : t.toasts.copyFailed
+                                    );
+                                  }}
+                                  className="rounded border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap cursor-pointer"
+                                >
+                                  {t.jobMatch.createInviteBtn}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewModal({ company, slot })}
+                                  className="rounded border border-[#E2E8F0] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#475569] hover:border-[#CBD5E1] hover:text-[#0F172A] whitespace-nowrap cursor-pointer"
+                                >
+                                  {t.jobMatch.previewAnonBtn}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isAlreadyProposedHere}
+                                  onClick={() =>
+                                    handleProposeCompanyToCandidate(
+                                      person,
+                                      isSchool,
+                                      company.companyName
+                                    )
+                                  }
+                                  className={`rounded border px-2.5 py-1 text-[11px] font-semibold whitespace-nowrap ${
+                                    isAlreadyProposedHere
+                                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700 opacity-70 cursor-default'
+                                      : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 cursor-pointer'
+                                  }`}
+                                >
+                                  {isAlreadyProposedHere
+                                    ? t.jobMatch.alreadyProposedTag
+                                    : t.jobMatch.proposeBtn}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {!isInterviewOrWaiting &&
+                          matchingKyujins.length > 2 &&
+                          !isJobMatchExpanded && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedJobMatchIds((prev) => ({
+                                  ...prev,
+                                  [person.id]: true,
+                                }))
+                              }
+                              className="w-full rounded-md border border-dashed border-[#CBD5E1] bg-white py-1.5 text-center text-[11px] font-semibold text-sky-700 hover:border-sky-300 hover:bg-sky-50 cursor-pointer"
+                            >
+                              {t.jobMatch.showMore(matchingKyujins.length - 2)}
+                            </button>
+                          )}
                       </div>
-                    </div>
-                  );
-                })}
-                {matchingKyujins.length > 2 && !isJobMatchExpanded && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setExpandedJobMatchIds((prev) => ({
-                        ...prev,
-                        [person.id]: true,
-                      }))
-                    }
-                    className="w-full rounded-md border border-dashed border-[#CBD5E1] bg-white py-1.5 text-center text-[11px] font-semibold text-sky-700 hover:border-sky-300 hover:bg-sky-50 cursor-pointer"
-                  >
-                    {t.jobMatch.showMore(matchingKyujins.length - 2)}
-                  </button>
+                    )}
+                  </>
                 )}
               </div>
-            )}
-          </div>
-        )}
+            );
+          })()}
       </div>
     );
   };
 
   const crmSummaryForAi = useMemo(() => {
+    const statusMap: Record<string, number> = {};
+    allPeopleCombined.forEach((p) => {
+      const st = String(p.progressStatus || '新規相談').trim();
+      statusMap[st] = (statusMap[st] || 0) + 1;
+    });
+    const statusSummary = Object.entries(statusMap)
+      .sort((a, b) => b[1] - a[1])
+      .map(([st, cnt]) => `${st}:${cnt}`)
+      .join(', ');
+
+    const unconfirmedResigCount = resignations
+      .map((r) => normalizeAndAutoComputeResignationDates(r))
+      .filter(hasUnconfirmedResignationDate).length;
+
     const openCompanies = kyujins
-      .slice(0, 8)
+      .filter((c) => c.recruitmentStatus !== '募集終了')
+      .slice(0, 10)
       .map(
         (c) =>
-          `${c.companyName} (${c.industry || 'Chưa rõ ngành'}, ${c.areaBreakdown?.[0]?.area || 'Nhật Bản'})`
+          `${c.companyName} (${c.industry || '未設定'}, ${c.areaBreakdown?.[0]?.area || '全国'}, ${c.areaBreakdown?.length || 0}枠)`
       )
       .join('; ');
+
     const upcomingList = upcomingMendanAlerts
-      .slice(0, 5)
+      .slice(0, 6)
       .map(
         ({ person, mendan }) =>
-          `${getCandidateDisplayName(person, uiLang)} (${person.jlpt || 'Chưa rõ JLPT'}, lịch: ${mendan.dateLabel || person.progressStatus || 'Đang điều phối'})`
+          `${getCandidateDisplayName(person, uiLang)} (${person.jlpt || '要確認'}, ${mendan.dateLabel || person.progressStatus || '調整中'})`
       )
       .join('; ');
+
     return [
-      `Tổng ứng viên FB: ${candidates.length}, Du học sinh trường tiếng: ${schoolStudents.length}, Doanh nghiệp tuyển dụng: ${kyujinStats.totalCompanies} (${kyujinStats.totalSlots} suất, ${kyujinStats.openSlots} đang mở), Đối tác PT: ${ptPartners.length}.`,
-      `Đang cần follow-up khẩn: ${urgentFollowUpList.length} hồ sơ. Lịch Mendan sắp tới (${upcomingMendanAlerts.length}): ${upcomingList || 'Chưa có'}.`,
-      `Một số đơn hàng nổi bật: ${openCompanies || 'Chưa có'}.`,
+      `=== CRM LIVE EXACT STATS (DO NOT GUESS OR ALTER NUMBERS) ===`,
+      `総登録人材: ${allPeopleCombined.length}名 (FB・SNS応募等: ${candidates.length}名 [FB個人:${personalCandidates.length}, FB会社公式:${companyCandidates.length}, LINE:${lineCandidates.length}, その他:${otherCandidates.length}] / 日本語学校・留学生: ${schoolStudents.length}名).`,
+      `進捗ステータス内訳: ${statusSummary || 'なし'}. 推薦済み(実質): ${allProposedPeople.length}名 (進行中:${proposedStageCounts.in_progress}, 内定:${proposedStageCounts.naitei}, 辞退・終了:${proposedStageCounts.jitai}).`,
+      `求人データベース: ${kyujinStats.totalCompanies}社・計${kyujinStats.totalSlots}ポジション (募集中:${kyujinStats.openSlots}枠, 募集終了:${kyujinStats.closedSlots}枠, 賞与あり:${kyujinStats.bonusSlots}枠, アルバイト:${kyujinStats.baitoSlots}枠).`,
+      `退職者管理: 計${resignations.length}名 (期限アラート:${resignationAlerts.length}名, 期限<=3日/超過:${urgentResignationAlerts.length}名, 退職日未確定:${unconfirmedResigCount}名).`,
+      `提携PT機関数: ${ptPartners.length}社. 要至急フォロー対象: ${urgentFollowUpList.length}名.`,
+      `直近の面談・面接予定 (${upcomingMendanAlerts.length}名): ${upcomingList || 'なし'}.`,
+      `主な募集中企業: ${openCompanies || 'なし'}.`,
     ].join('\n');
   }, [
+    allPeopleCombined,
     candidates.length,
+    personalCandidates.length,
+    companyCandidates.length,
+    lineCandidates.length,
+    otherCandidates.length,
     schoolStudents.length,
+    allProposedPeople.length,
+    proposedStageCounts,
     kyujinStats,
     kyujins,
+    resignations,
+    resignationAlerts.length,
+    urgentResignationAlerts.length,
     ptPartners.length,
     urgentFollowUpList.length,
     upcomingMendanAlerts,
@@ -5438,9 +5764,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           onOpenChatbot={() => setChatbotOpen(true)}
         />
       ) : (
-        <div className="flex min-h-screen flex-col lg:grid lg:h-screen lg:grid-cols-[240px_1fr_320px] lg:grid-rows-[64px_1fr] lg:overflow-hidden">
+        <div className="flex min-h-screen flex-col lg:grid lg:h-screen lg:grid-cols-[240px_1fr_320px] lg:grid-rows-[64px_1fr] lg:overflow-hidden print:block print:h-auto print:overflow-visible">
           {/* TOP HEADER BAR */}
-          <header className="flex min-h-[64px] flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] bg-white px-5 py-2 shadow-[0_1px_2px_rgba(0,0,0,0.03)] lg:col-span-3">
+          <header className="flex min-h-[64px] flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] bg-white px-5 py-2 shadow-[0_1px_2px_rgba(0,0,0,0.03)] lg:col-span-3 print:hidden">
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
@@ -5572,12 +5898,14 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </header>
 
           {/* MOBILE / TABLET TAB STRIP (< lg) */}
-          <div className="flex items-center gap-1 overflow-x-auto border-b border-[#E2E8F0] bg-white px-4 py-2 lg:hidden">
+          <div className="flex items-center gap-1 overflow-x-auto border-b border-[#E2E8F0] bg-white px-4 py-2 lg:hidden print:hidden">
             {(
               [
                 { id: 'all', label: `${t.tabs.allMobile} (${candidates.length})` },
                 { id: 'personal', label: `${t.tabs.personal} (${personalCandidates.length})` },
                 { id: 'company', label: `${t.tabs.company} (${companyCandidates.length})` },
+                { id: 'line', label: `${t.tabs.line} (${lineCandidates.length})` },
+                { id: 'other', label: `${t.tabs.other} (${otherCandidates.length})` },
                 { id: 'school', label: `${t.tabs.schoolMobile} (${schoolStudents.length})` },
                 { id: 'mendan', label: `${t.tabs.mendan} (${mendanPeopleSorted.length})` },
                 { id: 'proposed', label: `${t.tabs.proposed} (${allProposedPeople.length})` },
@@ -5603,7 +5931,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </div>
 
           {/* LEFT SIDEBAR (DESKTOP) */}
-          <aside className="hidden border-r border-[#E2E8F0] bg-white py-4 lg:flex lg:flex-col lg:overflow-y-auto">
+          <aside className="hidden border-r border-[#E2E8F0] bg-white py-4 lg:flex lg:flex-col lg:overflow-y-auto print:hidden">
             <div className="mb-6">
               <div className="px-5 pb-2 font-mono text-[10px] font-semibold uppercase tracking-widest text-[#64748B]">
                 {t.sidebarDatabase}
@@ -5613,6 +5941,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   { id: 'all', label: t.tabs.allDesktop, count: `${candidates.length}` },
                   { id: 'personal', label: t.tabs.personal, count: `${personalCandidates.length}` },
                   { id: 'company', label: t.tabs.company, count: `${companyCandidates.length}` },
+                  { id: 'line', label: t.tabs.line, count: `${lineCandidates.length}` },
+                  { id: 'other', label: t.tabs.other, count: `${otherCandidates.length}` },
                   { id: 'school', label: t.tabs.school, count: `${schoolStudents.length}` },
                 ] as Array<{ id: MainTabId; label: string; count: string }>
               ).map((item) => (
@@ -5701,8 +6031,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </aside>
 
           {/* CENTER MAIN PANE */}
-          <main className="min-w-0 bg-[#F8FAFC] p-5 lg:overflow-y-auto lg:border-r lg:border-[#E2E8F0]">
-            {['all', 'personal', 'company', 'school', 'mendan', 'proposed'].includes(activeTab) && (
+          <main className="min-w-0 bg-[#F8FAFC] p-5 lg:overflow-y-auto lg:border-r lg:border-[#E2E8F0] print:overflow-visible print:p-0 print:border-0">
+            {['all', 'personal', 'company', 'line', 'other', 'school', 'mendan', 'proposed'].includes(
+              activeTab
+            ) && (
               <div className="space-y-4">
                 {/* Control Row + Filter Bar */}
                 <div className="space-y-3 rounded-lg border border-[#E2E8F0] bg-white p-3.5 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
@@ -5811,11 +6143,24 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
                     <button
                       type="button"
+                      onClick={handleBulkAutoFixCandidateNationalities}
+                      className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                      {t.autoFixNatBtn}
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => {
                         setFbChatMode('new');
                         setFbChatChannel(
                           activeTab === 'company'
                             ? 'company'
+                            : activeTab === 'line'
+                            ? 'line'
+                            : activeTab === 'other'
+                            ? 'other'
                             : activeTab === 'school'
                             ? 'school'
                             : 'personal'
@@ -5842,6 +6187,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                             channel:
                               activeTab === 'company'
                                 ? 'company'
+                                : activeTab === 'line'
+                                ? 'line'
+                                : activeTab === 'other'
+                                ? 'other'
                                 : activeTab === 'school'
                                 ? 'school'
                                 : 'personal',
@@ -6145,10 +6494,54 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                   ) : null}
                                 </div>
                                 <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[#64748B]">
-                                  <span>{person.nationality || t.cardLabels.unset}</span>
+                                  <select
+                                    aria-label={uiLang === 'jp' ? '国籍変更' : 'Sửa quốc tịch'}
+                                    value={
+                                      (CANDIDATE_NATIONALITIES as readonly string[]).includes(
+                                        person.nationality || ''
+                                      )
+                                        ? person.nationality || ''
+                                        : 'その他'
+                                    }
+                                    onChange={(e) => {
+                                      const nextNat = e.target.value;
+                                      const updater = (list: Candidate[]) =>
+                                        list.map((c) =>
+                                          c.id === person.id
+                                            ? {
+                                                ...c,
+                                                nationality: nextNat,
+                                                nationalityManuallyEdited: true,
+                                              }
+                                            : c
+                                        );
+                                      if (isSchool) setSchoolStudents(updater);
+                                      else setCandidates(updater);
+                                    }}
+                                    className="rounded border border-transparent bg-transparent py-0.5 text-[11px] text-[#475569] hover:border-[#E2E8F0] hover:bg-white focus:border-[#16A34A] focus:bg-white focus:outline-none cursor-pointer"
+                                  >
+                                    {!(CANDIDATE_NATIONALITIES as readonly string[]).includes(
+                                      person.nationality || ''
+                                    ) &&
+                                      person.nationality && (
+                                        <option value={person.nationality}>
+                                          {person.nationality}
+                                        </option>
+                                      )}
+                                    {CANDIDATE_NATIONALITIES.map((nat) => (
+                                      <option key={nat} value={nat}>
+                                        {nat}
+                                      </option>
+                                    ))}
+                                  </select>
                                   {person.jlpt && person.jlpt !== '要確認' && (
                                     <span className="rounded bg-emerald-50 px-1 py-0.2 font-mono text-[10px] font-semibold text-emerald-700">
                                       {person.jlpt}
+                                    </span>
+                                  )}
+                                  {isStale7DayProposal(person) && (
+                                    <span className="rounded border border-rose-300 bg-rose-50 px-1 py-0.5 font-mono text-[9px] font-bold text-rose-700">
+                                      {t.stale7DaysBadge}
                                     </span>
                                   )}
                                 </div>
@@ -6470,6 +6863,21 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         </option>
                       ))}
                     </select>
+
+                    <select
+                      value={kyujinShiftTypeFilter}
+                      onChange={(e) =>
+                        setKyujinShiftTypeFilter(
+                          e.target.value as 'all' | '日勤のみ' | 'シフト制' | '夜勤あり'
+                        )
+                      }
+                      className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5 text-xs font-semibold text-[#0F172A]"
+                    >
+                      <option value="all">{t.kyujin.allShiftTypes}</option>
+                      <option value="日勤のみ">{t.kyujin.shiftDayOnly}</option>
+                      <option value="シフト制">{t.kyujin.shiftRotating}</option>
+                      <option value="夜勤あり">{t.kyujin.shiftHasNight}</option>
+                    </select>
                   </div>
                 </div>
 
@@ -6478,96 +6886,330 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     {t.kyujin.emptyKyujin}
                   </div>
                 ) : (
-                  filteredKyujinCompanies.map((comp) => (
-                    <div
-                      key={comp.id}
-                      className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]"
-                    >
-                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-2.5">
-                        <div className="flex flex-wrap items-center gap-2.5">
-                          <span className="text-base font-bold text-[#0F172A]">
-                            {comp.companyName}
-                          </span>
-                          <span className="rounded bg-slate-100 border border-[#E2E8F0] px-2 py-0.5 font-mono text-[10px] font-medium text-[#475569]">
-                            {comp.sector || detectSectorFromIndustryOrText(comp.industry)}
-                          </span>
-                          <span className="font-mono text-xs font-semibold text-emerald-700">
-                            {comp.industry}
-                          </span>
-                          <span className="font-mono text-xs text-[#64748B] tabular-nums">
-                            {t.kyujin.positionsCount(comp.areaBreakdown.length)}
-                          </span>
-                        </div>
+                  filteredKyujinCompanies.map((comp) => {
+                    const allClosed = (comp.areaBreakdown || []).every(
+                      (sl) => sl.recruitmentStatus === '募集終了'
+                    );
+                    return (
+                      <div
+                        key={comp.id}
+                        className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]"
+                      >
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-2.5">
+                          <div className="flex flex-wrap items-center gap-2.5">
+                            <span className="text-base font-bold text-[#0F172A]">
+                              {comp.companyName}
+                            </span>
+                            <span className="rounded bg-slate-100 border border-[#E2E8F0] px-2 py-0.5 font-mono text-[10px] font-medium text-[#475569]">
+                              {comp.sector || detectSectorFromIndustryOrText(comp.industry)}
+                            </span>
+                            <span className="font-mono text-xs font-semibold text-emerald-700">
+                              {comp.industry}
+                            </span>
+                            <span className="font-mono text-xs text-[#64748B] tabular-nums">
+                              {t.kyujin.positionsCount(comp.areaBreakdown.length)}
+                            </span>
+                          </div>
 
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteSingleCompany(comp.id, comp.companyName)}
-                          className="rounded border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap shrink-0 cursor-pointer"
-                        >
-                          {t.kyujin.deleteCompany}
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                        {comp.areaBreakdown.map((sl) => {
-                          const isChecked = selectedSlotIds.includes(sl.slotId);
-                          const empType =
-                            sl.employmentType || comp.employmentType || 'Tokutei Ginou (特定技能)';
-                          const isBaito = /baito|アルバイト|パート/i.test(empType);
-                          return (
-                            <div
-                              key={sl.slotId}
-                              className={`rounded-md border p-3 transition-colors ${
-                                sl.recruitmentStatus === '募集終了'
-                                  ? 'border-rose-200 bg-rose-50/50 opacity-85'
-                                  : isBaito
-                                  ? 'border-sky-200 bg-sky-50/30'
-                                  : 'border-[#E2E8F0] bg-[#F8FAFC]'
+                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleToggleCompanyRecruitmentStatus(
+                                  comp.id,
+                                  comp.companyName,
+                                  allClosed ? '募集中' : '募集終了'
+                                )
+                              }
+                              className={`rounded border px-2.5 py-1 text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer ${
+                                allClosed
+                                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                  : 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100'
                               }`}
                             >
-                              <div className="mb-2 flex items-start justify-between gap-2">
-                                <label className="flex cursor-pointer flex-wrap items-center gap-2">
-                                  <input
-                                    type="checkbox"
-                                    checked={isChecked}
-                                    onChange={() => toggleSelectSlot(sl.slotId)}
-                                    className="h-4 w-4 rounded border-[#CBD5E1] bg-white accent-[#16A34A]"
-                                  />
-                                  <span
-                                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
-                                      isBaito
-                                        ? 'bg-sky-100 text-sky-800'
-                                        : 'bg-emerald-100 text-emerald-800'
-                                    }`}
-                                  >
-                                    {empType}
-                                  </span>
-                                  <span className="font-mono text-xs font-bold text-[#0F172A]">
-                                    #{sl.jobCode || 'Slot'}
-                                  </span>
-                                  <span className="text-xs font-semibold text-[#334155]">
-                                    {formatPublicArea(sl.area) || sl.area || 'Nhật Bản'}
-                                  </span>
-                                  {sl.shiftTime && (
-                                    <span className="text-[11px] font-semibold text-sky-700">
-                                      · {sl.shiftTime}
-                                    </span>
-                                  )}
-                                  {sl.facilityType && (
-                                    <span className="text-[11px] font-semibold text-purple-700">
-                                      · {sl.facilityType}
-                                    </span>
-                                  )}
-                                </label>
+                              {allClosed ? t.kyujin.bulkResumeBtn : t.kyujin.bulkPauseBtn}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteSingleCompany(comp.id, comp.companyName)}
+                              className="rounded border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap shrink-0 cursor-pointer"
+                            >
+                              {t.kyujin.deleteCompany}
+                            </button>
+                          </div>
+                        </div>
 
-                                <button
-                                  type="button"
-                                  onClick={() => setPreviewModal({ company: comp, slot: sl })}
-                                  className="rounded bg-[#16A34A] px-2.5 py-1 text-xs font-semibold text-white hover:bg-[#15803D] whitespace-nowrap shrink-0 cursor-pointer"
-                                >
-                                  {t.kyujin.exportAnon}
-                                </button>
-                              </div>
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          {comp.areaBreakdown.map((sl) => {
+                            const isChecked = selectedSlotIds.includes(sl.slotId);
+                            const empType =
+                              sl.employmentType ||
+                              comp.employmentType ||
+                              'Tokutei Ginou (特定技能)';
+                            const isBaito = /baito|アルバイト|パート/i.test(empType);
+                            const resolvedShiftType =
+                              sl.shiftType ||
+                              detectKyujinShiftType(sl.shiftTime, sl.jobDescription);
+                            const isEditingJobCode =
+                              editingKyujinField?.companyId === comp.id &&
+                              editingKyujinField?.slotId === sl.slotId &&
+                              editingKyujinField?.field === 'jobCode';
+                            const isEditingArea =
+                              editingKyujinField?.companyId === comp.id &&
+                              editingKyujinField?.slotId === sl.slotId &&
+                              editingKyujinField?.field === 'area';
+                            const isEditingShift =
+                              editingKyujinField?.companyId === comp.id &&
+                              editingKyujinField?.slotId === sl.slotId &&
+                              editingKyujinField?.field === 'shiftTime';
+
+                            return (
+                              <div
+                                key={sl.slotId}
+                                className={`rounded-md border p-3 transition-colors ${
+                                  sl.recruitmentStatus === '募集終了'
+                                    ? 'border-rose-200 bg-rose-50/50 opacity-85'
+                                    : isBaito
+                                    ? 'border-sky-200 bg-sky-50/30'
+                                    : 'border-[#E2E8F0] bg-[#F8FAFC]'
+                                }`}
+                              >
+                                <div className="mb-2 flex items-start justify-between gap-2">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => toggleSelectSlot(sl.slotId)}
+                                      className="h-4 w-4 rounded border-[#CBD5E1] bg-white accent-[#16A34A] cursor-pointer"
+                                    />
+                                    <span
+                                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
+                                        isBaito
+                                          ? 'bg-sky-100 text-sky-800'
+                                          : 'bg-emerald-100 text-emerald-800'
+                                      }`}
+                                    >
+                                      {empType}
+                                    </span>
+                                    {isEditingJobCode ? (
+                                      <input
+                                        type="text"
+                                        autoFocus
+                                        value={editingKyujinField.value}
+                                        onChange={(e) =>
+                                          setEditingKyujinField((prev) =>
+                                            prev ? { ...prev, value: e.target.value } : null
+                                          )
+                                        }
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            handleSaveInlineKyujinField(
+                                              comp.id,
+                                              sl.slotId,
+                                              'jobCode',
+                                              editingKyujinField.value
+                                            );
+                                          } else if (e.key === 'Escape') {
+                                            setEditingKyujinField(null);
+                                          }
+                                        }}
+                                        onBlur={() =>
+                                          handleSaveInlineKyujinField(
+                                            comp.id,
+                                            sl.slotId,
+                                            'jobCode',
+                                            editingKyujinField.value
+                                          )
+                                        }
+                                        className="w-28 rounded border border-[#16A34A] bg-white px-1.5 py-0.5 font-mono text-xs font-bold text-[#0F172A] outline-none"
+                                      />
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setEditingKyujinField({
+                                            companyId: comp.id,
+                                            slotId: sl.slotId,
+                                            field: 'jobCode',
+                                            value: sl.jobCode || '',
+                                          })
+                                        }
+                                        className="group inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-mono text-xs font-bold text-[#0F172A] hover:bg-slate-200/70 cursor-pointer"
+                                      >
+                                        <span>#{sl.jobCode || 'Slot'}</span>
+                                        <span className="text-[10px] opacity-0 group-hover:opacity-75">
+                                          ✎
+                                        </span>
+                                      </button>
+                                    )}
+                                    {isEditingArea ? (
+                                      <input
+                                        type="text"
+                                        autoFocus
+                                        value={editingKyujinField.value}
+                                        onChange={(e) =>
+                                          setEditingKyujinField((prev) =>
+                                            prev ? { ...prev, value: e.target.value } : null
+                                          )
+                                        }
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            handleSaveInlineKyujinField(
+                                              comp.id,
+                                              sl.slotId,
+                                              'area',
+                                              editingKyujinField.value
+                                            );
+                                          } else if (e.key === 'Escape') {
+                                            setEditingKyujinField(null);
+                                          }
+                                        }}
+                                        onBlur={() =>
+                                          handleSaveInlineKyujinField(
+                                            comp.id,
+                                            sl.slotId,
+                                            'area',
+                                            editingKyujinField.value
+                                          )
+                                        }
+                                        className="w-32 rounded border border-[#16A34A] bg-white px-1.5 py-0.5 text-xs font-semibold text-[#334155] outline-none"
+                                      />
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setEditingKyujinField({
+                                            companyId: comp.id,
+                                            slotId: sl.slotId,
+                                            field: 'area',
+                                            value: sl.area || '',
+                                          })
+                                        }
+                                        className="group inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-xs font-semibold text-[#334155] hover:bg-slate-200/70 cursor-pointer"
+                                      >
+                                        <span>
+                                          {formatPublicArea(sl.area) || sl.area || 'Nhật Bản'}
+                                        </span>
+                                        <span className="text-[10px] opacity-0 group-hover:opacity-75">
+                                          ✎
+                                        </span>
+                                      </button>
+                                    )}
+                                    {sl.facilityType && (
+                                      <span className="text-[11px] font-semibold text-purple-700">
+                                        · {sl.facilityType}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewModal({ company: comp, slot: sl })}
+                                    className="rounded bg-[#16A34A] px-2.5 py-1 text-xs font-semibold text-white hover:bg-[#15803D] whitespace-nowrap shrink-0 cursor-pointer"
+                                  >
+                                    {t.kyujin.exportAnon}
+                                  </button>
+                                </div>
+
+                                {/* Shift Time / Holidays / Overtime / Annual Salary Metadata Strip */}
+                                <div className="mb-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded border border-[#E2E8F0] bg-white px-2.5 py-1.5 text-[11px]">
+                                  {isEditingShift ? (
+                                    <input
+                                      type="text"
+                                      autoFocus
+                                      value={editingKyujinField.value}
+                                      placeholder="例: ①08:00〜17:00 ②09:00〜18:00"
+                                      onChange={(e) =>
+                                        setEditingKyujinField((prev) =>
+                                          prev ? { ...prev, value: e.target.value } : null
+                                        )
+                                      }
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          e.preventDefault();
+                                          handleSaveInlineKyujinField(
+                                            comp.id,
+                                            sl.slotId,
+                                            'shiftTime',
+                                            editingKyujinField.value
+                                          );
+                                        } else if (e.key === 'Escape') {
+                                          setEditingKyujinField(null);
+                                        }
+                                      }}
+                                      onBlur={() =>
+                                        handleSaveInlineKyujinField(
+                                          comp.id,
+                                          sl.slotId,
+                                          'shiftTime',
+                                          editingKyujinField.value
+                                        )
+                                      }
+                                      className="min-w-[220px] flex-1 rounded border border-[#16A34A] bg-white px-2 py-0.5 font-mono text-[11px] text-[#0F172A] outline-none"
+                                    />
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setEditingKyujinField({
+                                          companyId: comp.id,
+                                          slotId: sl.slotId,
+                                          field: 'shiftTime',
+                                          value: sl.shiftTime || '',
+                                        })
+                                      }
+                                      className={`group inline-flex items-center gap-1 rounded px-1 py-0.5 text-left font-medium cursor-pointer ${
+                                        sl.shiftTime
+                                          ? 'text-sky-800 hover:bg-sky-50'
+                                          : 'text-amber-800 bg-amber-50 hover:bg-amber-100'
+                                      }`}
+                                    >
+                                      <span>
+                                        🕒 {sl.shiftTime || (uiLang === 'jp' ? '⚠️ 勤務時間: 要確認' : '⚠️ Giờ làm: Cần xác nhận')}
+                                      </span>
+                                      <span className="text-[10px] opacity-0 group-hover:opacity-80">
+                                        ✎
+                                      </span>
+                                    </button>
+                                  )}
+                                  {resolvedShiftType && (
+                                    <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-[#475569]">
+                                      {resolvedShiftType}
+                                    </span>
+                                  )}
+                                  {sl.holidays && (
+                                    <span className="text-[#475569]">
+                                      📅 {uiLang === 'jp' ? '休日' : 'Nghỉ'}: {sl.holidays}
+                                    </span>
+                                  )}
+                                  {sl.overtimeHours && (
+                                    <span className="text-[#475569]">
+                                      ⏱ {uiLang === 'jp' ? '残業' : 'OT'}: {sl.overtimeHours}
+                                    </span>
+                                  )}
+                                  {sl.annualSalary && (
+                                    <span className="font-mono font-semibold text-emerald-700">
+                                      💴 {uiLang === 'jp' ? '想定年収' : 'Thu nhập năm'}: {sl.annualSalary}
+                                    </span>
+                                  )}
+                                  {sl.recruitCount && (
+                                    <span className="text-[#475569]">
+                                      👥 {sl.recruitCount}
+                                    </span>
+                                  )}
+                                  {sl.interviewProcess && (
+                                    <span className="text-[#64748B]">
+                                      🎯 {sl.interviewProcess}
+                                    </span>
+                                  )}
+                                  {sl.specialBenefits && (
+                                    <span className="text-emerald-700">
+                                      ✨ {sl.specialBenefits}
+                                    </span>
+                                  )}
+                                </div>
 
                               {/* Compensation & Experience Strip */}
                               {(() => {
@@ -6863,7 +7505,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         })}
                       </div>
                     </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             )}
@@ -6877,6 +7520,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 onDeleteRecord={handleDeleteResignation}
                 onStatusChange={handleResignationStatusChange}
                 onBulkImport={handleBulkImportResignations}
+                onBulkUpdateRecords={handleBulkUpdateResignations}
                 onSyncCalendarSingle={handleSyncResignationCalendarSingle}
                 onSyncCalendarBulk={handleBulkSyncResignationsCalendar}
                 onConvertToCandidate={handleConvertResignationToCandidate}
@@ -7029,6 +7673,18 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     barClass: 'bg-sky-500',
                   },
                   {
+                    label: t.report.lineChannel,
+                    count: lineCandidates.length,
+                    pct: Math.round((lineCandidates.length / totalPeopleCount) * 100),
+                    barClass: 'bg-emerald-400',
+                  },
+                  {
+                    label: t.report.otherChannel,
+                    count: otherCandidates.length,
+                    pct: Math.round((otherCandidates.length / totalPeopleCount) * 100),
+                    barClass: 'bg-amber-500',
+                  },
+                  {
                     label: t.tabs.school,
                     count: schoolStudents.length,
                     pct: Math.round((schoolStudents.length / totalPeopleCount) * 100),
@@ -7126,7 +7782,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           {allPeopleCombined.length} {t.report.peopleUnit}
                         </div>
                         <div className="mt-1 text-[11px] text-[#64748B] tabular-nums">
-                          FB {candidates.length} · DHS {schoolStudents.length}
+                          {uiLang === 'jp'
+                            ? `SNS・紹介等 ${candidates.length}名 · 留学生 ${schoolStudents.length}名`
+                            : `FB/LINE/Khác ${candidates.length} · DHS ${schoolStudents.length}`}
                         </div>
                       </div>
                       <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
@@ -7137,7 +7795,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           {allProposedPeople.length} {t.report.peopleUnit}
                         </div>
                         <div className="mt-1 text-[11px] text-[#64748B] tabular-nums">
-                          Mendan {mendanPeopleSorted.length} {t.report.peopleUnit}
+                          {uiLang === 'jp'
+                            ? `面談予定 ${mendanPeopleSorted.length}名`
+                            : `Mendan ${mendanPeopleSorted.length} ${t.report.peopleUnit}`}
                         </div>
                       </div>
                       <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
@@ -7528,7 +8188,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </main>
 
           {/* RIGHT SYSTEM ALERTS PANE */}
-          <aside className="border-t border-[#E2E8F0] bg-white p-5 lg:overflow-y-auto lg:border-t-0">
+          <aside className="border-t border-[#E2E8F0] bg-white p-5 lg:overflow-y-auto lg:border-t-0 print:hidden">
             <div className="mb-4 font-mono text-[10px] font-semibold uppercase tracking-widest text-[#64748B]">
               {t.systemAlerts}
             </div>
@@ -7783,7 +8443,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                             }
                             if (
                               item.entityId &&
-                              item.category !== 'resignation'
+                              item.category !== 'resignation' &&
+                              item.category !== 'resignation_unconfirmed'
                             ) {
                               setDrawerCandidateId(item.entityId);
                             }
@@ -7852,7 +8513,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         </span>
                       </div>
                       <div className="mt-1 text-[11px] text-[#64748B] truncate">
-                        {record.previousCompany}
+                        {getResignationCompanyLabel(record.previousCompany, uiLang)}
                       </div>
                       <div className="mt-2.5 flex flex-wrap gap-1.5">
                         <button
@@ -7954,6 +8615,48 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 {t.close}
               </button>
             </div>
+
+            {editingPerson.isNew &&
+              (() => {
+                const dup = findDuplicateCandidate(allPeopleCombined, {
+                  id: editingPerson.data.id,
+                  name: editingPerson.data.name,
+                  fbName: editingPerson.data.fbName,
+                  fbProfileUrl: editingPerson.data.fbProfileUrl,
+                  phone: editingPerson.data.phone,
+                });
+                if (!dup) return null;
+                const dupName = getCandidateDisplayName(dup, uiLang);
+                const matchedBy =
+                  editingPerson.data.fbProfileUrl && dup.fbProfileUrl
+                    ? 'FB URL'
+                    : editingPerson.data.phone && dup.phone
+                      ? uiLang === 'jp'
+                        ? '電話番号'
+                        : 'SĐT'
+                      : uiLang === 'jp'
+                        ? '氏名 / FB名'
+                        : 'Tên / Tên FB';
+                return (
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+                    <span className="font-semibold">
+                      {uiLang === 'jp'
+                        ? `⚠️ 重複候補を検出しました（一致項目: ${matchedBy}）:「${dupName}」(${dup.progressStatus || '新規相談'})`
+                        : `⚠️ Phát hiện hồ sơ có thể bị trùng (khớp ${matchedBy}): "${dupName}" (${dup.progressStatus || '新規相談'})`}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingPerson(null);
+                        setDrawerCandidateId(dup.id);
+                      }}
+                      className="rounded border border-amber-400 bg-white px-2.5 py-0.5 font-semibold text-amber-900 hover:bg-amber-100 cursor-pointer"
+                    >
+                      {uiLang === 'jp' ? '既存プロフィールを開く' : 'Mở hồ sơ sẵn có'}
+                    </button>
+                  </div>
+                );
+              })()}
 
             <div className="mb-4 rounded-lg border border-sky-200 bg-sky-50/70 p-3">
               <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
@@ -8116,18 +8819,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 <div className="flex flex-wrap gap-2">
                   {(
                     [
-                      {
-                        id: 'personal',
-                        label: uiLang === 'jp' ? 'FB個人' : 'Facebook cá nhân',
-                      },
-                      {
-                        id: 'company',
-                        label: uiLang === 'jp' ? 'FB会社公式' : 'Fanpage công ty',
-                      },
-                      {
-                        id: 'school',
-                        label: uiLang === 'jp' ? '日本語学校・留学生' : 'Trường Nhật ngữ / Du học sinh',
-                      },
+                      { id: 'personal', label: t.tabs.personal },
+                      { id: 'company', label: t.tabs.company },
+                      { id: 'line', label: t.tabs.line },
+                      { id: 'other', label: t.tabs.other },
+                      { id: 'school', label: t.tabs.school },
                     ] as Array<{ id: ChannelType; label: string }>
                   ).map((ch) => (
                     <button
@@ -8156,17 +8852,68 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 <label className="mb-1 block font-semibold">
                   {uiLang === 'jp' ? '国籍' : 'Quốc tịch'}
                 </label>
-                <input
-                  type="text"
-                  value={editingPerson.data.nationality || ''}
-                  onChange={(e) =>
-                    setEditingPerson({
-                      ...editingPerson,
-                      data: { ...editingPerson.data, nationality: e.target.value },
-                    })
-                  }
-                  className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5"
-                />
+                {(() => {
+                  const currentNat = String(editingPerson.data.nationality || '').trim();
+                  const isStandardNat =
+                    !currentNat ||
+                    (CANDIDATE_NATIONALITIES as readonly string[]).includes(currentNat);
+                  const selectVal = isStandardNat ? currentNat : 'その他';
+                  return (
+                    <div className="space-y-1.5">
+                      <select
+                        value={selectVal}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setEditingPerson({
+                            ...editingPerson,
+                            data: {
+                              ...editingPerson.data,
+                              nationality:
+                                val === 'その他'
+                                  ? isStandardNat
+                                    ? 'その他'
+                                    : currentNat
+                                  : val,
+                              nationalityManuallyEdited: true,
+                            },
+                          });
+                        }}
+                        className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5"
+                      >
+                        <option value="">
+                          {uiLang === 'jp' ? '-- 未設定 --' : '-- Chưa chọn --'}
+                        </option>
+                        {CANDIDATE_NATIONALITIES.map((nat) => (
+                          <option key={nat} value={nat}>
+                            {nat}
+                          </option>
+                        ))}
+                      </select>
+                      {selectVal === 'その他' && (
+                        <input
+                          type="text"
+                          placeholder={
+                            uiLang === 'jp'
+                              ? '国名を入力 (例: バングラデシュ)'
+                              : 'Nhập quốc tịch khác...'
+                          }
+                          value={currentNat === 'その他' ? '' : currentNat}
+                          onChange={(e) =>
+                            setEditingPerson({
+                              ...editingPerson,
+                              data: {
+                                ...editingPerson.data,
+                                nationality: e.target.value || 'その他',
+                                nationalityManuallyEdited: true,
+                              },
+                            })
+                          }
+                          className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5"
+                        />
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               <div>
                 <label className="mb-1 block font-semibold">
@@ -8683,6 +9430,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           ? 'school'
                           : found.channel === 'company'
                           ? 'company'
+                          : found.channel === 'line'
+                          ? 'line'
+                          : found.channel === 'other'
+                          ? 'other'
                           : 'personal'
                       );
                     }
@@ -8705,6 +9456,49 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
             )}
 
+            {fbChatMode === 'new' &&
+              fbChatRawText.trim().length > 3 &&
+              (() => {
+                const previewParsed = parseChatIntoUpdates(fbChatRawText);
+                const dup = findDuplicateCandidate(allPeopleCombined, {
+                  name: previewParsed.name,
+                  fbName: previewParsed.fbName,
+                  fbProfileUrl: previewParsed.fbProfileUrl,
+                  phone: previewParsed.phone,
+                });
+                if (!dup) return null;
+                const dupName = getCandidateDisplayName(dup, uiLang);
+                const matchedBy =
+                  previewParsed.fbProfileUrl && dup.fbProfileUrl
+                    ? 'FB URL'
+                    : previewParsed.phone && dup.phone
+                      ? uiLang === 'jp'
+                        ? '電話番号'
+                        : 'SĐT'
+                      : uiLang === 'jp'
+                        ? '氏名 / FB名'
+                        : 'Tên / Tên FB';
+                return (
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+                    <span className="font-semibold">
+                      {uiLang === 'jp'
+                        ? `⚠️ 既存データに一致する相談者があります（${matchedBy}）:「${dupName}」`
+                        : `⚠️ Có hồ sơ trùng (${matchedBy}): "${dupName}"`}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFbChatMode('update');
+                        setFbChatTargetId(dup.id);
+                      }}
+                      className="rounded border border-amber-400 bg-white px-2.5 py-0.5 font-semibold text-amber-900 hover:bg-amber-100 cursor-pointer"
+                    >
+                      {uiLang === 'jp' ? 'この相談者を更新モードへ切替' : 'Chuyển sang Cập nhật hồ sơ này'}
+                    </button>
+                  </div>
+                );
+              })()}
+
             <div className="mb-3">
               <label className="mb-1 block font-semibold">
                 {fbChatMode === 'new'
@@ -8720,6 +9514,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   [
                     { id: 'personal', label: t.channelPersonal },
                     { id: 'company', label: t.channelCompany },
+                    { id: 'line', label: t.channelLine },
+                    { id: 'other', label: t.channelOther },
                     { id: 'school', label: t.tabs.school },
                   ] as Array<{ id: ChannelType; label: string }>
                 ).map((ch) => (
@@ -10474,7 +11270,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   <div className="min-w-0 space-y-0.5">
                     <div className="font-semibold text-[#0F172A]">{draft.eventTitle}</div>
                     <div className="text-[11px] text-amber-800">
-                      {draft.dateIso} (09:00–10:00 JST) · {record.previousCompany}
+                      {draft.dateIso} (09:00–10:00 JST) ·{' '}
+                      {getResignationCompanyLabel(record.previousCompany, uiLang)}
                     </div>
                   </div>
                   <a
@@ -10496,7 +11293,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       {/* Prominent Corner Reminder Toast Banner for Urgent Resignation Deadlines (<= 3 days / overdue) */}
       {urgentResignationAlerts.length > 0 &&
         dismissedUrgentBannerSig !== urgentResignationSignature && (
-          <div className="fixed bottom-20 right-5 z-40 w-[calc(100vw-2.5rem)] max-w-sm rounded-xl border border-rose-200 bg-white p-3.5 text-xs text-[#0F172A] shadow-xl">
+          <div className="fixed bottom-20 right-5 z-40 w-[calc(100vw-2.5rem)] max-w-sm rounded-xl border border-rose-200 bg-white p-3.5 text-xs text-[#0F172A] shadow-xl print:hidden">
             <div className="mb-2 flex items-start justify-between gap-2">
               <div className="flex items-center gap-1.5 font-bold text-rose-700">
                 <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600" aria-hidden="true" />
@@ -10555,7 +11352,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           type="button"
           onClick={() => setChatbotOpen(true)}
           aria-label={t.aiAssistant}
-          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-full bg-[#16A34A] px-4 py-3 text-xs font-semibold text-white shadow-lg transition-transform hover:scale-[1.02] hover:bg-[#15803D] cursor-pointer"
+          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-full bg-[#16A34A] px-4 py-3 text-xs font-semibold text-white shadow-lg transition-transform hover:scale-[1.02] hover:bg-[#15803D] cursor-pointer print:hidden"
         >
           <MessageSquareText className="h-4 w-4" aria-hidden="true" />
           {t.aiAssistant}

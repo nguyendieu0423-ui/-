@@ -1,9 +1,11 @@
-export type ChannelType = 'personal' | 'company' | 'school';
+export type ChannelType = 'personal' | 'company' | 'line' | 'other' | 'school';
 
 export type MainTabId =
   | 'all'
   | 'personal'
   | 'company'
+  | 'line'
+  | 'other'
   | 'school'
   | 'mendan'
   | 'proposed'
@@ -65,6 +67,7 @@ export interface Candidate {
   address?: string;
   progressStatus?: string;
   proposedCompany?: string;
+  proposalDate?: string;
   naiteiCompany?: string;
   expectedJoinDate?: string;
   visaSubmissionDeadline?: string;
@@ -73,6 +76,7 @@ export interface Candidate {
   lastContactDate?: string;
   declineReason?: string;
   memo?: string;
+  nationalityManuallyEdited?: boolean;
   googleCalendarEventId?: string;
   googleCalendarEventLink?: string;
   savedRirekisho?: SavedRirekishoRecord;
@@ -93,9 +97,13 @@ export interface KyujinSlot {
   jobCode?: string;
   area?: string;
   shiftTime?: string;
+  shiftType?: string;
+  holidays?: string;
+  overtimeHours?: string;
   salary?: string;
   nightShiftAllowance?: string;
   estimatedNetSalary?: string;
+  annualSalary?: string;
   hourlyWage?: string;
   commuteAllowance?: string;
   shiftsPerWeek?: string;
@@ -104,6 +112,9 @@ export interface KyujinSlot {
   minJlpt?: string;
   housingSupport?: string;
   recruitmentStatus?: string;
+  recruitCount?: string;
+  interviewProcess?: string;
+  specialBenefits?: string;
   careQualification?: string;
   facilityType?: string;
   experienceRequirement?: string;
@@ -185,7 +196,14 @@ export type DailyFocusCompletionMap = Record<string, boolean>;
 
 export interface DailyFocusItem {
   id: string;
-  category: 'mendan' | 'uncontacted' | 'visa_expiry' | 'resignation' | 'visa_submission';
+  category:
+    | 'mendan'
+    | 'uncontacted'
+    | 'visa_expiry'
+    | 'resignation'
+    | 'resignation_unconfirmed'
+    | 'visa_submission'
+    | 'stale_proposed';
   urgency: 'critical' | 'warning';
   title: string;
   subtitle: string;

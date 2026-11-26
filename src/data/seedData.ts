@@ -43,9 +43,19 @@ export const RESIGNATION_NATIONALITIES = [
   'フィリピン',
   'カンボジア',
   'ネパール',
+  '中国',
+  'バングラデシュ',
+  'スリランカ',
+  '台湾',
+  '韓国',
+  'モンゴル',
+  'タイ',
+  'ウズベキスタン',
   'その他',
   '国籍不明',
 ] as const;
+
+export const CANDIDATE_NATIONALITIES = RESIGNATION_NATIONALITIES;
 
 export const INDUSTRIES = [
   '介護',

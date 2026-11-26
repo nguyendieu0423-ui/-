@@ -22,7 +22,13 @@ import {
   type MessengerExtractedProfile,
 } from './src/db/crmRepository.ts';
 import type { Candidate, ResignationRecord } from './src/types/crm.ts';
-import { extractKyujinSalaryInfo } from './src/utils/salaryParser.ts';
+import {
+  extractAnnualSalaryText,
+  extractEstimatedNetSalaryText,
+  extractKyujinSalaryInfo,
+  sanitizeExcelFloatText,
+  stripKyujinFormBoilerplate,
+} from './src/utils/salaryParser.ts';
 
 dotenv.config();
 
@@ -106,25 +112,32 @@ const KYUJIN_EXTRACTION_PROMPT = `あなたは日本の人材紹介会社（特�
    - "Baito / Làm thêm (アルバイト・パート)"
 6. facilityType: 介護の場合の施設形態（デイサービス、グループホーム、有料老人ホーム、特別養護老人ホーム、老健、訪問介護）。
 7. area: 勤務地を「都道府県＋区・市」レベルで正確に記載。
-8. shiftTime: シフト・勤務時間（例: 早番・日勤・夜勤、または 17:00〜22:30）。
-9. salary: 給与・月給・時給・基本給・想定月収・賃金・報酬・給与形態・総支給から必ず抽出（例: 220,000円, 22万円, 22.5万円, 20万～25万円, 220k, 月給215,000円（夜勤手当含む））。時給の場合は「時給 1,150円〜（交通費支給）」のように記載。金額の記載がある場合は絶対に「給与要確認」にしないこと。
-10. nightShiftAllowance: 夜勤手当（例: 6,000円/回、なし）。
-11. estimatedNetSalary: 手取り目安・控除後の記載があればそのまま記載（例: 約185,000円）。
-12. hourlyWage: 時給（アルバイト・パート、または10,000円未満の時給表記がある場合: 1,250円 / 1,150円〜（交通費支給） / 1,200円～1,500円）。
-13. commuteAllowance: 交通費・通勤手当（例: 全額支給 / 月上限20,000円）。
-14. shiftsPerWeek: 週の勤務日数・時間（例: 週3〜5日 / 週28時間以内）。
-15. minJlpt: N1, N2, N3, N4, N5, 日常会話, 不問, 要確認。
-16. housingSupport: 「自社寮あり」「借上げ宿舎あり」「寮・社宅あり」「提供無」「要確認」。
-17. bonus / bonusDetail: 「賞与あり」「賞与なし」「要確認」＋詳細（例: 年2回 計2.5ヶ月分）。
-18. experienceRequirement: 必ず「Không yêu cầu kinh nghiệm (未経験OK)」または「Yêu cầu có kinh nghiệm (経験者必須)」に分類。
-19. experienceDetail: 必須資格や歓迎経験の詳細。
-20. jobDescription: 業務内容（業務の特徴・具体的な作業内容を省略せず詳しく記載）。
-21. excludedNationalities: 採用不可・NGと明記された国籍の配列（例: ["ネパール"], ["ベトナム"]）。記載がなければ []。
-22. excludedGenders: 採用不可・NGと明記された性別の配列（例: "男性NG" や "女性限定" なら ["男性"]、"女性NG" や "男性限定" なら ["女性"]）。記載がなければ []。
-23. requiresInJapan: "国内在住限定"、"日本在住のみ"、"在日限定"、"海外NG" などの記載があれば true、それ以外は false。
-24. requiresTokutei: 特定技能（または特定技能試験合格）が必須であれば true、それ以外は false。
-25. requiredConditions: 必須応募条件の配列（例: ["特定技能", "日本国内在住", "JLPT N3以上", "介護初任者研修"]）。
-26. ngConditions: 除外・NG条件の配列（例: ["ネパール人NG", "男性NG", "海外NG", "タトゥーNG"]）。`;
+8. shiftTime: 勤務時間・シフト枠。就業時間欄に複数のシフト枠（例: ①08:00〜17:00 / ②09:00〜18:00 / ③11:00〜20:00 / ④14:00〜22:00）が並んでいる場合は1つにまとめず、番号・時刻をすべて原文どおり列挙すること。
+9. shiftType: 勤務形態を「日勤のみ」「シフト制」「夜勤あり」から正確に判定（22:00以降の深夜・夜勤シフトがなければ「日勤のみ」または「シフト制（夜勤なし）」として扱う）。
+10. holidays: 年間休日日数・休日形態（例: 110日/年・月7〜10日、完全週休2日制 等）。
+11. overtimeHours: 残業時間・みなし残業・月平均残業時間（例: 月平均10時間、なし）。
+12. salary: 給与・月給・時給・基本給・想定月収・賃金・報酬・給与形態・総支給から必ず抽出（例: 220,000円, 22万円, 22.5万円, 20万～25万円, 220k, 月給215,000円（夜勤手当含む））。時給の場合は「時給 1,150円〜（交通費支給）」のように記載。金額の記載がある場合は絶対に「給与要確認」にしないこと。浮動小数点誤差（22.999999等）は整数に丸める。
+13. nightShiftAllowance: 夜勤手当（例: 6,000円/回、なし）。
+14. estimatedNetSalary: 手取り目安・控除後の記載があればそのまま記載（例: 約185,000円）。
+15. annualSalary: 想定年収・モデル年収の記載があれば記載（例: 320万円〜380万円）。
+16. hourlyWage: 時給（アルバイト・パート、または10,000円未満の時給表記がある場合: 1,250円 / 1,150円〜（交通費支給） / 1,200円～1,500円）。
+17. commuteAllowance: 交通費・通勤手当（例: 全額支給 / 月上限20,000円）。
+18. shiftsPerWeek: 週の勤務日数・時間（例: 週3〜5日 / 週28時間以内）。
+19. recruitCount: 募集人数（例: 2名、若干名）。
+20. interviewProcess: 選考フロー・面接回数（例: 書類選考 → 面接1〜2回）。
+21. specialBenefits: 福利厚生・待遇・各種手当・退職金・社会保険等（「社会保険加入事業者か〜」「(例)〜」「※1〜」等の求人票フォーム注記定型文は絶対に除去すること）。
+22. minJlpt: N1, N2, N3, N4, N5, 日常会話, 不問, 要確認（「N4以上」→「N4」のように基準級に正規化）。
+23. housingSupport: 「自社寮あり」「借上げ宿舎あり」「寮・社宅あり」「提供無」「要確認」。
+24. bonus / bonusDetail: 「賞与あり」「賞与なし」「要確認」＋詳細（例: 年2回 計2.5ヶ月分）。重要：チェックボックス☑・✔・●や「無」「賞与なし」「退職金・賞与無」が指定されている場合は、選択肢に「賞与あり」の文字が並んでいても必ず「賞与なし」を優先すること。
+25. experienceRequirement: 必ず「Không yêu cầu kinh nghiệm (未経験OK)」「Yêu cầu có kinh nghiệm (経験者必須)」「Ưu tiên có kinh nghiệm (経験者歓迎)」の3分類から選択。
+26. experienceDetail: 必須資格や歓迎経験の詳細。
+27. jobDescription: 業務内容（業務の特徴・具体的な作業内容を省略せず詳しく記載。フォーム定型文や社内メモは除去）。
+28. excludedNationalities: 採用不可・NGと明記された国籍の配列（例: ["ネパール"], ["ベトナム"]）。記載がなければ []。
+29. excludedGenders: 採用不可・NGと明記された性別の配列（例: "男性NG" や "女性限定" なら ["男性"]、"女性NG" や "男性限定" なら ["女性"]）。記載がなければ []。
+30. requiresInJapan: "国内在住限定"、"日本在住のみ"、"在日限定"、"海外NG"、"海外招へい 不可" などの記載があれば true、それ以外は false。
+31. requiresTokutei: 特定技能（または特定技能試験合格）が必須であれば true、それ以外は false。
+32. requiredConditions: 必須応募条件の配列（例: ["特定技能", "日本国内在住", "JLPT N4", "介護初任者研修"]）。
+33. ngConditions: 除外・NG条件の配列（例: ["ネパール人NG", "男性NG", "海外NG", "タトゥーNG"]）。`;
 
 const RIREKISHO_EXTRACTION_PROMPT = `あなたは日本の特定技能人材紹介会社の履歴書データ抽出AIです。
 提供された履歴書ファイル（PDF/画像/Excelテキスト/Wordテキスト）または応募者とのチャット履歴から、2カラム標準履歴書の全項目を正確に抽出してJSONで返してください。
@@ -269,17 +282,17 @@ QUY TẮC BÓC TÁCH BẮT BUỘC (TUÂN THỦ TUYỆT ĐỐI):
    - **NGƯỜI TƯ VẤN / NHÂN VIÊN** là người chào hỏi tư vấn, giới thiệu công ty, hẹn lịch Mendan. Tuyệt đối không lấy tên/SĐT của nhân viên tư vấn gán cho ứng viên.
 3. QUY TẮC CHI TIẾT TỪNG TRƯỜNG:
    - **fullName** (氏名 / Họ tên khai sinh): CHỈ điền nếu trong ảnh có giấy tờ tùy thân (Thẻ ngoại kiều / Zairyu Card, Sơ yếu lý lịch / CV) ghi rõ họ tên khai sinh hoặc ứng viên tự khai rõ họ tên thật. **Nếu chỉ là ảnh chụp đoạn chat Messenger, BẮT BUỘC để trống \`""\`**.
-   - **fbName** (FBアカウント名 / Tên nick FB): Lấy chính xác tên hiển thị ở thanh tiêu đề trên cùng của khung chat Messenger (ví dụ: \`"Dương Như"\`, \`"Nguyễn Lyly"\`).
-   - **nationality** (国籍): Tự nhận diện quốc tịch theo tên người nhắn, ngôn ngữ chat hoặc thông tin trên thẻ ngoại kiều và chuẩn hóa về tiếng Nhật: \`ベトナム\`, \`インドネシア\`, \`ミャンマー\`, \`ネパール\`, \`フィリピン\`, \`カンボジア\`, \`中国\`...
+   - **fbName** (FBアカウント名 / Tên nick FB hoặc LINE): Lấy chính xác tên hiển thị ở thanh tiêu đề trên cùng của khung chat Messenger/LINE (ví dụ: \`"Dương Như"\`, \`"Nguyễn Lyly"\`). **TUYỆT ĐỐI KHÔNG** copy đường dẫn URL (\`https://...\`, \`facebook.com/...\`) vào trường \`fbName\` (URL phải đưa vào \`fbProfileUrl\`).
+   - **nationality** (国籍): Tự nhận diện quốc tịch theo tên người nhắn, ngôn ngữ chat hoặc thông tin trên thẻ ngoại kiều và chuẩn hóa về tiếng Nhật SẠCH, KHÔNG kèm chú thích ngoặc đơn: \`ベトナム\`, \`インドネシア\`, \`ミャンマー\`, \`ネパール\`, \`フィリピン\`, \`カンボジア\`, \`中国\`...
    - **japaneseLevel** (日本語レベル): Chỉ điền trình độ thực tế của ứng viên (\`N1\`, \`N2\`, \`N3\`, \`N4\`, \`N5\`, \`JFT\`, \`初級\`, \`日常会話\`) nếu ứng viên tự khai (vd: "em có N4"). **QUAN TRỌNG**: Nếu \`N3\` / \`N4\` chỉ xuất hiện trong ảnh bài đăng tuyển dụng / tin tuyển dụng mà ứng viên đang hỏi thăm (vd: yêu cầu đơn là N3/N4) chứ chưa rõ trình độ của ứng viên, BẮT BUỘC giữ nguyên là \`"要確認"\`. Nếu nói "có N4 và sắp thi N3" -> chỉ điền \`"N4"\`, ghi chú "Sắp tới thi N3" vào \`japanExperience\`.
-   - **desiredField** (希望分野): Tự nhận diện ngành nghề chuẩn tiếng Nhật từ nội dung chat hoặc ảnh bài đăng tuyển dụng ứng viên gửi kèm (ví dụ: \`外食業\`, \`介護\`, \`飲食料品製造業\`, \`ビルクリーニング\`, \`宿泊\`, \`自動車運送業\`, \`建設\`, \`自動車整備\`, \`農業\`, \`素形材・産業機械・電気電子情報関連製造業\`, \`コンビニ・小売（アルバイト）\`).
+   - **desiredField** (希望分野): Tự nhận diện ngành nghề chuẩn tiếng Nhật từ nội dung chat hoặc ảnh bài đăng tuyển dụng ứng viên gửi kèm (ví dụ: thấy "nhà hàng / quán ăn / bếp / phục vụ bàn" -> \`外食業\`; các ngành chuẩn khác: \`介護\`, \`飲食料品製造業\`, \`ビルクリーニング\`, \`宿泊\`, \`自動車運送業\`, \`建設\`, \`自動車整備\`, \`農業\`, \`素形材・産業機械・電気電子情報関連製造業\`, \`コンビニ・小売（アルバイト）\`).
    - **desiredArea** (希望勤務エリア): Tự nhận diện khu vực làm việc chuẩn tiếng Nhật từ lời nhắn hoặc bài đăng ứng viên hỏi (ví dụ: thấy \`都内\` -> điền \`東京都\`; thấy \`関東\` -> điền \`関東エリア\`; thấy \`大阪\` -> điền \`大阪府\`; nhiều tỉnh nối bằng \`・\`).
    - **visaType** & **visaExpiry** (在留資格 / 在留期限): Trích xuất loại visa (\`特定技能1号\`, \`留学\`, \`技能実習\`, \`家族滞在\`, \`技術・人文知識・国際業務\`...) và hạn thẻ \`YYYY-MM-DD\` nếu có (chú ý giải mã "dhs" -> \`留学（Du học sinh）\`).
    - **certifications** (合格済み試験・資格): Trích xuất bằng tay nghề Tokutei, JFT, bằng lái xe, sơ cấp cứu Kaigo... nếu có; không có thì \`""\`.
    - **goal** (Nhu cầu & Mục tiêu chuyển đổi): Tóm tắt ngắn gọn bằng tiếng Việt mục đích của ứng viên (bao gồm cả hình thức làm việc như Baito / Làm thêm hay Tokutei, mức lương/điều kiện của đơn mà ứng viên đang hỏi).
    - **rawLog** (Nhật ký & Tình trạng trao đổi nguyên văn): **BẮT BUỘC** trích xuất TOÀN BỘ chữ có trong ảnh (bao gồm CẢ nội dung văn bản trong ảnh bài đăng tuyển dụng mà ứng viên gửi kèm lẫn toàn bộ tin nhắn hội thoại kèm mốc giờ), giữ nguyên từng dòng không cắt bớt.
-4. CÁC TRƯỜNG BỔ SUNG (điền nếu có trong ảnh/chat, không có thì \`""\`):
-   - \`fbProfileUrl\`, \`channel\` (\`"personal"\` mặc định, \`"company"\` nếu fanpage công ty, \`"school"\` nếu trường Nhật ngữ), \`age\`, \`birthDate\` (\`YYYY-MM-DD\`), \`phone\`, \`email\`, \`address\`, \`startDate\` (năm hiện tại 2026 -> "tháng X năm sau" là 2027), \`graduationDate\`, \`japanExperience\`, \`salaryExpectation\`, \`progressStatus\` (mặc định \`"新規相談"\`), \`proposedCompany\`, \`mendanDate\`, \`interviewDate\`.`;
+4. CÁC TRƯỜNG BỔ SUNG (điền nếu có thực tế trong ảnh/chat; nếu không có thì trả về \`""\`, TUYỆT ĐỐI KHÔNG điền chuỗi giữ chỗ kiểu \`"(Chưa có...)"\`, \`"Chưa rõ"\`, \`"未定"\`, và KHÔNG tự suy đoán \`mendanDate\` / \`interviewDate\` từ câu hỏi giả định):
+   - \`fbProfileUrl\`, \`channel\` (\`"personal"\` FB cá nhân mặc định, \`"company"\` Fanpage công ty, \`"school"\` Trường Nhật ngữ / DHS, \`"line"\` nếu nguồn là LINE, \`"other"\` nếu nguồn khác / giới thiệu trực tiếp), \`age\`, \`birthDate\` (\`YYYY-MM-DD\`), \`phone\`, \`email\`, \`address\`, \`startDate\` (năm hiện tại 2026 -> "tháng X năm sau" là 2027), \`graduationDate\`, \`japanExperience\`, \`salaryExpectation\`, \`progressStatus\` (mặc định \`"新規相談"\`), \`proposedCompany\`, \`mendanDate\`, \`interviewDate\`.`;
 
 async function startServer() {
   const app = express();
@@ -693,6 +706,56 @@ async function startServer() {
         }
         return '';
       };
+      const cleanOptionalField = (val: unknown): string => {
+        const s = typeof val === 'string' ? val.trim() : '';
+        if (
+          !s ||
+          /^(?:\(?chưa\s*(?:có|rõ|biết|xác\s*định)[^)]*\)?|\(?không\s*(?:có|rõ)[^)]*\)?|未定|なし|不明|該当なし|n\/a|-+)$/i.test(
+            s
+          )
+        ) {
+          return '';
+        }
+        return s;
+      };
+      const cleanFbName = (val: unknown): string => {
+        const s = cleanOptionalField(val);
+        if (!s || /^https?:\/\//i.test(s) || /(?:facebook\.com|fb\.com|m\.me)\//i.test(s)) {
+          return '';
+        }
+        return s;
+      };
+      const cleanNat = (val: unknown): string => {
+        const s = cleanOptionalField(val).replace(/\s*[（(][^）)]*[）)]\s*/g, '').trim();
+        if (!s) return '';
+        if (/viet|việt|ベトナム/i.test(s)) return 'ベトナム';
+        if (/indo|インドネシア/i.test(s)) return 'インドネシア';
+        if (/myanmar|miến|ミャンマー/i.test(s)) return 'ミャンマー';
+        if (/nepal|ネパール/i.test(s)) return 'ネパール';
+        if (/philip|フィリピン/i.test(s)) return 'フィリピン';
+        if (/cambo|campu|カンボジア/i.test(s)) return 'カンボジア';
+        if (/china|trung\s*quốc|中国/i.test(s)) return '中国';
+        return s;
+      };
+      const normalizeIndustryStr = (val: unknown): string => {
+        const s = cleanOptionalField(val);
+        if (!s) return '';
+        if (/nhà\s*hàng|quán\s*ăn|bếp|phục\s*vụ\s*bàn|ẩm\s*thực/i.test(s) && !/外食/.test(s)) {
+          return '外食業';
+        }
+        return s;
+      };
+      const rawChan = pickStr(raw.channel).toLowerCase();
+      const normalizedChannel =
+        rawChan === 'company' ||
+        rawChan === 'school' ||
+        rawChan === 'line' ||
+        rawChan === 'other' ||
+        rawChan === 'personal'
+          ? rawChan
+          : /line/i.test(pickStr(raw.rawLog, raw.negotiationLog))
+          ? 'line'
+          : 'personal';
 
       const resolvedArea = pickStr(raw.desiredArea)
         .replace(/都内/g, '東京都')
@@ -700,24 +763,31 @@ async function startServer() {
 
       const candidate: Record<string, unknown> = {
         ...raw,
-        name: pickStr(raw.fullName, raw.name),
-        fullName: pickStr(raw.fullName, raw.name),
-        fbName: pickStr(raw.fbName),
-        fbProfileUrl: pickStr(raw.fbProfileUrl, raw.fbUrl),
-        fbUrl: pickStr(raw.fbProfileUrl, raw.fbUrl),
-        nationality: pickStr(raw.nationality),
+        name: cleanOptionalField(pickStr(raw.fullName, raw.name)),
+        fullName: cleanOptionalField(pickStr(raw.fullName, raw.name)),
+        fbName: cleanFbName(raw.fbName),
+        fbProfileUrl: cleanOptionalField(pickStr(raw.fbProfileUrl, raw.fbUrl)),
+        fbUrl: cleanOptionalField(pickStr(raw.fbProfileUrl, raw.fbUrl)),
+        channel: normalizedChannel,
+        nationality: cleanNat(raw.nationality),
         jlpt: pickStr(raw.japaneseLevel, raw.jlpt) || '要確認',
         japaneseLevel: pickStr(raw.japaneseLevel, raw.jlpt) || '要確認',
-        desiredIndustry: pickStr(raw.desiredField, raw.desiredIndustry),
-        desiredField: pickStr(raw.desiredField, raw.desiredIndustry),
+        desiredIndustry: normalizeIndustryStr(pickStr(raw.desiredField, raw.desiredIndustry)),
+        desiredField: normalizeIndustryStr(pickStr(raw.desiredField, raw.desiredIndustry)),
         desiredArea: resolvedArea,
-        visaStatus: pickStr(raw.visaType, raw.visaStatus),
-        visaType: pickStr(raw.visaType, raw.visaStatus),
-        visaExpiry: pickStr(raw.visaExpiry),
-        passedExam: pickStr(raw.certifications, raw.passedExam),
-        certifications: pickStr(raw.certifications, raw.passedExam),
-        conversionGoal: pickStr(raw.goal, raw.conversionGoal),
-        goal: pickStr(raw.goal, raw.conversionGoal),
+        visaStatus: cleanOptionalField(pickStr(raw.visaType, raw.visaStatus)),
+        visaType: cleanOptionalField(pickStr(raw.visaType, raw.visaStatus)),
+        visaExpiry: cleanOptionalField(raw.visaExpiry),
+        passedExam: cleanOptionalField(pickStr(raw.certifications, raw.passedExam)),
+        certifications: cleanOptionalField(pickStr(raw.certifications, raw.passedExam)),
+        conversionGoal: cleanOptionalField(pickStr(raw.goal, raw.conversionGoal)),
+        goal: cleanOptionalField(pickStr(raw.goal, raw.conversionGoal)),
+        phone: cleanOptionalField(raw.phone),
+        email: cleanOptionalField(raw.email),
+        address: cleanOptionalField(raw.address),
+        mendanDate: cleanOptionalField(raw.mendanDate),
+        interviewDate: cleanOptionalField(raw.interviewDate),
+        proposedCompany: cleanOptionalField(raw.proposedCompany),
         negotiationLog: pickStr(raw.rawLog, raw.negotiationLog),
         rawLog: pickStr(raw.rawLog, raw.negotiationLog),
       };
@@ -796,12 +866,19 @@ async function startServer() {
                 facilityType: { type: Type.STRING },
                 area: { type: Type.STRING },
                 shiftTime: { type: Type.STRING },
+                shiftType: { type: Type.STRING },
+                holidays: { type: Type.STRING },
+                overtimeHours: { type: Type.STRING },
                 salary: { type: Type.STRING },
                 nightShiftAllowance: { type: Type.STRING },
                 estimatedNetSalary: { type: Type.STRING },
+                annualSalary: { type: Type.STRING },
                 hourlyWage: { type: Type.STRING },
                 commuteAllowance: { type: Type.STRING },
                 shiftsPerWeek: { type: Type.STRING },
+                recruitCount: { type: Type.STRING },
+                interviewProcess: { type: Type.STRING },
+                specialBenefits: { type: Type.STRING },
                 minJlpt: { type: Type.STRING },
                 housingSupport: { type: Type.STRING },
                 bonus: { type: Type.STRING },
@@ -852,14 +929,16 @@ async function startServer() {
         typeof rawText === 'string' && rawText.trim() && rawItems.length <= 1
           ? extractKyujinSalaryInfo(rawText)
           : null;
+      const cleanKyujinField = (v: unknown): string =>
+        sanitizeExcelFloatText(stripKyujinFormBoilerplate(String(v ?? '').trim()));
 
       const normalizedItems = rawItems.map((item) => {
-        const aiSal = String(item.salary || '').trim();
-        const aiHourly = String(item.hourlyWage || '').trim();
+        const aiSal = cleanKyujinField(item.salary);
+        const aiHourly = cleanKyujinField(item.hourlyWage);
         const combinedHint = [
           aiSal && !/要確認/.test(aiSal) ? aiSal : '',
           aiHourly && !/要確認/.test(aiHourly) ? `時給 ${aiHourly}` : '',
-          String(item.jobDescription || ''),
+          cleanKyujinField(item.jobDescription),
         ]
           .filter(Boolean)
           .join('\n');
@@ -881,10 +960,53 @@ async function startServer() {
             ? salaryParsed.hourlyWage
             : aiHourly;
 
+        const cleanNet =
+          cleanKyujinField(item.estimatedNetSalary) ||
+          (typeof rawText === 'string' && rawItems.length <= 1
+            ? extractEstimatedNetSalaryText(rawText)
+            : '');
+        const cleanAnnual =
+          cleanKyujinField(item.annualSalary) ||
+          (typeof rawText === 'string' && rawItems.length <= 1
+            ? extractAnnualSalaryText(rawText)
+            : '');
+        const rawJlpt = cleanKyujinField(item.minJlpt);
+        const normJlptMatch = rawJlpt.match(/(N[1-5])\s*(?:以上|程度|相当)?/i);
+        const finalJlpt = normJlptMatch ? normJlptMatch[1].toUpperCase() : rawJlpt;
+
+        const bonusRaw = cleanKyujinField(item.bonus);
+        const bonusDetailRaw = cleanKyujinField(item.bonusDetail);
+        const bonusCombined = `${bonusRaw} ${bonusDetailRaw}`;
+        const finalBonus = /(?:賞与なし|賞与\s*[:：]?\s*無|退職金・賞与無|ボーナス無|年0回)/.test(
+          bonusCombined
+        )
+          ? '賞与なし'
+          : bonusRaw;
+
         return {
           ...item,
-          salary: finalSalary,
-          hourlyWage: finalHourly,
+          companyName: cleanKyujinField(item.companyName),
+          jobCode: cleanKyujinField(item.jobCode),
+          area: cleanKyujinField(item.area),
+          shiftTime: cleanKyujinField(item.shiftTime),
+          shiftType: cleanKyujinField(item.shiftType),
+          holidays: cleanKyujinField(item.holidays),
+          overtimeHours: cleanKyujinField(item.overtimeHours),
+          salary: sanitizeExcelFloatText(finalSalary),
+          hourlyWage: sanitizeExcelFloatText(finalHourly),
+          estimatedNetSalary: cleanNet,
+          annualSalary: cleanAnnual,
+          nightShiftAllowance: cleanKyujinField(item.nightShiftAllowance),
+          commuteAllowance: cleanKyujinField(item.commuteAllowance),
+          shiftsPerWeek: cleanKyujinField(item.shiftsPerWeek),
+          recruitCount: cleanKyujinField(item.recruitCount),
+          interviewProcess: cleanKyujinField(item.interviewProcess),
+          specialBenefits: cleanKyujinField(item.specialBenefits),
+          minJlpt: finalJlpt || rawJlpt,
+          bonus: finalBonus || item.bonus,
+          bonusDetail: bonusDetailRaw,
+          experienceDetail: cleanKyujinField(item.experienceDetail),
+          jobDescription: cleanKyujinField(item.jobDescription),
         };
       });
 
@@ -1043,7 +1165,9 @@ async function startServer() {
         history,
         roleId = 'crm_strategist',
         crmSummary,
+        lang: rawLang,
       } = req.body ?? {};
+      const lang: 'vi' | 'jp' = rawLang === 'jp' ? 'jp' : 'vi';
 
       if (typeof message !== 'string' || !message.trim()) {
         res.status(400).json({ error: 'Tin nhắn không được để trống.' });
@@ -1078,10 +1202,15 @@ async function startServer() {
             }))
         : [];
 
+      const strictPolicy =
+        lang === 'jp'
+          ? '【厳守ルール】1. 必ず自然で丁寧な日本語のみで回答してください（求人票・送信文サンプルとしてベトナム語を明示的に依頼された箇所のみ例外）。ベトナム語の解説や見出しを混在させないでください。2. 件数・人数・企業数・退職者数などの数値は、必ず下記の「CRM集計データ」に記載された実数のみを正確に引用し、記載されていない数値を推測・創作しないでください。'
+          : '【NGUYÊN TẮC BẮT BUỘC】1. Trả lời bằng tiếng Việt tự nhiên, rõ ràng (chỉ chèn tiếng Nhật khi là thuật ngữ/tên trường hoặc đoạn tin nhắn mẫu tiếng Nhật được yêu cầu). 2. Mọi số liệu thống kê (số ứng viên, kênh, trạng thái, công ty, người nghỉ việc...) PHẢI lấy chính xác tuyệt đối từ phần [Ngữ cảnh dữ liệu CRM hiện tại] bên dưới; tuyệt đối KHÔNG tự bịa hay ước lượng số liệu không có trong ngữ cảnh.';
+
       const systemInstruction =
         typeof crmSummary === 'string' && crmSummary.trim()
-          ? `${roleCfg.instruction}\n\n[Ngữ cảnh dữ liệu CRM hiện tại]\n${crmSummary.slice(0, 2000)}`
-          : roleCfg.instruction;
+          ? `${roleCfg.instruction}\n\n${strictPolicy}\n\n[Ngữ cảnh dữ liệu CRM hiện tại]\n${crmSummary.slice(0, 4500)}`
+          : `${roleCfg.instruction}\n\n${strictPolicy}`;
 
       const ai = getGeminiClient();
       const chat = ai.chats.create({

@@ -24,7 +24,7 @@ export const normalizeJapaneseNumberText = (raw: string): string => {
 };
 
 const NON_SALARY_PREFIX_REGEX =
-  /(?:夜勤手当|宿直手当|交通費|通勤手当|寮費|社宅費|家賃|光熱費|住宅手当|資格手当|家族手当|扶養手当|皆勤手当|処遇改善(?:加算)?|賞与|ボーナス|一時金|退職金|初期費用|控除|社会保険|残業代|時間外手当|時給換算|上限)\s*[:：]?\s*[^\n,;、/／|]{0,36}$/i;
+  /(?:夜勤手当|宿直手当|交通費|通勤手当|寮費|社宅費|家賃|光熱費|住宅手当|資格手当|家族手当|扶養手当|皆勤手当|処遇改善(?:加算)?|賞与|ボーナス|一時金|退職金|初期費用|控除(?!後)|社会保険|残業代|時間外手当|時給換算|上限|年収|想定年収|モデル年収|手取り|控除後)\s*[:：]?\s*[^\n,;、/／|]{0,36}$/i;
 
 const SALARY_LABEL_SOURCE =
   '(?:想定月収|総支給額?|基本給|月給|時給|給与形態|給与|賃金|報酬|月収|Lương(?:\\s*(?:cơ bản|tháng|giờ|thực nhận))?|Salary)';
@@ -41,6 +41,55 @@ const SALARY_INLINE_LABEL_REGEX = new RegExp(
 
 const NON_SALARY_UNIT_FOLLOWING_REGEX =
   /^\s*(?:年|ヶ月|カ月|か月|日|時間|時(?!給)|分|名|人|回|歳|才|%|％|駅|km|m\b|号|番|階)/i;
+
+export const stripKyujinFormBoilerplate = (raw: string): string => {
+  return String(raw || '')
+    .replace(/社会保険加入事業者か[^\n]*/g, '')
+    .replace(/[（(]例[)）][^\n]{0,45}/g, '')
+    .replace(/※\s*[12１２][^\n]{0,60}/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+};
+
+export const sanitizeExcelFloatText = (raw: unknown): string => {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    if (Math.abs(raw) >= 100 && Math.abs(raw - Math.round(raw)) < 0.05) {
+      return String(Math.round(raw));
+    }
+    const rounded2 = Math.round(raw * 100) / 100;
+    return String(rounded2);
+  }
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  return s.replace(/(\d+)\.(?:9{4,}|0{4,}|59{4,}|[0-9]{7,})\d*/g, (m) => {
+    const n = Number(m);
+    if (!Number.isFinite(n)) return m;
+    if (n >= 100 && Math.abs(n - Math.round(n)) < 0.05) {
+      return String(Math.round(n));
+    }
+    return String(Math.round(n));
+  });
+};
+
+export const extractEstimatedNetSalaryText = (rawText: string): string => {
+  const cleaned = normalizeJapaneseNumberText(stripKyujinFormBoilerplate(rawText));
+  const m = cleaned.match(
+    /(?:手取り|控除後(?:支給)?|実収入)\s*[：:・\s]*([0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?(?:\s*[～\-]\s*[0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?)?)/i
+  );
+  if (!m) return '';
+  const amt = extractAmountSegment(m[1], { allowBareNumber: true });
+  return amt ? amt.formatted : '';
+};
+
+export const extractAnnualSalaryText = (rawText: string): string => {
+  const cleaned = normalizeJapaneseNumberText(stripKyujinFormBoilerplate(rawText));
+  const m = cleaned.match(
+    /(?:想定年収|モデル年収|年収)\s*[：:・\s]*([0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?(?:\s*[～\-]\s*[0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?)?)/i
+  );
+  if (!m) return '';
+  const amt = extractAmountSegment(m[1], { allowBareNumber: false });
+  return amt ? amt.formatted : '';
+};
 
 const parseAmountUnitToYen = (numStr: string, unitStr?: string): number | null => {
   const cleanNum = Number(String(numStr || '').replace(/,/g, ''));
@@ -215,7 +264,7 @@ export const extractKyujinSalaryInfo = (
   rawText: string,
   options: { assumeBareNumberIsSalary?: boolean } = {}
 ): ParsedKyujinSalary => {
-  const text = String(rawText || '').trim();
+  const text = stripKyujinFormBoilerplate(sanitizeExcelFloatText(String(rawText || '').trim()));
   if (!text) {
     return {
       salary: '給与要確認',

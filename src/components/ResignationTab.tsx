@@ -6,6 +6,7 @@ import {
   CalendarCheck,
   CheckCircle2,
   Copy,
+  Download,
   Edit3,
   ExternalLink,
   FileSpreadsheet,
@@ -13,6 +14,7 @@ import {
   Lock,
   MessageSquare,
   Plus,
+  Printer,
   Search,
   Sparkles,
   Trash2,
@@ -29,8 +31,14 @@ import {
 import {
   applyManualProtectionOnResignationSave,
   assessResignationDeadline,
+  autoFixResignationsNationalities,
+  buildResignationDateConfirmMessages,
   buildResignationReminderMessages,
+  exportResignationsToExcel,
   extractResignationDateFromText,
+  getResignationCompanyLabel,
+  getResignationStatusLabel,
+  hasUnconfirmedResignationDate,
   normalizeAndAutoComputeResignationDates,
   normalizeResignationNationality,
   parseResignationSpreadsheetFile,
@@ -46,6 +54,7 @@ interface ResignationTabProps {
   lang?: UiLang;
   records: ResignationRecord[];
   onSaveRecord: (record: ResignationRecord, isNew: boolean) => Promise<void> | void;
+  onBulkUpdateRecords?: (updated: ResignationRecord[]) => Promise<void> | void;
   onDeleteRecord: (record: ResignationRecord) => Promise<void> | void;
   onStatusChange: (record: ResignationRecord, nextStatus: string) => Promise<void> | void;
   onBulkImport: (rows: ResignationRecord[]) => Promise<void> | void;
@@ -84,6 +93,13 @@ const RESIG_COPY = {
       'Tự động tính hạn giấy tờ = Ngày nghỉ việc - 3 ngày, cảnh báo nội bộ khi ≤ 3 ngày & đồng bộ Google Calendar (tạo lịch 1-click).',
     enableNotifyBtn: 'Bật nhắc lịch trình duyệt',
     importExcelBtn: 'Nhập Excel / CSV hàng loạt',
+    exportExcelBtn: 'Xuất Excel / CSV',
+    printListBtn: 'In danh sách',
+    autoFixNatBtn: 'Chuẩn hóa Quốc tịch',
+    autoFixNatResult: (n: number) =>
+      n > 0
+        ? `✅ Đã tự động chỉnh quốc tịch cho ${n} hồ sơ nghỉ việc.`
+        : 'ℹ️ Tất cả hồ sơ nghỉ việc đã có quốc tịch phù hợp.',
     syncBulkCalBtn: 'Đồng bộ toàn bộ Lịch Google',
     addBtn: 'Thêm người nghỉ việc',
     urgentBanner: (n: number) =>
@@ -92,12 +108,20 @@ const RESIG_COPY = {
     kpiTotal: 'Tổng hồ sơ',
     kpiUrgent: 'Gấp ≤ 3 ngày / Quá hạn',
     kpiWarn: 'Sắp đến hạn (≤ 7 ngày)',
+    kpiUnconfirmed: '⚠️ Chưa chốt ngày nghỉ',
     kpiDone: 'Đã hoàn tất giấy tờ',
+    monthFilterLabel: 'Tháng nghỉ việc:',
+    industryFilterLabel: 'Ngành nghề:',
+    allChip: 'Tất cả',
+    unconfirmedMonthChip: 'Chưa xác định',
+    unassignedIndustry: 'Chưa phân ngành',
     searchPlaceholder: 'Tìm theo Họ tên, Công ty cũ, Quốc tịch, Ghi chú bàn giao...',
     allNat: 'Tất cả quốc tịch',
     needsNatReview: (n: number) => `⚠️ Cần rà soát quốc tịch (${n})`,
     unknownNatShort: 'Chưa rõ quốc tịch',
     unknownNatOpt: 'Chưa rõ quốc tịch',
+    otherNatInputLabel: 'Nhập quốc tịch khác:',
+    otherNatPlaceholder: 'VD: インド, ブラジル...',
     allStatus: (n: number) => `Tất cả trạng thái (${n})`,
     emptyMsg:
       'Chưa có hồ sơ nghỉ việc nào khớp bộ lọc. Nhấn "Thêm người nghỉ việc" hoặc "Nhập Excel / CSV hàng loạt".',
@@ -107,6 +131,7 @@ const RESIG_COPY = {
     gasProtectedTitle: (fields: string) =>
       `Trường đã chỉnh thủ công không bị GAS ghi đè: ${fields}`,
     gasProtectedBadge: 'Bảo vệ GAS',
+    unconfirmedDateBadge: '⚠️ Chưa xác định ngày nghỉ / Hạn giấy tờ',
     prevCompanyLabel: 'Công ty cũ:',
     resigDateLabel: 'Ngày nghỉ việc:',
     deadlineLabel: 'Hạn giấy tờ:',
@@ -120,6 +145,7 @@ const RESIG_COPY = {
     syncCalBtn: 'Đồng bộ Lịch Google',
     openCalTitle: 'Mở sự kiện trên Google Calendar',
     createReminderBtn: 'Tạo tin nhắn nhắc nộp giấy tờ',
+    askDateBtn: '📩 Tạo tin nhắn hỏi ngày nghỉ',
     convertedBtn: 'Đã chuyển (Tạo lại UV mới)',
     convertBtn: 'Chuyển sang Ứng viên tìm việc mới',
     editBtn: 'Sửa',
@@ -157,6 +183,7 @@ const RESIG_COPY = {
     thName: 'Họ tên',
     thNat: 'Quốc tịch',
     thPrevComp: 'Công ty cũ',
+    thInd: 'Ngành',
     thResigDate: 'Ngày nghỉ',
     thDeadline: 'Hạn giấy tờ',
     thStatus: 'Trạng thái',
@@ -164,6 +191,7 @@ const RESIG_COPY = {
     closeBtn: 'Đóng',
     confirmImportBtn: (n: number) => `Xác nhận nhập ${n} hồ sơ`,
     reminderTitle: (name: string) => `Tin nhắn nhắc nộp giấy tờ nghỉ việc — ${name}`,
+    dateConfirmTitle: (name: string) => `Tin nhắn xác nhận ngày nghỉ việc — ${name}`,
     viLabel: 'Tiếng Việt',
     jpLabel: 'Tiếng Nhật (日本語)',
     copyBtn: 'Sao chép',
@@ -172,6 +200,11 @@ const RESIG_COPY = {
     notifyImportErr: (msg: string) => `Lỗi đọc file Excel/CSV: ${msg}`,
     notifyCopiedVi: 'Đã sao chép tin nhắn nhắc giấy tờ (Tiếng Việt)!',
     notifyCopiedJp: 'Đã sao chép tin nhắn nhắc giấy tờ (Tiếng Nhật)!',
+    notifyCopiedDateVi: 'Đã sao chép tin nhắn hỏi ngày nghỉ (Tiếng Việt)!',
+    notifyCopiedDateJp: 'Đã sao chép tin nhắn hỏi ngày nghỉ (Tiếng Nhật)!',
+    notifyExportedExcel: (file: string) => `📊 Đã xuất file "${file}"`,
+    printTitle: 'DANH SÁCH QUẢN LÝ NGƯỜI NGHỈ VIỆC & HẠN GIẤY TỜ',
+    printMeta: (n: number, d: string) => `Tổng số: ${n} hồ sơ · Ngày in: ${d}`,
   },
   jp: {
     title: '退職者管理・書類提出期限フォロー',
@@ -181,6 +214,13 @@ const RESIG_COPY = {
       '提出期限＝退職日−3日を自動算出し、3日以内・超過を内部アラート表示＆Googleカレンダー登録（1クリック）。',
     enableNotifyBtn: 'ブラウザ通知を有効化',
     importExcelBtn: 'Excel / CSV一括読込',
+    exportExcelBtn: 'Excel / CSV出力',
+    printListBtn: 'リスト印刷',
+    autoFixNatBtn: '国籍を一括自動補正',
+    autoFixNatResult: (n: number) =>
+      n > 0
+        ? `✅ ${n}名の退職者データの国籍を自動補正しました。`
+        : 'ℹ️ 補正が必要な退職者データはありませんでした。',
     syncBulkCalBtn: 'Googleカレンダー一括同期',
     addBtn: '＋ 退職者を追加',
     urgentBanner: (n: number) =>
@@ -189,12 +229,20 @@ const RESIG_COPY = {
     kpiTotal: '登録総数',
     kpiUrgent: '至急（3日以内・超過）',
     kpiWarn: '期限間近（7日以内）',
+    kpiUnconfirmed: '⚠️ 退職日未確定・要確認',
     kpiDone: '書類手続完了',
+    monthFilterLabel: '退職月別:',
+    industryFilterLabel: '分野別内訳:',
+    allChip: 'すべて',
+    unconfirmedMonthChip: '未定',
+    unassignedIndustry: '未分類',
     searchPlaceholder: '氏名・前職企業名・国籍・引継ぎメモで検索...',
     allNat: 'すべての国籍',
     needsNatReview: (n: number) => `⚠️ 国籍要確認 (${n})`,
     unknownNatShort: '国籍不明',
     unknownNatOpt: '国籍不明',
+    otherNatInputLabel: 'その他の国籍を入力:',
+    otherNatPlaceholder: '例: インド、ブラジル...',
     allStatus: (n: number) => `すべての進捗 (${n})`,
     emptyMsg:
       '条件に一致する退職者データがありません。「＋ 退職者を追加」または「Excel / CSV一括読込」をご利用ください。',
@@ -203,6 +251,7 @@ const RESIG_COPY = {
     suggestNatBtn: (nat: string) => `候補: ${nat} (ワンクリック修正)`,
     gasProtectedTitle: (fields: string) => `手動修正済み（GAS上書き保護）: ${fields}`,
     gasProtectedBadge: 'GAS保護中',
+    unconfirmedDateBadge: '⚠️ 退職日・提出期限未確定',
     prevCompanyLabel: '前職企業:',
     resigDateLabel: '退職日:',
     deadlineLabel: '書類提出期限:',
@@ -216,6 +265,7 @@ const RESIG_COPY = {
     syncCalBtn: 'Googleカレンダー同期',
     openCalTitle: 'Googleカレンダーで予定を開く',
     createReminderBtn: '書類リマインド文を作成',
+    askDateBtn: '📩 退職日確認文を作成',
     convertedBtn: '移行済（新規求職者として再作成）',
     convertBtn: '新規求職者へ移行する',
     editBtn: '編集',
@@ -253,6 +303,7 @@ const RESIG_COPY = {
     thName: '氏名',
     thNat: '国籍',
     thPrevComp: '前職企業',
+    thInd: '分野',
     thResigDate: '退職日',
     thDeadline: '提出期限',
     thStatus: '進捗',
@@ -260,6 +311,7 @@ const RESIG_COPY = {
     closeBtn: '閉じる',
     confirmImportBtn: (n: number) => `${n} 件を一括登録する`,
     reminderTitle: (name: string) => `退職書類リマインド文面 — ${name}`,
+    dateConfirmTitle: (name: string) => `退職日・書類確認メッセージ — ${name}`,
     viLabel: 'ベトナム語 (Tiếng Việt)',
     jpLabel: '日本語',
     copyBtn: 'コピー',
@@ -268,6 +320,11 @@ const RESIG_COPY = {
     notifyImportErr: (msg: string) => `Excel/CSV読込エラー: ${msg}`,
     notifyCopiedVi: 'リマインド文（ベトナム語）をコピーしました！',
     notifyCopiedJp: 'リマインド文（日本語）をコピーしました！',
+    notifyCopiedDateVi: '退職日確認文（ベトナム語）をコピーしました！',
+    notifyCopiedDateJp: '退職日確認文（日本語）をコピーしました！',
+    notifyExportedExcel: (file: string) => `📊 Excelファイル「${file}」を出力しました`,
+    printTitle: '退職者管理・書類提出期限一覧表',
+    printMeta: (n: number, d: string) => `対象件数: ${n}名 · 出力日: ${d}`,
   },
 } as const;
 
@@ -275,6 +332,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
   lang = 'vi',
   records,
   onSaveRecord,
+  onBulkUpdateRecords,
   onDeleteRecord,
   onStatusChange,
   onBulkImport,
@@ -292,10 +350,14 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [nationalityFilter, setNationalityFilter] = useState('all');
+  const [unconfirmedOnly, setUnconfirmedOnly] = useState(false);
+  const [resigMonthFilter, setResigMonthFilter] = useState('all');
+  const [resigIndustryFilter, setResigIndustryFilter] = useState('all');
 
   const [editingRecord, setEditingRecord] = useState<ResignationRecord | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formState, setFormState] = useState<Omit<ResignationRecord, 'id'>>(EMPTY_FORM);
+  const [customNationalityInput, setCustomNationalityInput] = useState('');
 
   const [importPreviewRows, setImportPreviewRows] = useState<ResignationImportPreviewRow[]>([]);
   const [importSheetName, setImportSheetName] = useState('');
@@ -303,6 +365,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
   const [isImporting, setIsImporting] = useState(false);
 
   const [reminderTarget, setReminderTarget] = useState<ResignationRecord | null>(null);
+  const [dateConfirmTarget, setDateConfirmTarget] = useState<ResignationRecord | null>(null);
 
   const c = RESIG_COPY[lang];
 
@@ -321,20 +384,77 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
     let warn7 = 0;
     let done = 0;
     let reviewNatCount = 0;
+    let unconfirmedCount = 0;
+    const monthCounts = new Map<string, number>();
+    let unconfirmedMonthCount = 0;
+    const industryCounts = new Map<string, number>();
+
     records.forEach((r) => {
-      const a = assessResignationDeadline(r.paperworkDeadline, r.paperworkStatus);
+      const a = assessResignationDeadline(r.paperworkDeadline, r.paperworkStatus, lang);
       if (a.urgency === 'done') done += 1;
       else if (a.urgency === 'overdue' || a.urgency === 'urgent3') overdueOrUrgent += 1;
       else if (a.urgency === 'warn7') warn7 += 1;
       if (needsNationalityReview(r)) reviewNatCount += 1;
+      if (hasUnconfirmedResignationDate(r)) unconfirmedCount += 1;
+
+      const ym = String(r.resignationDate || '').match(/^(\d{4}-\d{2})/)?.[1];
+      if (ym) {
+        monthCounts.set(ym, (monthCounts.get(ym) || 0) + 1);
+      } else {
+        unconfirmedMonthCount += 1;
+      }
+
+      const indKey = String(r.industry || '').trim() || '__empty__';
+      industryCounts.set(indKey, (industryCounts.get(indKey) || 0) + 1);
     });
-    return { total: records.length, overdueOrUrgent, warn7, done, reviewNatCount };
-  }, [records]);
+
+    const monthBreakdown = Array.from(monthCounts.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([ym, count]) => {
+        const [y, m] = ym.split('-');
+        return {
+          key: ym,
+          label: lang === 'jp' ? `${y}年${Number(m)}月` : `T${Number(m)}/${y}`,
+          count,
+        };
+      });
+
+    const industryBreakdown = Array.from(industryCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => ({
+        key,
+        label: key === '__empty__' ? c.unassignedIndustry : key,
+        count,
+      }));
+
+    return {
+      total: records.length,
+      overdueOrUrgent,
+      warn7,
+      done,
+      reviewNatCount,
+      unconfirmedCount,
+      unconfirmedMonthCount,
+      monthBreakdown,
+      industryBreakdown,
+    };
+  }, [records, lang, c.unassignedIndustry]);
 
   const filteredRecords = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return [...records]
       .filter((r) => {
+        if (unconfirmedOnly && !hasUnconfirmedResignationDate(r)) return false;
+        if (resigMonthFilter === 'unconfirmed') {
+          if (String(r.resignationDate || '').match(/^\d{4}-\d{2}/)) return false;
+        } else if (resigMonthFilter !== 'all') {
+          if (!String(r.resignationDate || '').startsWith(resigMonthFilter)) return false;
+        }
+        if (resigIndustryFilter === '__empty__') {
+          if (String(r.industry || '').trim()) return false;
+        } else if (resigIndustryFilter !== 'all') {
+          if (String(r.industry || '').trim() !== resigIndustryFilter) return false;
+        }
         if (statusFilter !== 'all' && r.paperworkStatus !== statusFilter) return false;
         const normalizedNat = normalizeResignationNationality(r.nationality);
         if (nationalityFilter === 'needs_review') {
@@ -351,13 +471,14 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
           r.newJobNeed,
           r.fbName,
           r.phone,
+          r.industry,
         ]
           .filter(Boolean)
           .some((v) => String(v).toLowerCase().includes(q));
       })
       .sort((a, b) => {
         const rank = (r: ResignationRecord) => {
-          const u = assessResignationDeadline(r.paperworkDeadline, r.paperworkStatus).urgency;
+          const u = assessResignationDeadline(r.paperworkDeadline, r.paperworkStatus, lang).urgency;
           if (u === 'overdue') return 0;
           if (u === 'urgent3') return 1;
           if (u === 'warn7') return 2;
@@ -366,20 +487,34 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
         };
         return rank(a) - rank(b);
       });
-  }, [records, searchQuery, statusFilter, nationalityFilter]);
+  }, [
+    records,
+    searchQuery,
+    statusFilter,
+    nationalityFilter,
+    unconfirmedOnly,
+    resigMonthFilter,
+    resigIndustryFilter,
+    lang,
+  ]);
 
   const openAddModal = () => {
     setEditingRecord(null);
     setFormState({ ...EMPTY_FORM });
+    setCustomNationalityInput('');
     setIsModalOpen(true);
   };
 
   const openEditModal = (rec: ResignationRecord) => {
     const normalized = normalizeAndAutoComputeResignationDates(rec);
+    const normNat = normalizeResignationNationality(normalized.nationality);
+    const isPresetNat = RESIGNATION_NATIONALITIES.includes(
+      normNat as (typeof RESIGNATION_NATIONALITIES)[number]
+    );
     setEditingRecord(rec);
     setFormState({
       fullName: normalized.fullName,
-      nationality: normalizeResignationNationality(normalized.nationality),
+      nationality: isPresetNat ? normNat : 'その他',
       previousCompany: normalized.previousCompany,
       resignationDate: normalized.resignationDate || '',
       paperworkDeadline: normalized.paperworkDeadline || '',
@@ -397,6 +532,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
       manualProtectedFields: normalized.manualProtectedFields,
       gasProtected: normalized.gasProtected,
     });
+    setCustomNationalityInput(isPresetNat ? '' : normNat === 'その他' ? '' : normNat);
     setIsModalOpen(true);
   };
 
@@ -417,6 +553,25 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
     await onSaveRecord(updated, false);
   };
 
+  const handleBulkAutoFixNationalities = async () => {
+    const { updated, changedCount } = autoFixResignationsNationalities(records);
+    if (changedCount === 0) {
+      onNotify(c.autoFixNatResult(0), 'info');
+      return;
+    }
+    if (onBulkUpdateRecords) {
+      await onBulkUpdateRecords(updated);
+    } else {
+      for (const rec of updated) {
+        const prev = records.find((r) => r.id === rec.id);
+        if (prev && prev.nationality !== rec.nationality) {
+          await onSaveRecord(rec, false);
+        }
+      }
+    }
+    onNotify(c.autoFixNatResult(changedCount), 'success');
+  };
+
   const handleSubmitForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formState.fullName.trim() || !formState.previousCompany.trim()) {
@@ -424,10 +579,14 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
       return;
     }
     const isNew = !editingRecord;
+    const resolvedNat =
+      formState.nationality === 'その他' && customNationalityInput.trim()
+        ? customNationalityInput.trim()
+        : normalizeResignationNationality(formState.nationality);
     const rawSaved = normalizeAndAutoComputeResignationDates({
       id: editingRecord?.id || `resig_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       ...formState,
-      nationality: normalizeResignationNationality(formState.nationality),
+      nationality: resolvedNat,
       fullName: formState.fullName.trim(),
       previousCompany: formState.previousCompany.trim(),
       updatedAt: new Date().toISOString(),
@@ -482,10 +641,20 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
     [reminderTarget]
   );
 
+  const dateConfirmMsgs = useMemo(
+    () => (dateConfirmTarget ? buildResignationDateConfirmMessages(dateConfirmTarget) : null),
+    [dateConfirmTarget]
+  );
+
+  const printDateStr = useMemo(
+    () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    []
+  );
+
   return (
     <div className="space-y-4">
       {/* Header & Top Action Bar */}
-      <div className="flex flex-col gap-3 rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)] sm:flex-row sm:items-center sm:justify-between">
+      <div className="print:hidden flex flex-col gap-3 rounded-xl border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)] sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-base font-bold text-[#0F172A]">{c.title}</h2>
           <p className="text-xs text-[#64748B]">
@@ -520,6 +689,33 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
           </button>
           <button
             type="button"
+            onClick={() => {
+              const fileName = exportResignationsToExcel(filteredRecords, lang);
+              onNotify(c.notifyExportedExcel(fileName), 'success');
+            }}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+            {c.exportExcelBtn}
+          </button>
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#0F172A] hover:bg-slate-50 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Printer className="h-3.5 w-3.5 text-[#475569]" aria-hidden="true" />
+            {c.printListBtn}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleBulkAutoFixNationalities()}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+            {c.autoFixNatBtn}
+          </button>
+          <button
+            type="button"
             onClick={onSyncCalendarBulk}
             disabled={isBulkCalendarSyncing}
             className="inline-flex items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
@@ -543,7 +739,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
       </div>
 
       {stats.overdueOrUrgent > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs text-rose-800 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+        <div className="print:hidden flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs text-rose-800 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
           <div className="flex items-center gap-2 font-semibold">
             <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600" aria-hidden="true" />
             <span>{c.urgentBanner(stats.overdueOrUrgent)}</span>
@@ -555,11 +751,18 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
       )}
 
       {/* KPI Strip */}
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-        <div className="rounded-lg border border-[#E2E8F0] bg-white px-3.5 py-2.5 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+      <div className="print:hidden grid grid-cols-2 gap-2.5 sm:grid-cols-5">
+        <button
+          type="button"
+          onClick={() => {
+            setUnconfirmedOnly(false);
+            setStatusFilter('all');
+          }}
+          className="rounded-lg border border-[#E2E8F0] bg-white px-3.5 py-2.5 text-left shadow-[0_1px_3px_rgba(0,0,0,0.05)] hover:border-[#CBD5E1] cursor-pointer"
+        >
           <div className="text-[11px] font-medium text-[#64748B]">{c.kpiTotal}</div>
           <div className="mt-0.5 text-lg font-bold text-[#0F172A] tabular-nums">{stats.total}</div>
-        </div>
+        </button>
         <div className="rounded-lg border border-rose-200 bg-rose-50/70 px-3.5 py-2.5 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
           <div className="text-[11px] font-semibold text-rose-700">{c.kpiUrgent}</div>
           <div className="mt-0.5 text-lg font-bold text-rose-700 tabular-nums">
@@ -570,6 +773,20 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
           <div className="text-[11px] font-semibold text-amber-800">{c.kpiWarn}</div>
           <div className="mt-0.5 text-lg font-bold text-amber-700 tabular-nums">{stats.warn7}</div>
         </div>
+        <button
+          type="button"
+          onClick={() => setUnconfirmedOnly((v) => !v)}
+          className={`rounded-lg border px-3.5 py-2.5 text-left shadow-[0_1px_3px_rgba(0,0,0,0.05)] transition cursor-pointer ${
+            unconfirmedOnly
+              ? 'border-orange-500 bg-orange-100 ring-1 ring-orange-400'
+              : 'border-orange-200 bg-orange-50/70 hover:bg-orange-100/70'
+          }`}
+        >
+          <div className="text-[11px] font-semibold text-orange-800">{c.kpiUnconfirmed}</div>
+          <div className="mt-0.5 text-lg font-bold text-orange-700 tabular-nums">
+            {stats.unconfirmedCount}
+          </div>
+        </button>
         <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 px-3.5 py-2.5 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
           <div className="text-[11px] font-semibold text-emerald-700">{c.kpiDone}</div>
           <div className="mt-0.5 text-lg font-bold text-emerald-700 tabular-nums">{stats.done}</div>
@@ -577,62 +794,146 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
       </div>
 
       {/* Search & Filter */}
-      <div className="flex flex-col gap-2 rounded-xl border border-[#E2E8F0] bg-white p-3 shadow-[0_1px_3px_rgba(0,0,0,0.05)] sm:flex-row sm:items-center">
-        <div className="relative flex-1">
-          <Search
-            className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-[#64748B]"
-            aria-hidden="true"
-          />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={c.searchPlaceholder}
-            className="w-full rounded-lg border border-[#CBD5E1] bg-[#F8FAFC] py-1.5 pl-8 pr-3 text-xs text-[#0F172A] placeholder:text-[#64748B] focus:border-[#16A34A] focus:bg-white focus:outline-none"
-          />
+      <div className="print:hidden space-y-2.5 rounded-xl border border-[#E2E8F0] bg-white p-3 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="relative flex-1">
+            <Search
+              className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-[#64748B]"
+              aria-hidden="true"
+            />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={c.searchPlaceholder}
+              className="w-full rounded-lg border border-[#CBD5E1] bg-[#F8FAFC] py-1.5 pl-8 pr-3 text-xs text-[#0F172A] placeholder:text-[#64748B] focus:border-[#16A34A] focus:bg-white focus:outline-none"
+            />
+          </div>
+          <select
+            value={nationalityFilter}
+            onChange={(e) => setNationalityFilter(e.target.value)}
+            className="rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#0F172A] focus:border-[#16A34A] focus:outline-none"
+          >
+            <option value="all">{c.allNat}</option>
+            {stats.reviewNatCount > 0 && (
+              <option value="needs_review">{c.needsNatReview(stats.reviewNatCount)}</option>
+            )}
+            {RESIGNATION_NATIONALITIES.map((nat) => (
+              <option key={nat} value={nat}>
+                {nat === '国籍不明' ? c.unknownNatOpt : nat}
+              </option>
+            ))}
+          </select>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#0F172A] focus:border-[#16A34A] focus:outline-none"
+          >
+            <option value="all">{c.allStatus(records.length)}</option>
+            {RESIGNATION_STATUSES.map((st) => (
+              <option key={st} value={st}>
+                {getResignationStatusLabel(st, lang)}
+              </option>
+            ))}
+          </select>
         </div>
-        <select
-          value={nationalityFilter}
-          onChange={(e) => setNationalityFilter(e.target.value)}
-          className="rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#0F172A] focus:border-[#16A34A] focus:outline-none"
-        >
-          <option value="all">{c.allNat}</option>
-          {stats.reviewNatCount > 0 && (
-            <option value="needs_review">{c.needsNatReview(stats.reviewNatCount)}</option>
-          )}
-          {RESIGNATION_NATIONALITIES.map((nat) => (
-            <option key={nat} value={nat}>
-              {nat === '国籍不明' ? c.unknownNatOpt : nat}
-            </option>
-          ))}
-        </select>
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="rounded-lg border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#0F172A] focus:border-[#16A34A] focus:outline-none"
-        >
-          <option value="all">{c.allStatus(records.length)}</option>
-          {RESIGNATION_STATUSES.map((st) => (
-            <option key={st} value={st}>
-              {st}
-            </option>
-          ))}
-        </select>
+
+        {/* Monthly & Industry Breakdown Filter Chips */}
+        <div className="space-y-1.5 border-t border-[#E2E8F0] pt-2 text-[11px]">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-semibold text-[#64748B]">{c.monthFilterLabel}</span>
+            <button
+              type="button"
+              onClick={() => setResigMonthFilter('all')}
+              className={`rounded-md border px-2 py-0.5 font-medium transition cursor-pointer ${
+                resigMonthFilter === 'all'
+                  ? 'border-[#16A34A] bg-emerald-50 font-semibold text-[#16A34A]'
+                  : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#475569] hover:bg-slate-100'
+              }`}
+            >
+              {c.allChip} ({records.length})
+            </button>
+            {stats.monthBreakdown.map((m) => (
+              <button
+                key={m.key}
+                type="button"
+                onClick={() =>
+                  setResigMonthFilter((cur) => (cur === m.key ? 'all' : m.key))
+                }
+                className={`rounded-md border px-2 py-0.5 font-medium transition cursor-pointer ${
+                  resigMonthFilter === m.key
+                    ? 'border-[#16A34A] bg-emerald-50 font-semibold text-[#16A34A]'
+                    : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#475569] hover:bg-slate-100'
+                }`}
+              >
+                {m.label} ({m.count})
+              </button>
+            ))}
+            {stats.unconfirmedMonthCount > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setResigMonthFilter((cur) => (cur === 'unconfirmed' ? 'all' : 'unconfirmed'))
+                }
+                className={`rounded-md border px-2 py-0.5 font-medium transition cursor-pointer ${
+                  resigMonthFilter === 'unconfirmed'
+                    ? 'border-orange-500 bg-orange-50 font-semibold text-orange-700'
+                    : 'border-orange-200 bg-orange-50/60 text-orange-700 hover:bg-orange-100'
+                }`}
+              >
+                {c.unconfirmedMonthChip} ({stats.unconfirmedMonthCount})
+              </button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-semibold text-[#64748B]">{c.industryFilterLabel}</span>
+            <button
+              type="button"
+              onClick={() => setResigIndustryFilter('all')}
+              className={`rounded-md border px-2 py-0.5 font-medium transition cursor-pointer ${
+                resigIndustryFilter === 'all'
+                  ? 'border-[#16A34A] bg-emerald-50 font-semibold text-[#16A34A]'
+                  : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#475569] hover:bg-slate-100'
+              }`}
+            >
+              {c.allChip} ({records.length})
+            </button>
+            {stats.industryBreakdown.map((ind) => (
+              <button
+                key={ind.key}
+                type="button"
+                onClick={() =>
+                  setResigIndustryFilter((cur) => (cur === ind.key ? 'all' : ind.key))
+                }
+                className={`rounded-md border px-2 py-0.5 font-medium transition cursor-pointer ${
+                  resigIndustryFilter === ind.key
+                    ? 'border-[#16A34A] bg-emerald-50 font-semibold text-[#16A34A]'
+                    : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#475569] hover:bg-slate-100'
+                }`}
+              >
+                {ind.label} ({ind.count})
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Cards List */}
       {filteredRecords.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-[#CBD5E1] bg-white p-8 text-center text-xs text-[#64748B] shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+        <div className="print:hidden rounded-xl border border-dashed border-[#CBD5E1] bg-white p-8 text-center text-xs text-[#64748B] shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
           {c.emptyMsg}
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="print:hidden space-y-3">
           {filteredRecords.map((rec) => {
             const displayName = getResignationDisplayName(rec, lang);
             const deadlineInfo = assessResignationDeadline(
               rec.paperworkDeadline,
-              rec.paperworkStatus
+              rec.paperworkStatus,
+              lang
             );
+            const isUnconfirmedDate = hasUnconfirmedResignationDate(rec);
             const isSyncing = Boolean(syncingCalendarIds[rec.id]);
             const hasCalendarLink = Boolean(rec.googleCalendarEventId);
             const currentNat = normalizeResignationNationality(rec.nationality);
@@ -727,12 +1028,19 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                         )}
                         {deadlineInfo.label}
                       </span>
+                      {isUnconfirmedDate && (
+                        <span className="inline-flex items-center gap-1 rounded border border-orange-300 bg-orange-50 px-2 py-0.5 text-[10px] font-semibold text-orange-800">
+                          {c.unconfirmedDateBadge}
+                        </span>
+                      )}
                     </div>
 
                     <div className="grid grid-cols-1 gap-x-4 gap-y-1 text-xs text-[#475569] sm:grid-cols-2">
                       <div>
                         <span className="text-[#64748B]">{c.prevCompanyLabel} </span>
-                        <span className="font-semibold text-[#0F172A]">{rec.previousCompany}</span>
+                        <span className="font-semibold text-[#0F172A]">
+                          {getResignationCompanyLabel(rec.previousCompany, lang)}
+                        </span>
                       </div>
                       <div>
                         <span className="text-[#64748B]">{c.resigDateLabel} </span>
@@ -779,7 +1087,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                     >
                       {RESIGNATION_STATUSES.map((st) => (
                         <option key={st} value={st}>
-                          {c.statusPrefix} {st}
+                          {c.statusPrefix} {getResignationStatusLabel(st, lang)}
                         </option>
                       ))}
                     </select>
@@ -827,6 +1135,16 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                       {c.createReminderBtn}
                     </button>
 
+                    {isUnconfirmedDate && (
+                      <button
+                        type="button"
+                        onClick={() => setDateConfirmTarget(rec)}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-orange-300 bg-orange-50 px-2.5 py-1.5 text-[11px] font-semibold text-orange-800 hover:bg-orange-100 cursor-pointer"
+                      >
+                        {c.askDateBtn}
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => onConvertToCandidate(rec)}
@@ -864,7 +1182,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
 
       {/* Add/Edit Resignation Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]">
+        <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]">
           <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-[#0F172A] shadow-2xl">
             <div className="mb-4 flex items-center justify-between border-b border-[#E2E8F0] pb-3">
               <h3 className="text-sm font-bold text-[#0F172A]">
@@ -915,6 +1233,16 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                       </option>
                     ))}
                   </select>
+                  {formState.nationality === 'その他' && (
+                    <input
+                      type="text"
+                      value={customNationalityInput}
+                      onChange={(e) => setCustomNationalityInput(e.target.value)}
+                      placeholder={c.otherNatPlaceholder}
+                      aria-label={c.otherNatInputLabel}
+                      className="mt-1.5 w-full rounded-lg border border-[#CBD5E1] bg-[#F8FAFC] px-3 py-1.5 text-xs text-[#0F172A] focus:border-[#16A34A] focus:bg-white focus:outline-none"
+                    />
+                  )}
                   {(() => {
                     const suggested = suggestNationalityFromName(formState.fullName);
                     const cur = normalizeResignationNationality(formState.nationality);
@@ -1024,7 +1352,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
                   >
                     {RESIGNATION_STATUSES.map((st) => (
                       <option key={st} value={st}>
-                        {st}
+                        {getResignationStatusLabel(st, lang)}
                       </option>
                     ))}
                   </select>
@@ -1173,7 +1501,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
 
       {/* Excel/CSV Preview Table Modal before Bulk Import */}
       {isImportModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]">
+        <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]">
           <div className="flex max-h-[88vh] w-full max-w-5xl flex-col rounded-xl border border-[#E2E8F0] bg-white p-5 text-[#0F172A] shadow-2xl">
             <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-3">
               <div>
@@ -1286,7 +1614,7 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
 
       {/* Reminder Message Modal */}
       {reminderTarget && reminderMsgs && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]">
+        <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]">
           <div className="w-full max-w-xl rounded-xl border border-[#E2E8F0] bg-white p-5 text-[#0F172A] shadow-2xl">
             <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
               <h3 className="text-sm font-bold text-[#0F172A]">
@@ -1339,6 +1667,116 @@ export const ResignationTab: React.FC<ResignationTabProps> = ({
           </div>
         </div>
       )}
+
+      {/* Confirm Resignation Date Modal */}
+      {dateConfirmTarget && dateConfirmMsgs && (
+        <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-xl rounded-xl border border-[#E2E8F0] bg-white p-5 text-[#0F172A] shadow-2xl">
+            <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+              <h3 className="text-sm font-bold text-[#0F172A]">
+                {c.dateConfirmTitle(getResignationDisplayName(dateConfirmTarget, lang))}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setDateConfirmTarget(null)}
+                className="rounded p-1 text-[#64748B] hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+            <div className="space-y-3 text-xs">
+              <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="font-semibold text-[#16A34A]">{c.viLabel}</span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await copyTextSafely(dateConfirmMsgs.vi);
+                      onNotify(c.notifyCopiedDateVi, 'success');
+                    }}
+                    className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100 cursor-pointer"
+                  >
+                    <Copy className="h-3 w-3" aria-hidden="true" />
+                    {c.copyBtn}
+                  </button>
+                </div>
+                <p className="whitespace-pre-wrap text-[#0F172A]">{dateConfirmMsgs.vi}</p>
+              </div>
+              <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="font-semibold text-sky-700">{c.jpLabel}</span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await copyTextSafely(dateConfirmMsgs.jp);
+                      onNotify(c.notifyCopiedDateJp, 'success');
+                    }}
+                    className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 cursor-pointer"
+                  >
+                    <Copy className="h-3 w-3" aria-hidden="true" />
+                    {c.copyBtn}
+                  </button>
+                </div>
+                <p className="whitespace-pre-wrap text-[#0F172A]">{dateConfirmMsgs.jp}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Printable A4 Landscape Table */}
+      <div className="hidden print:block bg-white text-black">
+        <div className="mb-3 flex items-baseline justify-between border-b-2 border-slate-800 pb-2">
+          <h1 className="text-base font-bold">{c.printTitle}</h1>
+          <span className="text-xs text-slate-700">
+            {c.printMeta(filteredRecords.length, printDateStr)}
+          </span>
+        </div>
+        <table className="w-full border-collapse text-[10px]">
+          <thead>
+            <tr className="bg-slate-100">
+              <th className="border border-slate-400 px-1.5 py-1 text-left">#</th>
+              <th className="border border-slate-400 px-1.5 py-1 text-left">{c.thName}</th>
+              <th className="border border-slate-400 px-1.5 py-1 text-left">{c.thNat}</th>
+              <th className="border border-slate-400 px-1.5 py-1 text-left">{c.thPrevComp}</th>
+              <th className="border border-slate-400 px-1.5 py-1 text-left">{c.thInd}</th>
+              <th className="border border-slate-400 px-1.5 py-1 text-left">{c.thResigDate}</th>
+              <th className="border border-slate-400 px-1.5 py-1 text-left">{c.thDeadline}</th>
+              <th className="border border-slate-400 px-1.5 py-1 text-left">{c.thStatus}</th>
+              <th className="border border-slate-400 px-1.5 py-1 text-left">{c.thNotes}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredRecords.map((rec, idx) => (
+              <tr key={rec.id}>
+                <td className="border border-slate-300 px-1.5 py-1">{idx + 1}</td>
+                <td className="border border-slate-300 px-1.5 py-1 font-semibold">
+                  {getResignationDisplayName(rec, lang)}
+                </td>
+                <td className="border border-slate-300 px-1.5 py-1">
+                  {normalizeResignationNationality(rec.nationality)}
+                </td>
+                <td className="border border-slate-300 px-1.5 py-1">
+                  {getResignationCompanyLabel(rec.previousCompany, lang)}
+                </td>
+                <td className="border border-slate-300 px-1.5 py-1">{rec.industry || '-'}</td>
+                <td className="border border-slate-300 px-1.5 py-1 tabular-nums">
+                  {rec.resignationDate || '-'}
+                </td>
+                <td className="border border-slate-300 px-1.5 py-1 font-semibold tabular-nums">
+                  {rec.paperworkDeadline || '-'}
+                </td>
+                <td className="border border-slate-300 px-1.5 py-1">
+                  {getResignationStatusLabel(rec.paperworkStatus, lang)}
+                </td>
+                <td className="border border-slate-300 px-1.5 py-1">
+                  {[rec.handoverNotes, rec.newJobNeed].filter(Boolean).join(' / ') || '-'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 };

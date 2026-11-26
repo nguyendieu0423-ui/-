@@ -24,23 +24,47 @@ export function normalizeResignationNationality(raw: unknown): string {
   ) {
     return '国籍不明';
   }
-  if (/^(?:ベトナム|viet\s*nam|việt\s*nam|vietnam|vn|vnm)$/i.test(lower) || /ベトナム|viet\s*nam|việt\s*nam|vietnam/i.test(lower)) {
+  if (/^(?:ベトナム|ベトナム人|viet\s*nam|việt\s*nam|vietnam|vn|vnm)$/i.test(lower) || /ベトナム|viet\s*nam|việt\s*nam|vietnam/i.test(lower)) {
     return 'ベトナム';
   }
-  if (/^(?:インドネシア|indonesia|indo|idn)$/i.test(lower) || /インドネシア|indonesia/i.test(lower)) {
+  if (/^(?:インドネシア|インドネシア人|indonesia|indo|idn)$/i.test(lower) || /インドネシア|indonesia/i.test(lower)) {
     return 'インドネシア';
   }
-  if (/^(?:ミャンマー|myanmar|burma|mmr|miến\s*điện|mien\s*dien)$/i.test(lower) || /ミャンマー|myanmar|miến\s*điện/i.test(lower)) {
+  if (/^(?:ミャンマー|ミャンマー人|myanmar|burma|mmr|miến\s*điện|mien\s*dien)$/i.test(lower) || /ミャンマー|myanmar|miến\s*điện/i.test(lower)) {
     return 'ミャンマー';
   }
-  if (/^(?:フィリピン|philippines?|filipino|phl)$/i.test(lower) || /フィリピン|philippines?|filipino/i.test(lower)) {
+  if (/^(?:フィリピン|フィリピン人|philippines?|filipino|phl)$/i.test(lower) || /フィリピン|philippines?|filipino/i.test(lower)) {
     return 'フィリピン';
   }
-  if (/^(?:カンボジア|cambodia|campuchia|khmer|khm)$/i.test(lower) || /カンボジア|cambodia|campuchia/i.test(lower)) {
+  if (/^(?:カンボジア|カンボジア人|cambodia|campuchia|khmer|khm)$/i.test(lower) || /カンボジア|cambodia|campuchia/i.test(lower)) {
     return 'カンボジア';
   }
-  if (/^(?:ネパール|nepal|nepali|npl)$/i.test(lower) || /ネパール|nepal/i.test(lower)) {
+  if (/^(?:ネパール|ネパール人|nepal|nepali|npl)$/i.test(lower) || /ネパール|nepal/i.test(lower)) {
     return 'ネパール';
+  }
+  if (/^(?:中国|中国人|china|prc|chn|trung\s*quốc|trung\s*quoc)$/i.test(lower) || /中国|trung\s*quốc/i.test(lower)) {
+    return '中国';
+  }
+  if (/^(?:バングラデシュ|バングラデシュ人|bangladesh|bgd)$/i.test(lower) || /バングラデシュ|bangladesh/i.test(lower)) {
+    return 'バングラデシュ';
+  }
+  if (/^(?:スリランカ|スリランカ人|sri\s*lanka|lka)$/i.test(lower) || /スリランカ|sri\s*lanka/i.test(lower)) {
+    return 'スリランカ';
+  }
+  if (/^(?:台湾|台湾人|taiwan|twn|đài\s*loan|dai\s*loan)$/i.test(lower) || /台湾|taiwan|đài\s*loan/i.test(lower)) {
+    return '台湾';
+  }
+  if (/^(?:韓国|韓国人|korea|south\s*korea|kor|hàn\s*quốc|han\s*quoc)$/i.test(lower) || /韓国|hàn\s*quốc/i.test(lower)) {
+    return '韓国';
+  }
+  if (/^(?:モンゴル|モンゴル人|mongolia|mng|mông\s*cổ|mong\s*co)$/i.test(lower) || /モンゴル|mongolia|mông\s*cổ/i.test(lower)) {
+    return 'モンゴル';
+  }
+  if (/^(?:タイ|タイ人|thailand|thái\s*lan|thai\s*lan)$/i.test(lower) || /タイ人|thailand|thái\s*lan/i.test(lower)) {
+    return 'タイ';
+  }
+  if (/^(?:ウズベキスタン|ウズベキスタン人|uzbekistan|uzb)$/i.test(lower) || /ウズベキスタン|uzbekistan/i.test(lower)) {
+    return 'ウズベキスタン';
   }
   if (/^(?:その他|other|khác|khac)$/i.test(lower)) {
     return 'その他';
@@ -122,128 +146,67 @@ export function suggestNationalityFromName(fullName?: string): string | null {
   }
 
   const myanmarTokens = new Set([
-    'AUNG',
-    'KYAW',
-    'THANT',
-    'PHOME',
-    'PHYO',
-    'ZAW',
-    'MYO',
-    'HTET',
-    'MAUNG',
-    'HLA',
-    'SWE',
-    'NYEIN',
-    'THURA',
-    'WIN',
-    'TUN',
-    'SOE',
-    'HTUN',
-    'TIN',
-    'MON',
-    'OO',
-    'KO',
-    'HEIN',
-    'WAI',
-    'PAING',
-    'KHANT',
-    'THEIN',
-    'NAING',
-    'MYINT',
-    'SAN',
-    'THIDA',
-    'YEE',
-    'EI',
-    'SU',
-    'HNIN',
+    'AUNG', 'KYAW', 'THANT', 'PHOME', 'PHYO', 'ZAW', 'MYO', 'HTET', 'MAUNG',
+    'HLA', 'SWE', 'NYEIN', 'THURA', 'WIN', 'TUN', 'SOE', 'HTUN', 'TIN',
+    'MON', 'OO', 'KO', 'HEIN', 'WAI', 'PAING', 'KHANT', 'THEIN', 'NAING',
+    'MYINT', 'SAN', 'THIDA', 'YEE', 'EI', 'SU', 'HNIN', 'SI', 'NWE',
+    'KAY', 'KHAING', 'LAY', 'THU', 'SANDAR', 'PHYU', 'MOE', 'THIN', 'ZIN',
+    'YIN', 'KHIN', 'MYA', 'HLAING',
+  ]);
+  const strongMyanmarTokens = new Set([
+    'AUNG', 'KYAW', 'THANT', 'PHOME', 'PHYO', 'HTET', 'MAUNG', 'NYEIN',
+    'THURA', 'KHANT', 'KHAING', 'SANDAR', 'PHYU', 'HLAING', 'NWE',
   ]);
   if (
-    tokens.filter((t) => myanmarTokens.has(t)).length >= 2 ||
-    hasToken(new Set(['AUNG', 'KYAW', 'THANT', 'PHOME', 'PHYO', 'HTET', 'MAUNG', 'NYEIN', 'THURA', 'KHANT']))
+    (tokens.filter((t) => myanmarTokens.has(t)).length >= 2 || hasToken(strongMyanmarTokens)) &&
+    !hasToken(vietnameseTokens)
   ) {
     return 'ミャンマー';
   }
 
   const indonesianTokens = new Set([
-    'PUTRA',
-    'PUTRI',
-    'DEWI',
-    'SARI',
-    'PRATAMA',
-    'SAPUTRA',
-    'SAPUTRI',
-    'WATI',
-    'ARDHANA',
-    'NOVIA',
-    'SUSANTO',
-    'SETIAWAN',
-    'HIDAYAT',
-    'NUGROHO',
-    'WIBOWO',
-    'KUSUMA',
-    'RAHMAWATI',
-    'LESTARI',
-    'MUHAMMAD',
-    'AHMAD',
-    'RIZKI',
-    'RIZKY',
-    'WAHYU',
-    'AGUNG',
-    'BUDI',
-    'FITRI',
-    'INDAH',
-    'YULIANA',
-    'PURNAMA',
-    'SYAHPUTRA',
+    'PUTRA', 'PUTRI', 'DEWI', 'SARI', 'PRATAMA', 'SAPUTRA', 'SAPUTRI', 'WATI',
+    'ARDHANA', 'NOVIA', 'SUSANTO', 'SETIAWAN', 'HIDAYAT', 'NUGROHO', 'WIBOWO',
+    'KUSUMA', 'RAHMAWATI', 'LESTARI', 'MUHAMMAD', 'AHMAD', 'RIZKI', 'RIZKY',
+    'WAHYU', 'AGUNG', 'BUDI', 'FITRI', 'INDAH', 'YULIANA', 'PURNAMA', 'SYAHPUTRA',
+    'ABNIEL', 'TOGARMA', 'GINTING', 'HESTI', 'SETIA', 'RINI', 'IMAS', 'FAJRIAH',
+    'DWI', 'SRI', 'ISWAN', 'WENING', 'EKO', 'NITA', 'NUR', 'SITI', 'RATNA', 'BAGUS', 'FAJAR',
   ]);
   if (hasToken(indonesianTokens)) {
     return 'インドネシア';
   }
 
+  const bangladeshiTokens = new Set([
+    'ULLAH', 'ZIA', 'RAHMAN', 'MARUF', 'HOSSAIN', 'JOBAYED', 'AHMED', 'ISLAM',
+    'HASAN', 'ALAM', 'MIA', 'KHAN', 'CHOWDHURY', 'SIDDIQUI', 'KARIM', 'MAHMUD',
+    'HOQUE', 'UDDIN', 'SHEIKH', 'ROBIUL', 'SHARIF', 'KABIR', 'MONIR',
+  ]);
+  if (hasToken(bangladeshiTokens)) {
+    return 'バングラデシュ';
+  }
+
   const nepaliTokens = new Set([
-    'TAMANG',
-    'GURUNG',
-    'THAPA',
-    'MAGAR',
-    'LIMBU',
-    'SHRESTHA',
-    'ADHIKARI',
-    'KHADKA',
-    'POUDEL',
-    'PAUDEL',
-    'BHANDARI',
-    'KARKI',
-    'BASNET',
-    'LAMA',
-    'GHALE',
-    'BAHADUR',
-    'BIKRAM',
-    'KUMARI',
-    'PRASAD',
-    'SUBEDI',
-    'ACHARYA',
+    'TAMANG', 'GURUNG', 'THAPA', 'MAGAR', 'LIMBU', 'SHRESTHA', 'ADHIKARI',
+    'KHADKA', 'POUDEL', 'PAUDEL', 'BHANDARI', 'KARKI', 'BASNET', 'LAMA',
+    'GHALE', 'BAHADUR', 'BIKRAM', 'KUMARI', 'PRASAD', 'SUBEDI', 'ACHARYA',
+    'BISTA', 'TIMILSINA', 'POKHREL', 'REGMI', 'KOIRALA', 'BHATTARAI', 'RAI', 'PUN',
   ]);
   if (hasToken(nepaliTokens)) {
     return 'ネパール';
   }
 
+  const sriLankanTokens = new Set([
+    'PERERA', 'SILVA', 'FERNANDO', 'BANDARA', 'JAYASINGHE', 'KUMARA',
+    'WICKRAMASINGHE', 'DISSANAYAKE', 'RANASINGHE', 'SENANAYAKE', 'GUNASEKARA', 'HERATH',
+  ]);
+  if (hasToken(sriLankanTokens)) {
+    return 'スリランカ';
+  }
+
   const filipinoTokens = new Set([
-    'DELA',
-    'CRUZ',
-    'SANTOS',
-    'REYES',
-    'MENDOZA',
-    'BAUTISTA',
-    'VILLANUEVA',
-    'RAMOS',
-    'AQUINO',
-    'CASTILLO',
-    'MAGSAYSAY',
-    'DIZON',
-    'SORIANO',
-    'OCAMPO',
-    'GONZALES',
-    'HERNANDEZ',
+    'DELA', 'CRUZ', 'SANTOS', 'REYES', 'MENDOZA', 'BAUTISTA', 'VILLANUEVA',
+    'RAMOS', 'AQUINO', 'CASTILLO', 'MAGSAYSAY', 'DIZON', 'SORIANO', 'OCAMPO',
+    'GONZALES', 'HERNANDEZ',
   ]);
   if (
     tokens.filter((t) => filipinoTokens.has(t)).length >= 1 &&
@@ -253,27 +216,26 @@ export function suggestNationalityFromName(fullName?: string): string | null {
   }
 
   const cambodianTokens = new Set([
-    'SOK',
-    'SOPHEA',
-    'PHEAKDEY',
-    'VANNA',
-    'CHANN',
-    'SREY',
-    'RATANA',
-    'DARA',
-    'BORA',
-    'NHEM',
-    'CHEA',
-    'OUK',
-    'CHANTHA',
-    'SOVANN',
-    'VANN',
-    'RITH',
-    'MAKARA',
-    'KIMSAN',
+    'SOK', 'SOPHEA', 'PHEAKDEY', 'VANNA', 'CHANN', 'SREY', 'RATANA', 'DARA',
+    'BORA', 'NHEM', 'CHEA', 'OUK', 'CHANTHA', 'SOVANN', 'VANN', 'RITH',
+    'MAKARA', 'KIMSAN', 'YORNG', 'MAIPHORN', 'SOKHA', 'PISEY', 'RATH', 'SAMNANG', 'VICHEA',
   ]);
-  if (hasToken(cambodianTokens)) {
+  if (hasToken(cambodianTokens) && !hasToken(vietnameseTokens)) {
     return 'カンボジア';
+  }
+
+  const chineseStrongTokens = new Set([
+    'WANG', 'ZHANG', 'LIU', 'ZHAO', 'YANG', 'HUANG', 'ZHOU', 'WU', 'XU',
+    'SUN', 'FANG', 'YALEI', 'TSUN', 'KIT', 'GUO', 'GAO', 'DENG', 'XIAO',
+    'ZHENG', 'XIE', 'TANG', 'FENG', 'YUAN', 'LIANG', 'CHEN', 'LIN',
+  ]);
+  const chinesePairTokens = new Set([...chineseStrongTokens, 'LI', 'TO', 'HAN', 'CAO']);
+  if (
+    !hasToken(vietnameseTokens) &&
+    (hasToken(chineseStrongTokens) ||
+      tokens.filter((t) => chinesePairTokens.has(t)).length >= 2)
+  ) {
+    return '中国';
   }
 
   return null;
@@ -631,6 +593,38 @@ export function normalizePaperworkStatus(raw: unknown): ResignationPaperworkStat
   return 'Chưa làm';
 }
 
+export function getResignationStatusLabel(
+  status?: string,
+  lang: 'vi' | 'jp' = 'vi'
+): string {
+  const norm = normalizePaperworkStatus(status);
+  if (lang === 'jp') {
+    if (norm === 'Chưa làm') return '未着手';
+    if (norm === 'Đang thu thập') return '書類収集中';
+    if (norm === 'Đã gửi công ty') return '企業提出済';
+    if (norm === 'Hoàn tất') return '手続完了';
+  }
+  return norm;
+}
+
+export function getResignationCompanyLabel(
+  previousCompany?: string,
+  lang: 'vi' | 'jp' = 'vi'
+): string {
+  const raw = String(previousCompany || '').trim();
+  if (!raw || raw === 'Chưa rõ công ty cũ' || raw === '前職企業未設定') {
+    return lang === 'jp' ? '前職企業未設定' : 'Chưa rõ công ty cũ';
+  }
+  return raw;
+}
+
+export function hasUnconfirmedResignationDate(record: ResignationRecord): boolean {
+  if (record.paperworkStatus === 'Hoàn tất') return false;
+  const resig = normalizeFlexibleDateToYmd(record.resignationDate);
+  const dead = normalizeFlexibleDateToYmd(record.paperworkDeadline);
+  return !resig || !dead;
+}
+
 export interface ResignationDeadlineAssessment {
   daysLeft: number | null;
   urgency: 'done' | 'overdue' | 'urgent3' | 'warn7' | 'normal';
@@ -639,14 +633,23 @@ export interface ResignationDeadlineAssessment {
 
 export function assessResignationDeadline(
   deadlineYmd?: string,
-  status?: string
+  status?: string,
+  lang: 'vi' | 'jp' = 'vi'
 ): ResignationDeadlineAssessment {
   if (status === 'Hoàn tất') {
-    return { daysLeft: null, urgency: 'done', label: 'Hoàn tất thủ tục' };
+    return {
+      daysLeft: null,
+      urgency: 'done',
+      label: lang === 'jp' ? '手続完了' : 'Hoàn tất thủ tục',
+    };
   }
   const ymd = normalizeFlexibleDateToYmd(deadlineYmd);
   if (!ymd) {
-    return { daysLeft: null, urgency: 'normal', label: 'Chưa đặt hạn nộp' };
+    return {
+      daysLeft: null,
+      urgency: 'normal',
+      label: lang === 'jp' ? '提出期限未設定' : 'Chưa đặt hạn nộp',
+    };
   }
 
   const todayYmd = getJstTodayYmd();
@@ -660,27 +663,44 @@ export function assessResignationDeadline(
     return {
       daysLeft,
       urgency: 'overdue',
-      label: `⚠️ Quá hạn nộp giấy tờ ${Math.abs(daysLeft)} ngày (${ymd})`,
+      label:
+        lang === 'jp'
+          ? `⚠️ 提出期限 ${Math.abs(daysLeft)}日超過 (${ymd})`
+          : `⚠️ Quá hạn nộp giấy tờ ${Math.abs(daysLeft)} ngày (${ymd})`,
     };
   }
   if (daysLeft === 0) {
-    return { daysLeft: 0, urgency: 'urgent3', label: `⚠️ Hạn nộp giấy tờ HÔM NAY (${ymd})` };
+    return {
+      daysLeft: 0,
+      urgency: 'urgent3',
+      label:
+        lang === 'jp'
+          ? `⚠️ 提出期限 本日 (${ymd})`
+          : `⚠️ Hạn nộp giấy tờ HÔM NAY (${ymd})`,
+    };
   }
   if (daysLeft <= 3) {
     return {
       daysLeft,
       urgency: 'urgent3',
-      label: `⚠️ Sắp đến hạn nộp giấy tờ trong ${daysLeft} ngày (${ymd})`,
+      label:
+        lang === 'jp'
+          ? `⚠️ 提出期限まで残り${daysLeft}日 (${ymd})`
+          : `⚠️ Sắp đến hạn nộp giấy tờ trong ${daysLeft} ngày (${ymd})`,
     };
   }
   if (daysLeft <= 7) {
     return {
       daysLeft,
       urgency: 'warn7',
-      label: `Còn ${daysLeft} ngày (${ymd})`,
+      label: lang === 'jp' ? `残り${daysLeft}日 (${ymd})` : `Còn ${daysLeft} ngày (${ymd})`,
     };
   }
-  return { daysLeft, urgency: 'normal', label: `Còn ${daysLeft} ngày (${ymd})` };
+  return {
+    daysLeft,
+    urgency: 'normal',
+    label: lang === 'jp' ? `残り${daysLeft}日 (${ymd})` : `Còn ${daysLeft} ngày (${ymd})`,
+  };
 }
 
 export interface ResignationImportPreviewRow extends ResignationRecord {
@@ -840,22 +860,132 @@ export function buildResignationReminderMessages(record: ResignationRecord): {
   vi: string;
   jp: string;
 } {
-  const deadlineText = record.paperworkDeadline || 'sớm nhất có thể';
-  const companyText = record.previousCompany || 'công ty cũ';
+  const deadlineTextVi = record.paperworkDeadline || 'sớm nhất có thể';
+  const deadlineTextJp = record.paperworkDeadline || 'お早めにご提出';
+  const companyTextVi = getResignationCompanyLabel(record.previousCompany, 'vi');
+  const companyTextJp = getResignationCompanyLabel(record.previousCompany, 'jp');
   const name = record.fbName || record.fullName;
 
   return {
-    vi: `Chào ${name}! Để hoàn tất thủ tục chuyển việc và hồ sơ xin visa mới sau khi nghỉ tại ${companyText} (ngày nghỉ: ${
+    vi: `Chào ${name}! Để hoàn tất thủ tục chuyển việc và hồ sơ xin visa mới sau khi nghỉ tại ${companyTextVi} (ngày nghỉ: ${
       record.resignationDate || 'chưa rõ'
-    }), bạn nhớ xin/nộp đầy đủ giấy tờ nghỉ việc (退職証明書, 源泉徴収票, 離職票 nếu có) trước hạn chót **${deadlineText}** nhé!\n${
+    }), bạn nhớ xin/nộp đầy đủ giấy tờ nghỉ việc (退職証明書, 源泉徴収票, 離職票 nếu có) trước hạn chót **${deadlineTextVi}** nhé!\n${
       record.handoverNotes ? `Lưu ý hiện tại: ${record.handoverNotes}\n` : ''
     }Khi nào nhận được giấy tờ hoặc cần hỗ trợ nhắc công ty cũ, bạn chụp ảnh gửi lại cho mình ngay nha!`,
-    jp: `${name}さん、お疲れ様です！${companyText}のご退職（退職日：${
+    jp: `${name}さん、お疲れ様です！${companyTextJp}のご退職（退職日：${
       record.resignationDate || '未定'
-    }）に伴う必要書類（退職証明書・源泉徴収票など）の提出期限は **${deadlineText}** となっております。\n${
+    }）に伴う必要書類（退職証明書・源泉徴収票・離職票など）の提出期限は **${deadlineTextJp}** となっております。\n${
       record.handoverNotes ? `メモ：${record.handoverNotes}\n` : ''
     }書類をお受け取りになりましたら、お写真でも構いませんので早めにお送りください！`,
   };
+}
+
+export function buildResignationDateConfirmMessages(record: ResignationRecord): {
+  vi: string;
+  jp: string;
+} {
+  const companyTextVi = getResignationCompanyLabel(record.previousCompany, 'vi');
+  const companyTextJp = getResignationCompanyLabel(record.previousCompany, 'jp');
+  const name = record.fbName || record.fullName;
+
+  return {
+    vi: `Chào ${name}! Để bên mình chuẩn bị hồ sơ chuyển việc và đặt lịch nhắc xin giấy tờ nghỉ việc (退職証明書・源泉徴収票) tại ${companyTextVi}, bạn xác nhận giúp mình **ngày làm việc cuối cùng / ngày nghỉ việc chính thức (退職日)** dự kiến là ngày nào nhé?\nNếu công ty đã báo lịch trả giấy tờ thì bạn nhắn kèm luôn cho mình nha!`,
+    jp: `${name}さん、お疲れ様です！${companyTextJp}からの転職手続きおよび退職書類（退職証明書・源泉徴収票）の準備スケジュールを確認したく、**最終出社日および正式な退職日**をご確認いただけますでしょうか？\n書類の受け取り予定日も分かりましたらあわせてお知らせください。`,
+  };
+}
+
+export function autoFixResignationsNationalities(records: ResignationRecord[]): {
+  updated: ResignationRecord[];
+  changedCount: number;
+} {
+  let changedCount = 0;
+  const updated = records.map((rec) => {
+    const isManualProtected =
+      Boolean(rec.gasProtected) ||
+      Boolean(rec.manualProtectedFields?.includes('nationality'));
+    if (isManualProtected) return rec;
+    const currentNat = normalizeResignationNationality(rec.nationality);
+    if (currentNat !== 'ベトナム' && currentNat !== '国籍不明') {
+      return rec;
+    }
+    const inferred = suggestNationalityFromName(rec.fullName);
+    if (!inferred || inferred === currentNat) return rec;
+    changedCount += 1;
+    return {
+      ...rec,
+      nationality: inferred,
+      updatedAt: new Date().toISOString(),
+    };
+  });
+  return { updated, changedCount };
+}
+
+export function exportResignationsToExcel(
+  records: ResignationRecord[],
+  lang: 'vi' | 'jp' = 'vi'
+): string {
+  const headers =
+    lang === 'jp'
+      ? [
+          '氏名',
+          '国籍',
+          '前職企業',
+          '分野',
+          'JLPT',
+          '退職日',
+          '書類提出期限',
+          '状況',
+          '引き継ぎメモ',
+          '転職希望',
+          '電話番号',
+        ]
+      : [
+          'Họ tên',
+          'Quốc tịch',
+          'Công ty cũ',
+          'Ngành',
+          'JLPT',
+          'Ngày nghỉ việc',
+          'Hạn nộp giấy tờ',
+          'Trạng thái',
+          'Ghi chú bàn giao',
+          'Nhu cầu việc mới',
+          'SĐT',
+        ];
+
+  const rows = records.map((r) => [
+    r.fullName || '',
+    normalizeResignationNationality(r.nationality),
+    getResignationCompanyLabel(r.previousCompany, lang),
+    r.industry || '',
+    r.jlpt || '',
+    r.resignationDate || '',
+    r.paperworkDeadline || '',
+    getResignationStatusLabel(r.paperworkStatus, lang),
+    r.handoverNotes || '',
+    r.newJobNeed || '',
+    r.phone || '',
+  ]);
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  ws['!cols'] = [
+    { wch: 24 },
+    { wch: 14 },
+    { wch: 26 },
+    { wch: 16 },
+    { wch: 10 },
+    { wch: 13 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 36 },
+    { wch: 28 },
+    { wch: 15 },
+  ];
+  XLSX.utils.book_append_sheet(wb, ws, lang === 'jp' ? '退職者一覧' : 'NguoiNghiViec');
+  const fileName = `Resignations_${getJstTodayYmd()}.xlsx`;
+  XLSX.writeFile(wb, fileName);
+  return fileName;
 }
 
 export function convertResignationToCandidate(record: ResignationRecord): Candidate {
@@ -879,7 +1009,7 @@ export function convertResignationToCandidate(record: ResignationRecord): Candid
     name: record.fullName,
     fbName: record.fbName || record.fullName,
     fbProfileUrl: record.fbProfileUrl,
-    channel: 'personal',
+    channel: 'other',
     nationality: normalizedNationality,
     jlpt: record.jlpt || '要確認',
     desiredIndustry: record.industry || '',

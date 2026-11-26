@@ -304,6 +304,7 @@ export function GeminiChatbotDrawer({
           message: trimmed,
           history: historyPayload,
           roleId: selectedRole,
+          lang,
           crmSummary: includeCrmContext ? crmSummary : undefined,
         }),
       });
