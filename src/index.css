@@ -1,15 +1,15 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #0c0c0e;
-  --surface: #141417;
-  --ink: #edeeef;
-  --ink-dim: #94949e;
-  --ink-border: #27272a;
-  --accent: #22c55e;
-  --accent-glow: rgba(34, 197, 94, 0.15);
-  --danger: #ef4444;
-  --warning: #f59e0b;
+  --bg: #F8FAFC;
+  --surface: #FFFFFF;
+  --ink: #0F172A;
+  --ink-dim: #64748B;
+  --ink-border: #E2E8F0;
+  --accent: #16A34A;
+  --accent-glow: rgba(22, 163, 74, 0.12);
+  --danger: #DC2626;
+  --warning: #D97706;
 }
 
 @layer base {
@@ -17,31 +17,31 @@
   body {
     background-color: var(--bg);
     color: var(--ink);
-    font-family: "Geist", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: "Plus Jakarta Sans", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
 
   .font-mono,
   .tabular-nums {
-    font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     font-variant-numeric: tabular-nums;
   }
 }
 
-/* Dark custom scrollbars for High Density Tech panes */
+/* Clean Light custom scrollbars */
 ::-webkit-scrollbar {
   width: 7px;
   height: 7px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0c0c0e;
+  background: #F1F5F9;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #27272a;
+  background: #CBD5E1;
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3f3f46;
+  background: #94A3B8;
 }

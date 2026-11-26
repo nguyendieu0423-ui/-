@@ -28,6 +28,12 @@ export type ReplyScenario =
   | 'missing_info_request'
   | 'post_interview_followup';
 
+export type CandidateViewMode = 'list' | 'card';
+
+export type ProposedGroupFilter = 'in_progress' | 'naitei' | 'jitai' | 'all';
+
+export type JitaiSubFilter = 'all' | '内定辞退' | '選考中辞退' | '不合格' | '辞退・終了';
+
 export interface Candidate {
   id: string;
   fbSenderId?: string;
@@ -59,6 +65,9 @@ export interface Candidate {
   address?: string;
   progressStatus?: string;
   proposedCompany?: string;
+  naiteiCompany?: string;
+  expectedJoinDate?: string;
+  visaSubmissionDeadline?: string;
   mendanDate?: string;
   interviewDate?: string;
   lastContactDate?: string;
@@ -66,6 +75,7 @@ export interface Candidate {
   memo?: string;
   googleCalendarEventId?: string;
   googleCalendarEventLink?: string;
+  savedRirekisho?: SavedRirekishoRecord;
   _isSchool?: boolean;
 }
 
@@ -99,6 +109,12 @@ export interface KyujinSlot {
   experienceRequirement?: string;
   experienceDetail?: string;
   jobDescription?: string;
+  excludedNationalities?: string[];
+  excludedGenders?: string[];
+  requiresInJapan?: boolean;
+  requiresTokutei?: boolean;
+  requiredConditions?: string[];
+  ngConditions?: string[];
   salaryManuallyEdited?: boolean;
   manualProtectedFields?: string[];
 }
@@ -111,6 +127,11 @@ export interface KyujinCompany {
   employmentType?: KyujinEmploymentType;
   recruitmentStatus: string;
   excludedNationalities?: string[];
+  excludedGenders?: string[];
+  requiresInJapan?: boolean;
+  requiresTokutei?: boolean;
+  requiredConditions?: string[];
+  ngConditions?: string[];
   areaBreakdown: KyujinSlot[];
 }
 
@@ -164,7 +185,7 @@ export type DailyFocusCompletionMap = Record<string, boolean>;
 
 export interface DailyFocusItem {
   id: string;
-  category: 'mendan' | 'uncontacted' | 'visa_expiry' | 'resignation';
+  category: 'mendan' | 'uncontacted' | 'visa_expiry' | 'resignation' | 'visa_submission';
   urgency: 'critical' | 'warning';
   title: string;
   subtitle: string;
@@ -206,6 +227,15 @@ export interface RirekishoDraft {
   dependentsCount: string;
   spouse: string;
   spouseSupport: string;
+  photoDataUrl?: string;
+}
+
+export interface SavedRirekishoRecord {
+  draft: RirekishoDraft;
+  sourceFileName?: string;
+  exportedFileName?: string;
+  exportedAt?: string;
+  updatedAt: string;
 }
 
 export interface MissingInfoItem {

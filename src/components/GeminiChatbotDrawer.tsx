@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Copy, MessageSquareText, RotateCcw, Send, X } from 'lucide-react';
+import type { UiLang } from '../i18n/crmTranslations';
 
 export type ChatbotRoleId = 'crm_strategist' | 'reply_coach' | 'screening_advisor';
 
@@ -13,6 +14,7 @@ export interface ChatTurnMessage {
 }
 
 interface GeminiChatbotDrawerProps {
+  lang?: UiLang;
   isOpen: boolean;
   onClose: () => void;
   getIdToken: () => Promise<string | null>;
@@ -22,49 +24,155 @@ interface GeminiChatbotDrawerProps {
   onCopySuccess?: (msg: string) => void;
 }
 
-const ROLE_OPTIONS: Array<{
-  id: ChatbotRoleId;
-  label: string;
-  subtitle: string;
-  modelHint: string;
-  prompts: string[];
-}> = [
-  {
-    id: 'crm_strategist',
-    label: 'Tư vấn CRM',
-    subtitle: 'Phân tích ứng viên, ưu tiên follow-up & chiến lược ghép đơn',
-    modelHint: 'gemini-4-hydrogen',
-    prompts: [
-      'Đề xuất thứ tự ưu tiên chăm sóc nhóm ứng viên đang có trong CRM.',
-      'Những tiêu chí quan trọng nhất khi ghép ứng viên Kaigo N4 vào cơ sở phù hợp?',
-      'Gợi ý quy trình giảm tỷ lệ từ chối sau khi gửi hồ sơ cho xí nghiệp.',
-    ],
+const ROLE_OPTIONS_BY_LANG: Record<
+  UiLang,
+  Array<{
+    id: ChatbotRoleId;
+    label: string;
+    subtitle: string;
+    modelHint: string;
+    prompts: string[];
+  }>
+> = {
+  vi: [
+    {
+      id: 'crm_strategist',
+      label: 'Tư vấn CRM',
+      subtitle: 'Phân tích ứng viên, ưu tiên follow-up & chiến lược ghép đơn',
+      modelHint: 'gemini-4-hydrogen',
+      prompts: [
+        'Đề xuất thứ tự ưu tiên chăm sóc nhóm ứng viên đang có trong CRM.',
+        'Những tiêu chí quan trọng nhất khi ghép ứng viên Kaigo N4 vào cơ sở phù hợp?',
+        'Gợi ý quy trình giảm tỷ lệ từ chối sau khi gửi hồ sơ cho xí nghiệp.',
+      ],
+    },
+    {
+      id: 'reply_coach',
+      label: 'Soạn tin nhanh',
+      subtitle: 'Soạn tin nhắn Messenger/Zalo & email Nhật-Việt sẵn sàng gửi ngay',
+      modelHint: 'gemini-3.1-flash-lite',
+      prompts: [
+        'Soạn tin nhắn tiếng Việt + tiếng Nhật nhắc ứng viên lịch Mendan ngày mai lúc 14:00.',
+        'Viết mẫu tin nhắn hỏi thăm nhẹ nhàng bằng tiếng Việt cho ứng viên im lặng 5 ngày.',
+        'Viết email ngắn bằng tiếng Nhật đề xuất ứng viên JLPT N3 kinh nghiệm Kaigo cho xí nghiệp.',
+      ],
+    },
+    {
+      id: 'screening_advisor',
+      label: 'Đánh giá hồ sơ',
+      subtitle: 'Kiểm tra thiếu sót visa/JLPT & gợi ý câu hỏi phỏng vấn sơ vấn',
+      modelHint: 'gemini-4-hydrogen',
+      prompts: [
+        'Liệt kê 5 câu hỏi kiểm tra động lực và khả năng làm việc lâu dài khi Mendan thực tập sinh chuyển Tokutei.',
+        'Du học sinh sắp tốt nghiệp trường tiếng cần chuẩn bị giấy tờ gì để chuyển sang Tokutei Ginou?',
+        'Cần kiểm tra những điểm nào trên thẻ ngoại kiều trước khi tiến cử ứng viên?',
+      ],
+    },
+  ],
+  jp: [
+    {
+      id: 'crm_strategist',
+      label: 'CRM戦略相談',
+      subtitle: '求職者分析・フォロー優先順位・求人マッチング戦略を提案',
+      modelHint: 'gemini-4-hydrogen',
+      prompts: [
+        '現在のCRMデータをもとに、優先してフォローすべき求職者の順序を提案してください。',
+        '介護N4の求職者を最適な施設へマッチングする際の重要チェックポイントは？',
+        '書類推薦後の辞退率を下げるための事前すり合わせ手順を提案してください。',
+      ],
+    },
+    {
+      id: 'reply_coach',
+      label: '返信文作成',
+      subtitle: 'Messenger/Zalo・企業向け日越メールの文面を即座に作成',
+      modelHint: 'gemini-3.1-flash-lite',
+      prompts: [
+        '明日14:00の面談リマインド文をベトナム語＋日本語で作成してください。',
+        '5日間返信がない求職者向けの丁寧なフォロー連絡文（ベトナム語）を作成してください。',
+        'JLPT N3・介護経験ありの求職者を受入企業へ推薦する短い日本語メールを作成してください。',
+      ],
+    },
+    {
+      id: 'screening_advisor',
+      label: '書類・面談助言',
+      subtitle: 'ビザ・JLPT不足チェックと一次面談のスクリーニング質問を提案',
+      modelHint: 'gemini-4-hydrogen',
+      prompts: [
+        '技能実習生から特定技能へ移行する方の定着意欲を確認する面談質問を5つ挙げてください。',
+        '日本語学校卒業見込みの留学生が特定技能へ変更する際の必要書類は？',
+        '企業推薦前に在留カードで必ず確認すべきポイントを整理してください。',
+      ],
+    },
+  ],
+};
+
+const DRAWER_COPY = {
+  vi: {
+    ariaLabel: 'Trợ lý AI Gemini',
+    headerTitle: 'Trợ lý AI Gemini · Tokutei CRM',
+    newChatTitle: 'Bắt đầu hội thoại mới',
+    closeAria: 'Đóng Trợ lý AI',
+    attachSummary: 'Đính kèm số liệu CRM hiện tại',
+    needLogin: 'Vui lòng đăng nhập Google để sử dụng Trợ lý AI Gemini.',
+    needLoginDesc:
+      'Sau khi đăng nhập, bạn có thể hỏi đáp với AI theo ngữ cảnh hồ sơ ứng viên trong CRM và lưu lịch sử trò chuyện.',
+    loadingHistory: 'Đang tải lịch sử hội thoại từ Cloud SQL...',
+    selectedRolePrefix: 'Vai trò đang chọn:',
+    autoSavedSuffix: ' và tự động lưu vào Cloud SQL',
+    roleSessionDesc: (sub: string, hasEmail: boolean) =>
+      `${sub}. Lịch sử trò chuyện nhiều lượt được duy trì liên tục trong phiên làm việc${
+        hasEmail ? ' và tự động lưu vào Cloud SQL' : ''
+      }.`,
+    quickStartLabel: 'Gợi ý bắt đầu nhanh:',
+    copyBtn: 'Sao chép',
+    copiedToast: 'Đã sao chép phản hồi AI',
+    copyFailToast: 'Không thể truy cập clipboard trên trình duyệt này',
+    typingMsg: 'Đang soạn câu trả lời...',
+    errorTitle: 'Không thể kết nối Trợ lý AI',
+    fallbackErr:
+      'Không thể nhận phản hồi từ Gemini. Vui lòng kiểm tra GEMINI_API_KEY trong Settings > Secrets.',
+    httpErr: (s: number) => `Lỗi kết nối AI (HTTP ${s})`,
+    placeholderSignedIn: 'Nhập câu hỏi về ứng viên, ghép đơn hoặc nhờ soạn tin nhắn...',
+    placeholderGuest: 'Đăng nhập Google để gửi câu hỏi...',
+    sendAria: 'Gửi tin nhắn',
+    sendBtn: 'Gửi',
+    shortcutHint: 'Enter để gửi · Shift + Enter xuống dòng',
   },
-  {
-    id: 'reply_coach',
-    label: 'Soạn tin nhanh',
-    subtitle: 'Soạn tin nhắn Messenger/Zalo & email Nhật-Việt sẵn sàng gửi ngay',
-    modelHint: 'gemini-3.1-flash-lite',
-    prompts: [
-      'Soạn tin nhắn tiếng Việt + tiếng Nhật nhắc ứng viên lịch Mendan ngày mai lúc 14:00.',
-      'Viết mẫu tin nhắn hỏi thăm nhẹ nhàng bằng tiếng Việt cho ứng viên im lặng 5 ngày.',
-      'Viết email ngắn bằng tiếng Nhật đề xuất ứng viên JLPT N3 kinh nghiệm Kaigo cho xí nghiệp.',
-    ],
+  jp: {
+    ariaLabel: 'Gemini AIアシスタント',
+    headerTitle: 'Gemini AIアシスタント · Tokutei CRM',
+    newChatTitle: '新しい会話を始める',
+    closeAria: 'AIアシスタントを閉じる',
+    attachSummary: '現在のCRM集計データを添付する',
+    needLogin: 'Gemini AIアシスタントを利用するにはGoogleでログインしてください。',
+    needLoginDesc:
+      'ログイン後、CRM内の求職者・求人データを踏まえたAI相談や会話履歴の保存が可能になります。',
+    loadingHistory: 'Cloud SQLから会話履歴を読み込み中...',
+    selectedRolePrefix: '選択中の役割:',
+    autoSavedSuffix: '（Cloud SQLに自動保存）',
+    roleSessionDesc: (sub: string, hasEmail: boolean) =>
+      `${sub}。セッション中の会話文脈は維持されます${
+        hasEmail ? '（Cloud SQLに自動保存）' : ''
+      }。`,
+    quickStartLabel: 'クイック質問テンプレート:',
+    copyBtn: 'コピー',
+    copiedToast: 'AIの回答をコピーしました',
+    copyFailToast: 'クリップボードにアクセスできませんでした',
+    typingMsg: '回答を作成中...',
+    errorTitle: 'AIアシスタントに接続できません',
+    fallbackErr:
+      'Geminiから応答を取得できませんでした。Settings > Secrets の GEMINI_API_KEY を確認してください。',
+    httpErr: (s: number) => `AI接続エラー (HTTP ${s})`,
+    placeholderSignedIn: '求職者フォロー、マッチング、返信文の作成などを入力...',
+    placeholderGuest: '質問を送信するにはGoogleでログインしてください...',
+    sendAria: 'メッセージを送信',
+    sendBtn: '送信',
+    shortcutHint: 'Enterで送信 · Shift + Enterで改行',
   },
-  {
-    id: 'screening_advisor',
-    label: 'Đánh giá hồ sơ',
-    subtitle: 'Kiểm tra thiếu sót visa/JLPT & gợi ý câu hỏi phỏng vấn sơ vấn',
-    modelHint: 'gemini-4-hydrogen',
-    prompts: [
-      'Liệt kê 5 câu hỏi kiểm tra động lực và khả năng làm việc lâu dài khi Mendan thực tập sinh chuyển Tokutei.',
-      'Du học sinh sắp tốt nghiệp trường tiếng cần chuẩn bị giấy tờ gì để chuyển sang Tokutei Ginou?',
-      'Cần kiểm tra những điểm nào trên thẻ ngoại kiều trước khi tiến cử ứng viên?',
-    ],
-  },
-];
+} as const;
 
 export function GeminiChatbotDrawer({
+  lang = 'vi',
   isOpen,
   onClose,
   getIdToken,
@@ -83,8 +191,10 @@ export function GeminiChatbotDrawer({
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const loadedForUserRef = useRef<string | null>(null);
 
+  const roleOptions = ROLE_OPTIONS_BY_LANG[lang];
+  const copy = DRAWER_COPY[lang];
   const activeRoleMeta =
-    ROLE_OPTIONS.find((r) => r.id === selectedRole) ?? ROLE_OPTIONS[0];
+    roleOptions.find((r) => r.id === selectedRole) ?? roleOptions[0];
 
   useEffect(() => {
     if (!isOpen) return;
@@ -155,7 +265,7 @@ export function GeminiChatbotDrawer({
     const trimmed = (overrideText ?? inputText).trim();
     if (!trimmed || isSending) return;
     if (!isSignedIn) {
-      setErrorMsg('Vui lòng đăng nhập Google để sử dụng Trợ lý AI Gemini.');
+      setErrorMsg(copy.needLogin);
       return;
     }
 
@@ -203,7 +313,7 @@ export function GeminiChatbotDrawer({
         throw new Error(
           typeof data?.error === 'string' && data.error
             ? data.error
-            : `Lỗi kết nối AI (HTTP ${resp.status})`
+            : copy.httpErr(resp.status)
         );
       }
 
@@ -216,10 +326,7 @@ export function GeminiChatbotDrawer({
       };
       setMessages((prev) => [...prev, modelReply]);
     } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : 'Không thể nhận phản hồi từ Gemini. Vui lòng kiểm tra GEMINI_API_KEY trong Settings > Secrets.';
+      const msg = err instanceof Error ? err.message : copy.fallbackErr;
       setErrorMsg(msg);
       setMessages((prev) => prev.filter((m) => m.id !== optimisticUserMsg.id));
       if (!overrideText) setInputText(trimmed);
@@ -249,9 +356,9 @@ export function GeminiChatbotDrawer({
   const handleCopyReply = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      onCopySuccess?.('Đã sao chép phản hồi AI');
+      onCopySuccess?.(copy.copiedToast);
     } catch {
-      onCopySuccess?.('Không thể truy cập clipboard trên trình duyệt này');
+      onCopySuccess?.(copy.copyFailToast);
     }
   };
 
@@ -259,21 +366,21 @@ export function GeminiChatbotDrawer({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-[2px]"
+      className="fixed inset-0 z-50 flex justify-end bg-slate-900/40 backdrop-blur-[2px]"
       role="dialog"
       aria-modal="true"
-      aria-label="Trợ lý AI Gemini"
+      aria-label={copy.ariaLabel}
     >
-      <div className="flex h-full w-full max-w-lg flex-col border-l border-[#27272a] bg-[#0c0c0e] text-[#edeeef] shadow-2xl">
+      <div className="flex h-full w-full max-w-lg flex-col border-l border-[#E2E8F0] bg-[#F8FAFC] text-[#0F172A] shadow-2xl">
         {/* Drawer Header */}
-        <div className="flex items-center justify-between border-b border-[#27272a] bg-[#141417] px-5 py-3.5">
+        <div className="flex items-center justify-between border-b border-[#E2E8F0] bg-white px-5 py-3.5">
           <div className="flex items-center gap-2.5 min-w-0">
-            <MessageSquareText className="h-5 w-5 shrink-0 text-[#22c55e]" aria-hidden="true" />
+            <MessageSquareText className="h-5 w-5 shrink-0 text-[#16A34A]" aria-hidden="true" />
             <div className="min-w-0">
-              <h2 className="text-sm font-bold text-[#edeeef] truncate">
-                Trợ lý AI Gemini · Tokutei CRM
+              <h2 className="text-sm font-bold text-[#0F172A] truncate">
+                {copy.headerTitle}
               </h2>
-              <p className="text-[11px] text-[#94949e] truncate">
+              <p className="text-[11px] text-[#64748B] truncate">
                 {activeRoleMeta.subtitle}
               </p>
             </div>
@@ -283,16 +390,16 @@ export function GeminiChatbotDrawer({
             <button
               type="button"
               onClick={handleClearConversation}
-              title="Bắt đầu hội thoại mới"
-              className="rounded-md p-1.5 text-[#94949e] transition-colors hover:bg-[#27272a] hover:text-[#edeeef] cursor-pointer"
+              title={copy.newChatTitle}
+              className="rounded-md p-1.5 text-[#64748B] transition-colors hover:bg-slate-100 hover:text-[#0F172A] cursor-pointer"
             >
               <RotateCcw className="h-4 w-4" aria-hidden="true" />
             </button>
             <button
               type="button"
               onClick={onClose}
-              aria-label="Đóng Trợ lý AI"
-              className="rounded-md p-1.5 text-[#94949e] transition-colors hover:bg-[#27272a] hover:text-[#edeeef] cursor-pointer"
+              aria-label={copy.closeAria}
+              className="rounded-md p-1.5 text-[#64748B] transition-colors hover:bg-slate-100 hover:text-[#0F172A] cursor-pointer"
             >
               <X className="h-4 w-4" aria-hidden="true" />
             </button>
@@ -300,17 +407,17 @@ export function GeminiChatbotDrawer({
         </div>
 
         {/* Role Selector + Context Controls */}
-        <div className="border-b border-[#27272a] bg-[#141417] px-5 py-3 space-y-2.5">
-          <div className="grid grid-cols-3 gap-1 rounded-md border border-[#27272a] bg-[#0c0c0e] p-1">
-            {ROLE_OPTIONS.map((role) => (
+        <div className="border-b border-[#E2E8F0] bg-white px-5 py-3 space-y-2.5">
+          <div className="grid grid-cols-3 gap-1 rounded-md border border-[#E2E8F0] bg-slate-100 p-1">
+            {roleOptions.map((role) => (
               <button
                 key={role.id}
                 type="button"
                 onClick={() => setSelectedRole(role.id)}
-                className={`rounded px-2 py-1.5 text-[11px] font-semibold transition-colors whitespace-nowrap truncate cursor-pointer ${
+                className={`rounded px-2 py-1.5 text-[11px] font-semibold transition-all whitespace-nowrap truncate cursor-pointer ${
                   selectedRole === role.id
-                    ? 'bg-[#22c55e] text-[#0c0c0e]'
-                    : 'text-[#94949e] hover:text-[#edeeef]'
+                    ? 'bg-white text-[#16A34A] shadow-sm'
+                    : 'text-[#64748B] hover:text-[#0F172A]'
                 }`}
               >
                 {role.label}
@@ -318,17 +425,17 @@ export function GeminiChatbotDrawer({
             ))}
           </div>
 
-          <div className="flex items-center justify-between gap-2 text-[11px] text-[#94949e]">
+          <div className="flex items-center justify-between gap-2 text-[11px] text-[#64748B]">
             <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={includeCrmContext}
                 onChange={(e) => setIncludeCrmContext(e.target.checked)}
-                className="h-3.5 w-3.5 rounded border-[#27272a] bg-[#0c0c0e] accent-[#22c55e]"
+                className="h-3.5 w-3.5 rounded border-[#CBD5E1] bg-white accent-[#16A34A]"
               />
-              <span>Đính kèm số liệu CRM hiện tại</span>
+              <span>{copy.attachSummary}</span>
             </label>
-            <span className="font-mono text-[10px] text-[#22c55e]">
+            <span className="font-mono text-[10px] font-medium text-[#16A34A]">
               {activeRoleMeta.modelHint}
             </span>
           </div>
@@ -337,32 +444,26 @@ export function GeminiChatbotDrawer({
         {/* Scrollable Message Thread */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {!isSignedIn ? (
-            <div className="rounded-lg border border-[#27272a] bg-[#141417] p-5 text-xs text-[#edeeef]">
-              <p className="font-semibold text-[#22c55e]">
-                Vui lòng đăng nhập tài khoản Google để sử dụng Trợ lý AI Gemini.
-              </p>
-              <p className="mt-2 text-[#94949e]">
-                Sau khi đăng nhập, bạn có thể hỏi đáp với AI theo ngữ cảnh hồ sơ ứng viên trong CRM và lưu lịch sử trò chuyện.
-              </p>
+            <div className="rounded-lg border border-[#E2E8F0] bg-white p-5 text-xs text-[#0F172A] shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+              <p className="font-semibold text-[#16A34A]">{copy.needLogin}</p>
+              <p className="mt-2 text-[#64748B]">{copy.needLoginDesc}</p>
             </div>
           ) : isLoadingHistory ? (
-            <div className="py-10 text-center text-xs text-[#94949e]">
-              Đang tải lịch sử hội thoại từ Cloud SQL...
-            </div>
+            <div className="py-10 text-center text-xs text-[#64748B]">{copy.loadingHistory}</div>
           ) : messages.length === 0 ? (
             <div className="space-y-4 py-4">
-              <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
-                <p className="text-xs font-semibold text-[#edeeef]">
-                  Vai trò đang chọn: {activeRoleMeta.label}
+              <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+                <p className="text-xs font-semibold text-[#0F172A]">
+                  {copy.selectedRolePrefix} {activeRoleMeta.label}
                 </p>
-                <p className="mt-1 text-xs leading-relaxed text-[#94949e]">
-                  {activeRoleMeta.subtitle}. Lịch sử trò chuyện nhiều lượt được duy trì liên tục trong phiên làm việc{userEmail ? ' và tự động lưu vào Cloud SQL' : ''}.
+                <p className="mt-1 text-xs leading-relaxed text-[#64748B]">
+                  {copy.roleSessionDesc(activeRoleMeta.subtitle, Boolean(userEmail))}
                 </p>
               </div>
 
               <div>
-                <p className="mb-2 font-mono text-[11px] font-semibold text-[#94949e]">
-                  Gợi ý bắt đầu nhanh:
+                <p className="mb-2 font-mono text-[11px] font-semibold text-[#64748B]">
+                  {copy.quickStartLabel}
                 </p>
                 <div className="space-y-2">
                   {activeRoleMeta.prompts.map((promptText, idx) => (
@@ -370,7 +471,7 @@ export function GeminiChatbotDrawer({
                       key={idx}
                       type="button"
                       onClick={() => handleSendMessage(promptText)}
-                      className="w-full rounded-lg border border-[#27272a] bg-[#141417] px-3.5 py-2.5 text-left text-xs text-[#edeeef] transition-colors hover:border-[#22c55e] cursor-pointer"
+                      className="w-full rounded-lg border border-[#E2E8F0] bg-white px-3.5 py-2.5 text-left text-xs text-[#0F172A] shadow-[0_1px_3px_rgba(0,0,0,0.05)] transition-colors hover:border-[#16A34A] hover:bg-emerald-50/40 cursor-pointer"
                     >
                       {promptText}
                     </button>
@@ -389,22 +490,22 @@ export function GeminiChatbotDrawer({
                 <div
                   className={`max-w-[88%] rounded-lg px-4 py-3 text-xs leading-relaxed whitespace-pre-wrap ${
                     m.role === 'user'
-                      ? 'bg-[#22c55e] font-medium text-[#0c0c0e]'
-                      : 'border border-[#27272a] bg-[#141417] text-[#edeeef]'
+                      ? 'bg-[#16A34A] font-medium text-white shadow-sm'
+                      : 'border border-[#E2E8F0] bg-white text-[#0F172A] shadow-[0_1px_3px_rgba(0,0,0,0.05)]'
                   }`}
                 >
                   {m.content}
                 </div>
-                <div className="mt-1 flex items-center gap-2 px-1 font-mono text-[10px] text-[#94949e]">
+                <div className="mt-1 flex items-center gap-2 px-1 font-mono text-[10px] text-[#64748B]">
                   <span>{m.role === 'user' ? 'USER' : m.modelUsed}</span>
                   {m.role === 'model' && (
                     <button
                       type="button"
                       onClick={() => handleCopyReply(m.content)}
-                      className="inline-flex items-center gap-1 text-[#94949e] hover:text-[#22c55e] cursor-pointer"
+                      className="inline-flex items-center gap-1 text-[#64748B] hover:text-[#16A34A] cursor-pointer"
                     >
                       <Copy className="h-3 w-3" aria-hidden="true" />
-                      Sao chép
+                      {copy.copyBtn}
                     </button>
                   )}
                 </div>
@@ -414,15 +515,15 @@ export function GeminiChatbotDrawer({
 
           {isSending && (
             <div className="flex items-start">
-              <div className="rounded-lg border border-[#27272a] bg-[#141417] px-4 py-3 font-mono text-xs text-[#22c55e]">
-                Đang soạn câu trả lời...
+              <div className="rounded-lg border border-[#E2E8F0] bg-white px-4 py-3 font-mono text-xs text-[#16A34A] shadow-sm">
+                {copy.typingMsg}
               </div>
             </div>
           )}
 
           {errorMsg && (
-            <div className="rounded-lg border border-[#ef4444]/40 bg-[#ef4444]/10 px-4 py-3 text-xs text-rose-300">
-              <p className="font-semibold text-[#ef4444]">Không thể kết nối Trợ lý AI</p>
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800">
+              <p className="font-semibold text-rose-700">{copy.errorTitle}</p>
               <p className="mt-1">{errorMsg}</p>
             </div>
           )}
@@ -436,7 +537,7 @@ export function GeminiChatbotDrawer({
             e.preventDefault();
             handleSendMessage();
           }}
-          className="border-t border-[#27272a] bg-[#141417] px-4 py-3"
+          className="border-t border-[#E2E8F0] bg-white px-4 py-3"
         >
           <div className="flex items-end gap-2">
             <textarea
@@ -450,26 +551,20 @@ export function GeminiChatbotDrawer({
                 }
               }}
               disabled={!isSignedIn}
-              placeholder={
-                isSignedIn
-                  ? 'Nhập câu hỏi về ứng viên, ghép đơn hoặc nhờ soạn tin nhắn...'
-                  : 'Đăng nhập Google để gửi câu hỏi...'
-              }
-              className="flex-1 resize-none rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-2 text-xs text-[#edeeef] placeholder:text-[#94949e] focus:border-[#22c55e] focus:outline-none disabled:opacity-50"
+              placeholder={isSignedIn ? copy.placeholderSignedIn : copy.placeholderGuest}
+              className="flex-1 resize-none rounded-md border border-[#CBD5E1] bg-[#F8FAFC] px-3 py-2 text-xs text-[#0F172A] placeholder:text-[#64748B] focus:border-[#16A34A] focus:bg-white focus:outline-none disabled:opacity-50"
             />
             <button
               type="submit"
               disabled={!isSignedIn || isSending || !inputText.trim()}
-              aria-label="Gửi tin nhắn"
-              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-md bg-[#22c55e] px-4 text-xs font-semibold text-[#0c0c0e] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+              aria-label={copy.sendAria}
+              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-md bg-[#16A34A] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#15803D] disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
             >
               <Send className="h-3.5 w-3.5" aria-hidden="true" />
-              Gửi
+              {copy.sendBtn}
             </button>
           </div>
-          <p className="mt-1.5 font-mono text-[10px] text-[#94949e]">
-            Enter để gửi · Shift + Enter xuống dòng
-          </p>
+          <p className="mt-1.5 font-mono text-[10px] text-[#64748B]">{copy.shortcutHint}</p>
         </form>
       </div>
     </div>

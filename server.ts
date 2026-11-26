@@ -118,7 +118,13 @@ const KYUJIN_EXTRACTION_PROMPT = `あなたは日本の人材紹介会社（特�
 17. bonus / bonusDetail: 「賞与あり」「賞与なし」「要確認」＋詳細（例: 年2回 計2.5ヶ月分）。
 18. experienceRequirement: 必ず「Không yêu cầu kinh nghiệm (未経験OK)」または「Yêu cầu có kinh nghiệm (経験者必須)」に分類。
 19. experienceDetail: 必須資格や歓迎経験の詳細。
-20. jobDescription: 業務内容（業務の特徴・具体的な作業内容を省略せず詳しく記載）。`;
+20. jobDescription: 業務内容（業務の特徴・具体的な作業内容を省略せず詳しく記載）。
+21. excludedNationalities: 採用不可・NGと明記された国籍の配列（例: ["ネパール"], ["ベトナム"]）。記載がなければ []。
+22. excludedGenders: 採用不可・NGと明記された性別の配列（例: "男性NG" や "女性限定" なら ["男性"]、"女性NG" や "男性限定" なら ["女性"]）。記載がなければ []。
+23. requiresInJapan: "国内在住限定"、"日本在住のみ"、"在日限定"、"海外NG" などの記載があれば true、それ以外は false。
+24. requiresTokutei: 特定技能（または特定技能試験合格）が必須であれば true、それ以外は false。
+25. requiredConditions: 必須応募条件の配列（例: ["特定技能", "日本国内在住", "JLPT N3以上", "介護初任者研修"]）。
+26. ngConditions: 除外・NG条件の配列（例: ["ネパール人NG", "男性NG", "海外NG", "タトゥーNG"]）。`;
 
 const RIREKISHO_EXTRACTION_PROMPT = `あなたは日本の特定技能人材紹介会社の履歴書データ抽出AIです。
 提供された履歴書ファイル（PDF/画像/Excelテキスト/Wordテキスト）または応募者とのチャット履歴から、2カラム標準履歴書の全項目を正確に抽出してJSONで返してください。
@@ -803,6 +809,24 @@ async function startServer() {
                 experienceRequirement: { type: Type.STRING },
                 experienceDetail: { type: Type.STRING },
                 jobDescription: { type: Type.STRING },
+                excludedNationalities: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                excludedGenders: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                requiresInJapan: { type: Type.BOOLEAN },
+                requiresTokutei: { type: Type.BOOLEAN },
+                requiredConditions: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                ngConditions: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
               },
               required: [
                 'companyName',

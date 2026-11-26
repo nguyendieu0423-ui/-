@@ -8,6 +8,8 @@ export const STORAGE_KEYS = {
   RESIGNATIONS: 'tokutei_resignations_v1',
   DAILY_FOCUS: 'tokutei_daily_focus_v1',
   GAS_URL: 'tokutei_gas_webapp_url_v2',
+  UI_LANG: 'tokutei_crm_ui_lang_v1',
+  VIEW_MODE: 'tokutei_crm_view_mode_v1',
 };
 
 export const SECTORS = [
@@ -75,12 +77,40 @@ export const PROGRESS_STATUSES = [
   '面談済み',
   '履歴書作成中',
   '企業提案中',
+  '面接調整中',
   '1次面接予定',
   '2次面接予定',
-  '面接調整中',
+  '結果待ち',
   '内定',
+  '内定承諾',
   '入社手続き中',
+  '入社済み',
   '保留・連絡待ち',
+  '内定辞退',
+  '選考中辞退',
+  '不合格',
+  '辞退・終了',
+];
+
+export const PROPOSED_IN_PROGRESS_STATUSES = [
+  '企業提案中',
+  '面接調整中',
+  '1次面接予定',
+  '2次面接予定',
+  '結果待ち',
+];
+
+export const PROPOSED_NAITEI_STATUSES = [
+  '内定',
+  '内定承諾',
+  '入社手続き中',
+  '入社済み',
+];
+
+export const PROPOSED_JITAI_STATUSES = [
+  '内定辞退',
+  '選考中辞退',
+  '不合格',
   '辞退・終了',
 ];
 

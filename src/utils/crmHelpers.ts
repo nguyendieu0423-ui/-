@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import mammoth from 'mammoth';
 import type {
   Candidate,
+  ChannelType,
   ExcelAnchor,
   KyujinCompany,
   KyujinMatchEvaluation,
@@ -11,11 +12,14 @@ import type {
   MissingInfoItem,
   ReplyScenario,
   RirekishoDraft,
+  RirekishoRow,
+  SavedRirekishoRecord,
 } from '../types/crm';
 import { compressImageFileToBase64, fileToBase64Raw } from './imageCompression';
 import {
   extractKyujinSalaryFromRows,
   extractKyujinSalaryInfo,
+  getKyujinSlotSalaryDisplayMeta,
 } from './salaryParser';
 import { extractPdfWithOcrFallback } from './pdfExtractor';
 
@@ -223,7 +227,83 @@ export const createInitialRirekishoDraft = (cand: Partial<Candidate> = {}): Rire
     dependentsCount: '0人',
     spouse: '無',
     spouseSupport: '無',
+    photoDataUrl: '',
   };
+};
+
+const sanitizeRirekishoRows = (rows: unknown, fallback: RirekishoRow[]): RirekishoRow[] => {
+  if (!Array.isArray(rows) || rows.length === 0) return fallback;
+  return rows.map((r) => {
+    const obj = r && typeof r === 'object' ? (r as Record<string, unknown>) : {};
+    return {
+      year: cleanLegacyStr(obj.year),
+      month: cleanLegacyStr(obj.month),
+      content: cleanLegacyStr(obj.content),
+    };
+  });
+};
+
+export const sanitizeSavedRirekishoRecord = (
+  rawInput: unknown,
+  fallbackCandidate?: Partial<Candidate>
+): SavedRirekishoRecord | undefined => {
+  if (!rawInput || typeof rawInput !== 'object') return undefined;
+  const raw = rawInput as Record<string, unknown>;
+  const rawDraft = raw.draft && typeof raw.draft === 'object' ? (raw.draft as Record<string, unknown>) : null;
+  if (!rawDraft) return undefined;
+
+  const base = createInitialRirekishoDraft(fallbackCandidate || {});
+  const rawPhoto = typeof rawDraft.photoDataUrl === 'string' ? rawDraft.photoDataUrl.trim() : '';
+  const photoDataUrl = rawPhoto.startsWith('data:image/') ? rawPhoto : '';
+
+  const draft: RirekishoDraft = {
+    dateStr: cleanLegacyStr(rawDraft.dateStr) || base.dateStr,
+    furigana: cleanLegacyStr(rawDraft.furigana),
+    fullName: cleanLegacyStr(rawDraft.fullName),
+    birthDate: cleanLegacyStr(rawDraft.birthDate),
+    age: cleanLegacyStr(rawDraft.age),
+    gender: cleanLegacyStr(rawDraft.gender),
+    postalCode: cleanLegacyStr(rawDraft.postalCode),
+    address: cleanLegacyStr(rawDraft.address),
+    phone: cleanLegacyStr(rawDraft.phone),
+    email: cleanLegacyStr(rawDraft.email),
+    nationality: cleanLegacyStr(rawDraft.nationality),
+    visaExpiry: cleanLegacyStr(rawDraft.visaExpiry),
+    visaStatus: cleanLegacyStr(rawDraft.visaStatus),
+    educationRows: sanitizeRirekishoRows(rawDraft.educationRows, base.educationRows),
+    workRows: sanitizeRirekishoRows(rawDraft.workRows, base.workRows),
+    licenseRows: sanitizeRirekishoRows(rawDraft.licenseRows, base.licenseRows),
+    nativeLanguage: cleanLegacyStr(rawDraft.nativeLanguage),
+    availableLanguages: cleanLegacyStr(rawDraft.availableLanguages),
+    caSpeaking: cleanLegacyStr(rawDraft.caSpeaking),
+    caListening: cleanLegacyStr(rawDraft.caListening),
+    motivation: cleanLegacyStr(rawDraft.motivation),
+    selfPr: cleanLegacyStr(rawDraft.selfPr),
+    personalRequests: cleanLegacyStr(rawDraft.personalRequests),
+    allergy: cleanLegacyStr(rawDraft.allergy),
+    dependentsCount: cleanLegacyStr(rawDraft.dependentsCount),
+    spouse: cleanLegacyStr(rawDraft.spouse),
+    spouseSupport: cleanLegacyStr(rawDraft.spouseSupport),
+    photoDataUrl,
+  };
+
+  return {
+    draft,
+    sourceFileName: cleanLegacyStr(raw.sourceFileName) || undefined,
+    exportedFileName: cleanLegacyStr(raw.exportedFileName) || undefined,
+    exportedAt: cleanLegacyStr(raw.exportedAt) || undefined,
+    updatedAt: cleanLegacyStr(raw.updatedAt) || new Date().toISOString(),
+  };
+};
+
+export const getInitialRirekishoDraftForCandidate = (
+  cand: Partial<Candidate> = {}
+): RirekishoDraft => {
+  if (cand.savedRirekisho?.draft) {
+    const sanitized = sanitizeSavedRirekishoRecord(cand.savedRirekisho, cand);
+    if (sanitized) return sanitized.draft;
+  }
+  return createInitialRirekishoDraft(cand);
 };
 
 export const getMissingInfoForCandidate = (person: Partial<Candidate> = {}): MissingInfoItem[] => {
@@ -298,18 +378,305 @@ export const getEffectiveProposedCompany = (person: Partial<Candidate> = {}): st
   return '';
 };
 
+export const cleanLegacyStr = (val: unknown): string => {
+  if (val === null || val === undefined) return '';
+  const s = String(val).trim();
+  if (!s || s.toLowerCase() === 'undefined' || s.toLowerCase() === 'null') return '';
+  return s;
+};
+
+export const classifyProposedSubTab = (
+  person: Partial<Candidate> = {}
+): 'in_progress' | 'naitei' | 'jitai' => {
+  const st = cleanLegacyStr(person.progressStatus);
+  if (['内定', '内定承諾', '入社手続き中', '入社済み'].includes(st)) {
+    return 'naitei';
+  }
+  if (
+    ['内定辞退', '選考中辞退', '不合格', '辞退・終了'].includes(st) ||
+    st.includes('辞退') ||
+    st.includes('不合格') ||
+    Boolean(extractDeclineReason(person))
+  ) {
+    return 'jitai';
+  }
+  return 'in_progress';
+};
+
+export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
+  const raw =
+    rawInput && typeof rawInput === 'object' ? (rawInput as Record<string, unknown>) : {};
+  const schoolName = cleanLegacyStr(raw.schoolName ?? raw.school);
+  const rawChannel = cleanLegacyStr(raw.channel);
+  const isSchool =
+    rawChannel === 'school' ||
+    Boolean(raw._isSchool) ||
+    Boolean(schoolName);
+  const channel: ChannelType | string = isSchool
+    ? 'school'
+    : rawChannel === 'company'
+    ? 'company'
+    : 'personal';
+
+  const name = cleanLegacyStr(raw.name ?? raw.fullName);
+  const fbName = cleanLegacyStr(raw.fbName ?? raw.facebookName);
+  const proposedCompany = cleanLegacyStr(raw.proposedCompany ?? raw.company);
+  let naiteiCompany = cleanLegacyStr(raw.naiteiCompany);
+  const progressStatus = cleanLegacyStr(raw.progressStatus ?? raw.status) || '新規相談';
+  const memo = cleanLegacyStr(raw.memo ?? raw.notes);
+  let declineReason = cleanLegacyStr(raw.declineReason);
+
+  if (
+    ['内定', '内定承諾', '入社手続き中', '入社済み'].includes(progressStatus) &&
+    !naiteiCompany &&
+    proposedCompany
+  ) {
+    naiteiCompany = proposedCompany;
+  }
+
+  if (
+    ['内定辞退', '選考中辞退', '不合格', '辞退・終了'].includes(progressStatus) &&
+    !declineReason &&
+    memo
+  ) {
+    declineReason = extractDeclineReason({ progressStatus, memo, declineReason: '' });
+  }
+
+  return {
+    ...(raw as Partial<Candidate>),
+    id:
+      cleanLegacyStr(raw.id) ||
+      `cand_mig_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    fbSenderId: cleanLegacyStr(raw.fbSenderId),
+    fbProfileUrl: cleanLegacyStr(raw.fbProfileUrl),
+    name,
+    fbName,
+    furigana: cleanLegacyStr(raw.furigana),
+    channel,
+    schoolName,
+    graduationDate: cleanLegacyStr(raw.graduationDate),
+    nationality: cleanLegacyStr(raw.nationality),
+    gender: cleanLegacyStr(raw.gender),
+    age: cleanLegacyStr(raw.age),
+    birthDate: cleanLegacyStr(raw.birthDate),
+    postalCode: cleanLegacyStr(raw.postalCode),
+    jlpt: cleanLegacyStr(raw.jlpt ?? raw.japaneseLevel) || '要確認',
+    desiredIndustry: cleanLegacyStr(raw.desiredIndustry ?? raw.desiredField),
+    desiredArea: cleanLegacyStr(raw.desiredArea),
+    conversionGoal: cleanLegacyStr(raw.conversionGoal ?? raw.goal),
+    visaStatus: cleanLegacyStr(raw.visaStatus ?? raw.visaType),
+    visaExpiry: cleanLegacyStr(raw.visaExpiry),
+    passedExam: cleanLegacyStr(raw.passedExam ?? raw.certifications),
+    japanExperience: cleanLegacyStr(raw.japanExperience),
+    salaryExpectation: cleanLegacyStr(raw.salaryExpectation),
+    negotiationLog: cleanLegacyStr(raw.negotiationLog ?? raw.rawLog),
+    startDate: cleanLegacyStr(raw.startDate),
+    phone: cleanLegacyStr(raw.phone),
+    email: cleanLegacyStr(raw.email),
+    address: cleanLegacyStr(raw.address),
+    progressStatus,
+    proposedCompany,
+    naiteiCompany,
+    expectedJoinDate: cleanLegacyStr(raw.expectedJoinDate),
+    visaSubmissionDeadline: cleanLegacyStr(raw.visaSubmissionDeadline),
+    mendanDate: cleanLegacyStr(raw.mendanDate),
+    interviewDate: cleanLegacyStr(raw.interviewDate),
+    lastContactDate: cleanLegacyStr(raw.lastContactDate),
+    declineReason,
+    memo,
+    googleCalendarEventId: cleanLegacyStr(raw.googleCalendarEventId),
+    googleCalendarEventLink: cleanLegacyStr(raw.googleCalendarEventLink),
+    savedRirekisho: sanitizeSavedRirekishoRecord(raw.savedRirekisho, {
+      name,
+      furigana: cleanLegacyStr(raw.furigana),
+      birthDate: cleanLegacyStr(raw.birthDate),
+      age: cleanLegacyStr(raw.age),
+      gender: cleanLegacyStr(raw.gender),
+      nationality: cleanLegacyStr(raw.nationality),
+      visaStatus: cleanLegacyStr(raw.visaStatus ?? raw.visaType),
+      visaExpiry: cleanLegacyStr(raw.visaExpiry),
+      phone: cleanLegacyStr(raw.phone),
+      email: cleanLegacyStr(raw.email),
+      address: cleanLegacyStr(raw.address),
+      postalCode: cleanLegacyStr(raw.postalCode),
+    }),
+    _isSchool: isSchool,
+  };
+};
+
+export const parseBackupCsvToCandidates = (csvText: string): Candidate[] => {
+  const cleanText = String(csvText || '').replace(/^\uFEFF/, '');
+  if (!cleanText.trim()) return [];
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < cleanText.length; i++) {
+    const ch = cleanText[i];
+    const next = cleanText[i + 1];
+    if (inQuotes) {
+      if (ch === '"' && next === '"') {
+        field += '"';
+        i += 1;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+    } else if (ch === '\r' && next === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+      i += 1;
+    } else if (ch === '\n' || ch === '\r') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else {
+      field += ch;
+    }
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  if (rows.length < 2) return [];
+
+  const headerMap: Record<string, string> = {
+    id: 'id',
+    name: 'name',
+    fullname: 'name',
+    氏名: 'name',
+    họtên: 'name',
+    fbname: 'fbName',
+    fb名: 'fbName',
+    fbアカウント名: 'fbName',
+    fbprofileurl: 'fbProfileUrl',
+    fbsenderid: 'fbSenderId',
+    channel: 'channel',
+    チャネル: 'channel',
+    schoolname: 'schoolName',
+    学校名: 'schoolName',
+    graduationdate: 'graduationDate',
+    nationality: 'nationality',
+    国籍: 'nationality',
+    quốctịch: 'nationality',
+    gender: 'gender',
+    性別: 'gender',
+    age: 'age',
+    年齢: 'age',
+    birthdate: 'birthDate',
+    生年月日: 'birthDate',
+    jlpt: 'jlpt',
+    日本語: 'jlpt',
+    日本語レベル: 'jlpt',
+    desiredindustry: 'desiredIndustry',
+    希望分野: 'desiredIndustry',
+    ngànhnghề: 'desiredIndustry',
+    desiredarea: 'desiredArea',
+    希望勤務エリア: 'desiredArea',
+    希望勤務地: 'desiredArea',
+    visastatus: 'visaStatus',
+    在留資格: 'visaStatus',
+    visaexpiry: 'visaExpiry',
+    在留期限: 'visaExpiry',
+    passedexam: 'passedExam',
+    合格済み試験: 'passedExam',
+    japanexperience: 'japanExperience',
+    conversiongoal: 'conversionGoal',
+    salaryexpectation: 'salaryExpectation',
+    negotiationlog: 'negotiationLog',
+    startdate: 'startDate',
+    phone: 'phone',
+    電話番号: 'phone',
+    email: 'email',
+    address: 'address',
+    progressstatus: 'progressStatus',
+    進捗ステータス: 'progressStatus',
+    ステータス: 'progressStatus',
+    trạngthái: 'progressStatus',
+    proposedcompany: 'proposedCompany',
+    提案先企業: 'proposedCompany',
+    côngtyđềxuất: 'proposedCompany',
+    naiteicompany: 'naiteiCompany',
+    内定先企業: 'naiteiCompany',
+    expectedjoindate: 'expectedJoinDate',
+    入社予定日: 'expectedJoinDate',
+    visasubmissiondeadline: 'visaSubmissionDeadline',
+    ビザ書類期限: 'visaSubmissionDeadline',
+    mendandate: 'mendanDate',
+    面談日: 'mendanDate',
+    interviewdate: 'interviewDate',
+    面接日: 'interviewDate',
+    lastcontactdate: 'lastContactDate',
+    最終連絡日: 'lastContactDate',
+    declinereason: 'declineReason',
+    辞退理由: 'declineReason',
+    memo: 'memo',
+    メモ: 'memo',
+    ghichú: 'memo',
+  };
+
+  const headers = rows[0].map((h) => {
+    const norm = String(h || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_\-\/()（）]+/g, '');
+    return headerMap[norm] || String(h || '').trim();
+  });
+
+  return rows
+    .slice(1)
+    .filter((r) => r.some((cell) => String(cell || '').trim().length > 0))
+    .map((r, idx) => {
+      const obj: Record<string, string> = {};
+      headers.forEach((key, colIdx) => {
+        if (key) {
+          obj[key] = cleanLegacyStr(r[colIdx]);
+        }
+      });
+      if (!obj.id) {
+        obj.id = `cand_csv_${Date.now()}_${idx}`;
+      }
+      return migrateCandidateRecord(obj);
+    });
+};
+
 export const isActualProposedRecord = (person: Partial<Candidate> = {}): boolean => {
   const comp = getEffectiveProposedCompany(person);
   if (comp) return true;
-  const st = String(person.progressStatus || '').trim();
-  return [
-    '企業提案中',
-    '1次面接予定',
-    '2次面接予定',
-    '面接調整中',
-    '内定',
-    '入社手続き中',
-  ].includes(st);
+  if (cleanLegacyStr(person.naiteiCompany)) return true;
+  const st = cleanLegacyStr(person.progressStatus);
+  if (
+    [
+      '企業提案中',
+      '1次面接予定',
+      '2次面接予定',
+      '面接調整中',
+      '結果待ち',
+      '内定',
+      '内定承諾',
+      '入社手続き中',
+      '入社済み',
+      '内定辞退',
+      '選考中辞退',
+      '不合格',
+    ].includes(st)
+  ) {
+    return true;
+  }
+  if (st === '辞退・終了' && Boolean(extractDeclineReason(person))) {
+    return true;
+  }
+  return false;
 };
 
 export const extractDeclineReason = (person: Partial<Candidate> = {}): string => {
@@ -338,7 +705,10 @@ export const extractDeclineReason = (person: Partial<Candidate> = {}): string =>
   return st.includes('辞退') ? 'ステータス：辞退・終了（詳細メモ未記入）' : '';
 };
 
-export const getUrgentFollowUpReason = (person: Partial<Candidate> = {}): string => {
+export const getUrgentFollowUpReason = (
+  person: Partial<Candidate> = {},
+  lang: 'vi' | 'jp' = 'vi'
+): string => {
   const now = new Date();
   const todayIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
     now.getDate()
@@ -349,24 +719,30 @@ export const getUrgentFollowUpReason = (person: Partial<Candidate> = {}): string
 
   const st = String(person.progressStatus || '').trim();
   if (['保留・連絡待ち', '面談調整中', '面接調整中', 'ヒアリング中'].includes(st)) {
-    return `ステータス：${st}`;
+    return lang === 'jp' ? `ステータス：${st}` : `Trạng thái: ${st}`;
   }
   const mendan = extractNormalizedMendanInfo(person);
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   if (mendan.timestamp > 0) {
     const diffDays = Math.round((mendan.timestamp - todayStart) / 86400000);
     if (diffDays >= 0 && diffDays <= 3) {
-      return `面談/PV直前（${mendan.dateLabel}）`;
+      return lang === 'jp'
+        ? `面談/PV直前（${mendan.dateLabel}）`
+        : `Sắp Mendan/PV (${mendan.dateLabel})`;
     }
     if (diffDays < 0 && !['内定', '入社手続き中', '辞退・終了'].includes(st)) {
-      return `予定経過・要状況確認（${mendan.dateLabel}）`;
+      return lang === 'jp'
+        ? `予定経過・要状況確認（${mendan.dateLabel}）`
+        : `Đã qua lịch hẹn (${mendan.dateLabel})`;
     }
   }
   if (!['内定', '入社手続き中', '辞退・終了'].includes(st)) {
     const lastTs = parseFlexibleDateToTimestamp(person.lastContactDate, 2026);
-    if (!lastTs) return '最終連絡日未記録';
+    if (!lastTs) return lang === 'jp' ? '最終連絡日未記録' : 'Chưa ghi ngày liên hệ cuối';
     const daysSince = Math.floor((todayStart - lastTs) / 86400000);
-    if (daysSince >= 7) return `${daysSince}日間連絡なし`;
+    if (daysSince >= 7) {
+      return lang === 'jp' ? `${daysSince}日間連絡なし` : `${daysSince} ngày chưa liên hệ`;
+    }
   }
   return '';
 };
@@ -580,16 +956,200 @@ const extractCanonicalIndustryKeys = (rawIndustry = ''): CanonicalIndustryKey[] 
 const TOKYO_23_WARDS_RX =
   /23区|新宿|渋谷|杉並|足立|世田谷|豊島|港|中央|千代田|品川|大田|中野|練馬|板橋|北|荒川|台東|墨田|江東|江戸川|葛飾|目黒|文京/;
 
+const CANONICAL_NAT_ALIASES: Array<{ canonical: string; rx: RegExp; ngLabel: string }> = [
+  { canonical: 'ベトナム', rx: /ベトナム|viet\s*nam|việt\s*nam|\bvn\b/i, ngLabel: 'ベトナム人NG' },
+  { canonical: 'ネパール', rx: /ネパール|nepal/i, ngLabel: 'ネパール人NG' },
+  { canonical: 'インドネシア', rx: /インドネシア|indonesia/i, ngLabel: 'インドネシア人NG' },
+  { canonical: 'ミャンマー', rx: /ミャンマー|myanmar|burma/i, ngLabel: 'ミャンマー人NG' },
+  { canonical: 'フィリピン', rx: /フィリピン|philippines?|filipino/i, ngLabel: 'フィリピン人NG' },
+  { canonical: 'カンボジア', rx: /カンボジア|cambodia|campuchia/i, ngLabel: 'カンボジア人NG' },
+  { canonical: '中国', rx: /中国|china|trung\s*quốc/i, ngLabel: '中国人NG' },
+  { canonical: 'バングラデシュ', rx: /バングラ|bangladesh/i, ngLabel: 'バングラデシュ人NG' },
+  { canonical: 'スリランカ', rx: /スリランカ|sri\s*lanka/i, ngLabel: 'スリランカ人NG' },
+  { canonical: 'タイ', rx: /タイ人|タイ国籍|thailand|thái\s*lan/i, ngLabel: 'タイ人NG' },
+  { canonical: 'インド', rx: /インド人|インド国籍|\bindia\b|ấn\s*độ/i, ngLabel: 'インド人NG' },
+  { canonical: 'モンゴル', rx: /モンゴル|mongolia|mông\s*cổ/i, ngLabel: 'モンゴル人NG' },
+  { canonical: 'ウズベキスタン', rx: /ウズベキスタン|uzbekistan/i, ngLabel: 'ウズベキスタン人NG' },
+];
+
+export const normalizeCanonicalNationality = (raw = ''): string => {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  for (const entry of CANONICAL_NAT_ALIASES) {
+    if (entry.rx.test(s)) return entry.canonical;
+  }
+  return s.replace(/人$/, '').trim();
+};
+
+export const normalizeCanonicalGender = (raw = ''): '男性' | '女性' | '' => {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (/女|女性|female|\bnữ\b|\bnu\b/i.test(s)) return '女性';
+  if (/男|男性|male|\bnam\b/i.test(s)) return '男性';
+  return '';
+};
+
+export const isCandidateOverseas = (cand: Partial<Candidate> = {}): boolean => {
+  const visa = String(cand.visaStatus || '').trim();
+  const addr = String(cand.address || '').trim();
+  const notes = `${cand.conversionGoal || ''} ${cand.memo || ''} ${cand.negotiationLog || ''}`;
+  const hasDomesticJapanVisa =
+    /特定技能|留学|技能実習|技術|人文|国際|定住|永住|家族滞在|特定活動|配偶者/.test(visa);
+  const hasDomesticJapanAddr =
+    /東京都|北海道|大阪府|京都府|.{2,3}県|区|市/.test(addr);
+  if (hasDomesticJapanVisa || hasDomesticJapanAddr) return false;
+  if (/海外|国外|ベトナム在住|ミャンマー在住|ネパール在住|インドネシア在住|chưa\s*sang\s*nhật|đang\s*ở\s*(?:việt\s*nam|vn|nước\s*ngoài)|từ\s*việt\s*nam/i.test(`${visa} ${addr} ${notes}`)) {
+    return true;
+  }
+  return false;
+};
+
+export const extractNormalizedKyujinConditions = (params: {
+  text?: string;
+  minJlpt?: string;
+  employmentType?: string;
+  existingExcludedNationalities?: string[];
+  existingExcludedGenders?: string[];
+  existingRequiresInJapan?: boolean;
+  existingRequiresTokutei?: boolean;
+  existingRequiredConditions?: string[];
+  existingNgConditions?: string[];
+}) => {
+  const text = String(params.text || '');
+  const excludedNats = new Set<string>(
+    (params.existingExcludedNationalities || [])
+      .map((n) => normalizeCanonicalNationality(n))
+      .filter(Boolean)
+  );
+  const excludedGenders = new Set<string>(
+    (params.existingExcludedGenders || [])
+      .map((g) => normalizeCanonicalGender(g))
+      .filter(Boolean)
+  );
+  const ngLabels = new Set<string>(
+    (params.existingNgConditions || []).map((s) => String(s || '').trim()).filter(Boolean)
+  );
+  const reqLabels = new Set<string>(
+    (params.existingRequiredConditions || []).map((s) => String(s || '').trim()).filter(Boolean)
+  );
+
+  // Detect NG nationalities in Japanese / Vietnamese text
+  const natNgChunks: string[] = [];
+  const ngClauseRx =
+    /([^\n。、()（）]{1,40})\s*(?:人|国籍)?\s*(?:NG|不可|採用不可|応募不可|対象外|受け入れ不可)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = ngClauseRx.exec(text)) !== null) {
+    natNgChunks.push(m[1]);
+  }
+  const reverseNgRx =
+    /(?:NG|不可|không\s*nhận|từ\s*chối|không\s*tuyển)\s*[：:\s]*([^\n。()（）]{1,50})/gi;
+  while ((m = reverseNgRx.exec(text)) !== null) {
+    natNgChunks.push(m[1]);
+  }
+
+  for (const chunk of natNgChunks) {
+    for (const entry of CANONICAL_NAT_ALIASES) {
+      if (entry.rx.test(chunk)) {
+        excludedNats.add(entry.canonical);
+        ngLabels.add(entry.ngLabel);
+      }
+    }
+  }
+  // Direct individual check e.g. "ネパール人NG" / "ベトナムNG"
+  for (const entry of CANONICAL_NAT_ALIASES) {
+    const directRx = new RegExp(
+      `(?:${entry.rx.source})[人国籍]?\\s*(?:NG|不可|対象外)`,
+      'i'
+    );
+    if (directRx.test(text)) {
+      excludedNats.add(entry.canonical);
+      ngLabels.add(entry.ngLabel);
+    }
+    if (excludedNats.has(entry.canonical)) {
+      ngLabels.add(entry.ngLabel);
+    }
+  }
+
+  // Detect NG genders
+  if (
+    /男性\s*(?:NG|不可|対象外)|男子\s*(?:NG|不可)|女性(?:のみ|限定|専用)|nam\s*NG|không\s*nhận\s*nam|chỉ\s*tuyển\s*nữ/i.test(
+      text
+    )
+  ) {
+    excludedGenders.add('男性');
+    ngLabels.add('男性NG');
+  }
+  if (
+    /女性\s*(?:NG|不可|対象外)|女子\s*(?:NG|不可)|男性(?:のみ|限定|専用)|nữ\s*NG|không\s*nhận\s*nữ|chỉ\s*tuyển\s*nam/i.test(
+      text
+    )
+  ) {
+    excludedGenders.add('女性');
+    ngLabels.add('女性NG');
+  }
+
+  // Detect Domestic / Overseas NG
+  const requiresInJapan =
+    Boolean(params.existingRequiresInJapan) ||
+    /国内在住|日本在住|国内限定|在日限定|日本国内のみ|海外\s*(?:NG|不可)|国外\s*(?:NG|不可)|chỉ\s*tuyển\s*(?:tại|trong\s*nước)\s*Nhật|ở\s*trong\s*nước\s*Nhật/i.test(
+      text
+    );
+  if (requiresInJapan) {
+    reqLabels.add('日本国内在住');
+    if (/海外\s*(?:NG|不可)|国外\s*(?:NG|不可)/i.test(text)) {
+      ngLabels.add('海外NG');
+    }
+  }
+
+  // Detect extra general NG tags (tattoo, smoking, age, driver license, etc.)
+  if (/タトゥー\s*(?:NG|不可)|刺青\s*(?:NG|不可)|hình\s*xăm\s*NG/i.test(text)) {
+    ngLabels.add('タトゥーNG');
+  }
+
+  // Detect Tokutei requirement
+  const empType = String(params.employmentType || '');
+  const isBaitoOnly = /baito|アルバイト|パート/i.test(empType) && !/特定技能|tokutei/i.test(text);
+  const requiresTokutei =
+    Boolean(params.existingRequiresTokutei) ||
+    (!isBaitoOnly &&
+      (/特定技能|tokutei/i.test(empType) || /特定技能|技能測定試験|評価試験合格/.test(text)));
+  if (requiresTokutei) {
+    reqLabels.add('特定技能');
+  }
+
+  // Normalize JLPT requirement into requiredConditions
+  const jlptStr = String(params.minJlpt || '').trim();
+  if (/^N[1-5]$/i.test(jlptStr)) {
+    reqLabels.add(`JLPT ${jlptStr.toUpperCase()}以上`);
+  } else if (jlptStr === 'JFT') {
+    reqLabels.add('JFT-Basic合格');
+  } else if (jlptStr === '日常会話') {
+    reqLabels.add('日常会話レベル');
+  }
+
+  return {
+    excludedNationalities: Array.from(excludedNats),
+    excludedGenders: Array.from(excludedGenders),
+    requiresInJapan,
+    requiresTokutei,
+    requiredConditions: Array.from(reqLabels),
+    ngConditions: Array.from(ngLabels),
+  };
+};
+
 export const evaluateCandidateKyujinMatches = (
   cand: Partial<Candidate> = {},
-  kyujinsList: KyujinCompany[] = []
+  kyujinsList: KyujinCompany[] = [],
+  lang: 'vi' | 'jp' = 'vi'
 ): KyujinMatchEvaluation => {
   const candInd = String(cand.desiredIndustry || '').trim();
   const candArea = String(cand.desiredArea || '').trim();
   const candGoal = String(cand.conversionGoal || '').trim();
   const candExp = String(cand.japanExperience || '').trim();
   const candPassedExam = String(cand.passedExam || '').trim();
-  const candNat = String(cand.nationality || '').trim();
+  const candNat = normalizeCanonicalNationality(cand.nationality || '');
+  const candGender = normalizeCanonicalGender(cand.gender || '');
+  const candOverseas = isCandidateOverseas(cand);
   const candSalaryExp = String(cand.salaryExpectation || '').trim();
   const candJlptScore = jlptRank(cand.jlpt);
 
@@ -620,14 +1180,46 @@ export const evaluateCandidateKyujinMatches = (
 
   const results: KyujinMatchResult[] = [];
   (kyujinsList || []).forEach((comp) => {
+    const compConds = extractNormalizedKyujinConditions({
+      text: `${comp.companyName || ''}`,
+      employmentType: comp.employmentType,
+      existingExcludedNationalities: comp.excludedNationalities,
+      existingExcludedGenders: comp.excludedGenders,
+      existingRequiresInJapan: comp.requiresInJapan,
+      existingRequiresTokutei: comp.requiresTokutei,
+      existingRequiredConditions: comp.requiredConditions,
+      existingNgConditions: comp.ngConditions,
+    });
+
     (comp.areaBreakdown || []).forEach((sl) => {
       if (sl.recruitmentStatus === '募集終了') return;
 
-      if (
-        candNat &&
-        Array.isArray(comp.excludedNationalities) &&
-        comp.excludedNationalities.includes(candNat)
-      ) {
+      const slotConds = extractNormalizedKyujinConditions({
+        text: `${sl.jobDescription || ''} ${sl.experienceDetail || ''} ${sl.careQualification || ''} ${sl.facilityType || ''}`,
+        minJlpt: sl.minJlpt,
+        employmentType: sl.employmentType || comp.employmentType,
+        existingExcludedNationalities: [
+          ...compConds.excludedNationalities,
+          ...(sl.excludedNationalities || []),
+        ],
+        existingExcludedGenders: [
+          ...compConds.excludedGenders,
+          ...(sl.excludedGenders || []),
+        ],
+        existingRequiresInJapan: Boolean(compConds.requiresInJapan || sl.requiresInJapan),
+        existingRequiresTokutei: Boolean(compConds.requiresTokutei || sl.requiresTokutei),
+        existingRequiredConditions: sl.requiredConditions,
+        existingNgConditions: [...compConds.ngConditions, ...(sl.ngConditions || [])],
+      });
+
+      // Strict NG filtering: hide any job whose NG exclusions match the candidate
+      if (candNat && slotConds.excludedNationalities.includes(candNat)) {
+        return;
+      }
+      if (candGender && slotConds.excludedGenders.includes(candGender)) {
+        return;
+      }
+      if (slotConds.requiresInJapan && candOverseas) {
         return;
       }
 
@@ -669,7 +1261,11 @@ export const evaluateCandidateKyujinMatches = (
 
       if (industryMatched) {
         rawScore += 40;
-        reasons.push(`✅ Đúng ngành ${slotInd || candInd}`);
+        reasons.push(
+          lang === 'jp'
+            ? `✅ 希望分野一致 (${slotInd || candInd})`
+            : `✅ Đúng ngành ${slotInd || candInd}`
+        );
       } else {
         rawScore += 15;
       }
@@ -677,7 +1273,7 @@ export const evaluateCandidateKyujinMatches = (
       // Employment Type bonus
       if (mentionsBaito && slotIsBaito) {
         rawScore += 5;
-        reasons.push('✅ Đúng hình thức Baito');
+        reasons.push(lang === 'jp' ? '✅ バイト希望一致' : '✅ Đúng hình thức Baito');
       } else if (!slotIsBaito && mentionsTokuteiOrFullTime) {
         rawScore += 5;
       }
@@ -702,7 +1298,11 @@ export const evaluateCandidateKyujinMatches = (
           ) {
             rawScore += 4;
           }
-          reasons.push(`✅ Khớp ${matchedPref.shortLabel}`);
+          reasons.push(
+            lang === 'jp'
+              ? `✅ エリア一致 (${matchedPref.shortLabel})`
+              : `✅ Khớp ${matchedPref.shortLabel}`
+          );
         } else if (candRegions.length > 0 && slotAreaPrefs.length > 0) {
           const matchedViaRegion = slotAreaPrefs.find((sp) =>
             candRegions.some((reg) => reg.prefectures.includes(sp.shortLabel))
@@ -710,7 +1310,11 @@ export const evaluateCandidateKyujinMatches = (
           if (matchedViaRegion) {
             areaMatched = true;
             rawScore += 22;
-            reasons.push(`✅ Khớp ${matchedViaRegion.shortLabel}`);
+            reasons.push(
+              lang === 'jp'
+                ? `✅ エリア一致 (${matchedViaRegion.shortLabel})`
+                : `✅ Khớp ${matchedViaRegion.shortLabel}`
+            );
           }
         } else {
           // Only fallback to explicit ward/city names >= 2 chars when no prefecture tokens collide
@@ -724,7 +1328,7 @@ export const evaluateCandidateKyujinMatches = (
           if (hit) {
             areaMatched = true;
             rawScore += 22;
-            reasons.push(`✅ Khớp ${hit}`);
+            reasons.push(lang === 'jp' ? `✅ エリア一致 (${hit})` : `✅ Khớp ${hit}`);
           }
         }
       } else if (!hasCandidateArea) {
@@ -736,12 +1340,14 @@ export const evaluateCandidateKyujinMatches = (
       const reqJlptScore = jlptRank(reqJlpt);
       if (reqJlpt === '不問') {
         rawScore += 12;
-        reasons.push('✅ Không yêu cầu JLPT');
+        reasons.push(lang === 'jp' ? '✅ 日本語不問' : '✅ Không yêu cầu JLPT');
       } else if (reqJlpt === '要確認' || reqJlptScore < 0) {
         rawScore += 5;
       } else if (candJlptScore > 0 && candJlptScore >= reqJlptScore) {
         rawScore += 15;
-        reasons.push(`✅ Đạt ${cand.jlpt}`);
+        reasons.push(
+          lang === 'jp' ? `✅ 条件達成 (${cand.jlpt})` : `✅ Đạt ${cand.jlpt}`
+        );
       } else if (candJlptScore > 0 && candJlptScore < reqJlptScore) {
         rawScore -= 20;
       }
@@ -751,11 +1357,11 @@ export const evaluateCandidateKyujinMatches = (
       const hasCandExp = Boolean(candExp || candPassedExam);
       if (/未経験|không yêu cầu/i.test(expReq)) {
         rawScore += 10;
-        reasons.push('✅ Không yêu cầu kinh nghiệm');
+        reasons.push(lang === 'jp' ? '✅ 未経験OK' : '✅ Không yêu cầu kinh nghiệm');
       } else if (/経験者|có kinh nghiệm/i.test(expReq)) {
         if (hasCandExp) {
           rawScore += 10;
-          reasons.push('✅ Đáp ứng kinh nghiệm');
+          reasons.push(lang === 'jp' ? '✅ 経験条件一致' : '✅ Đáp ứng kinh nghiệm');
         } else {
           rawScore -= 10;
         }
@@ -775,7 +1381,7 @@ export const evaluateCandidateKyujinMatches = (
         if (slotHourlyM && expHourlyM) {
           if (Number(slotHourlyM[1]) >= Number(expHourlyM[1])) {
             rawScore += 10;
-            reasons.push('✅ Đạt mức lương kỳ vọng');
+            reasons.push(lang === 'jp' ? '✅ 希望時給以上' : '✅ Đạt mức lương kỳ vọng');
             salaryFitAdded = true;
           }
         }
@@ -790,7 +1396,7 @@ export const evaluateCandidateKyujinMatches = (
           const desiredYen = Number(expSalaryM[1]) * 10000;
           if (offeredYen >= desiredYen) {
             rawScore += 10;
-            reasons.push('✅ Đạt mức lương kỳ vọng');
+            reasons.push(lang === 'jp' ? '✅ 希望給与以上' : '✅ Đạt mức lương kỳ vọng');
             salaryFitAdded = true;
           }
         }
@@ -802,10 +1408,10 @@ export const evaluateCandidateKyujinMatches = (
           /自社寮|借上げ|借り上げ|寮・社宅あり|寮あり/.test(sl.housingSupport || '')
         ) {
           rawScore += 8;
-          reasons.push('✅ Có hỗ trợ nhà ở / KTX');
+          reasons.push(lang === 'jp' ? '✅ 寮・社宅あり' : '✅ Có hỗ trợ nhà ở / KTX');
         } else if (sl.bonus === '賞与あり') {
           rawScore += 5;
-          reasons.push('🎁 Có thưởng');
+          reasons.push(lang === 'jp' ? '🎁 賞与あり' : '🎁 Có thưởng');
         } else if (`${sl.salary || ''} ${sl.hourlyWage || ''}`.trim()) {
           rawScore += 3;
         }
@@ -831,22 +1437,53 @@ export const evaluateCandidateKyujinMatches = (
     return b.score - a.score;
   });
 
+  // Deduplicate jobs sharing the same company + location + salary (keep highest-scoring match)
+  const seenJobSignatures = new Set<string>();
+  const dedupedResults: KyujinMatchResult[] = [];
+  for (const item of results) {
+    const compKey = String(item.company.companyName || '').trim().toLowerCase();
+    const areaKey = String(formatPublicArea(item.slot.area) || item.slot.area || '')
+      .replace(/\s+/g, '')
+      .toLowerCase();
+    const salaryMeta = getKyujinSlotSalaryDisplayMeta(
+      item.slot,
+      item.slot.employmentType || item.company.employmentType || ''
+    );
+    const salaryKey = String(
+      salaryMeta.displayValue || item.slot.salary || item.slot.hourlyWage || ''
+    )
+      .replace(/[,.\s]/g, '')
+      .toLowerCase();
+    const dedupeSig = `${compKey}::${areaKey}::${salaryKey}`;
+    if (seenJobSignatures.has(dedupeSig)) continue;
+    seenJobSignatures.add(dedupeSig);
+    dedupedResults.push(item);
+  }
+
   const hasExactIndustryAndAreaMatch =
-    hasCandidateArea && results.some((r) => Boolean(r.areaMatched));
+    hasCandidateArea && dedupedResults.some((r) => Boolean(r.areaMatched));
 
   let noticeMessage = '';
   if (hasCandidateIndustry) {
-    if (results.length === 0) {
-      noticeMessage = `Chưa có đơn đúng ngành ${candInd}${
-        hasCandidateArea ? ` tại ${candArea}` : ''
-      } trong kho Tin tuyển dụng.`;
+    if (dedupedResults.length === 0) {
+      noticeMessage =
+        lang === 'jp'
+          ? `希望分野「${candInd}」${
+              hasCandidateArea ? `（${candArea}）` : ''
+            }に該当する求人が現在ありません。`
+          : `Chưa có đơn đúng ngành ${candInd}${
+              hasCandidateArea ? ` tại ${candArea}` : ''
+            } trong kho Tin tuyển dụng.`;
     } else if (hasCandidateArea && !hasExactIndustryAndAreaMatch) {
-      noticeMessage = `Chưa có đơn đúng ngành ${candInd} tại ${candArea} — hiển thị ${results.length} đơn cùng ngành ở khu vực khác để tham khảo.`;
+      noticeMessage =
+        lang === 'jp'
+          ? `${candArea}の「${candInd}」求人がないため、他エリアの同分野求人（${dedupedResults.length}件）を表示しています。`
+          : `Chưa có đơn đúng ngành ${candInd} tại ${candArea} — hiển thị ${dedupedResults.length} đơn cùng ngành ở khu vực khác để tham khảo.`;
     }
   }
 
   return {
-    matches: results.slice(0, 5),
+    matches: dedupedResults.slice(0, 8),
     hasCandidateIndustry,
     hasCandidateArea,
     hasExactIndustryAndAreaMatch,
@@ -1255,6 +1892,31 @@ export const normalizeKyujinItem = (
         ? 'Không yêu cầu kinh nghiệm (未経験OK)'
         : '');
 
+    const slotMinJlpt = String(sl.minJlpt || comp.minJlpt || '要確認').trim();
+    const conds = extractNormalizedKyujinConditions({
+      text: `${cleanDesc} ${sl.experienceDetail || comp.experienceDetail || ''} ${sl.careQualification || comp.careQualification || ''}`,
+      minJlpt: slotMinJlpt,
+      employmentType: slEmploymentType,
+      existingExcludedNationalities: [
+        ...(comp.excludedNationalities || []),
+        ...(sl.excludedNationalities || []),
+      ],
+      existingExcludedGenders: [
+        ...(comp.excludedGenders || []),
+        ...(sl.excludedGenders || []),
+      ],
+      existingRequiresInJapan: Boolean(sl.requiresInJapan ?? comp.requiresInJapan),
+      existingRequiresTokutei: Boolean(sl.requiresTokutei ?? comp.requiresTokutei),
+      existingRequiredConditions: [
+        ...(comp.requiredConditions || []),
+        ...(sl.requiredConditions || []),
+      ],
+      existingNgConditions: [
+        ...(comp.ngConditions || []),
+        ...(sl.ngConditions || []),
+      ],
+    });
+
     return {
       ...sl,
       slotId: sl.slotId || `${comp.id || 'kj'}_slot_${idx + 1}`,
@@ -1272,7 +1934,7 @@ export const normalizeKyujinItem = (
       shiftsPerWeek: String(sl.shiftsPerWeek || comp.shiftsPerWeek || '').trim(),
       bonus: bonusNorm.bonus,
       bonusDetail: bonusNorm.bonusDetail,
-      minJlpt: String(sl.minJlpt || comp.minJlpt || '要確認').trim(),
+      minJlpt: slotMinJlpt,
       housingSupport: normalizeHousingDisplay(sl.housingSupport || comp.housingSupport),
       recruitmentStatus:
         sl.recruitmentStatus === '募集終了' || comp.recruitmentStatus === '募集終了'
@@ -1283,6 +1945,12 @@ export const normalizeKyujinItem = (
       experienceRequirement: expReq,
       experienceDetail: String(sl.experienceDetail || comp.experienceDetail || '').trim(),
       jobDescription: cleanDesc,
+      excludedNationalities: conds.excludedNationalities,
+      excludedGenders: conds.excludedGenders,
+      requiresInJapan: conds.requiresInJapan,
+      requiresTokutei: conds.requiresTokutei,
+      requiredConditions: conds.requiredConditions,
+      ngConditions: conds.ngConditions,
       ...(sl.salaryManuallyEdited ? { salaryManuallyEdited: true } : {}),
       ...(Array.isArray(sl.manualProtectedFields) && sl.manualProtectedFields.length > 0
         ? { manualProtectedFields: sl.manualProtectedFields }
@@ -1301,6 +1969,30 @@ export const normalizeKyujinItem = (
     normalizedSlots[0]?.employmentType ||
     comp.employmentType ||
     'Tokutei Ginou (特定技能)';
+  const mergedExcludedNationalities = Array.from(
+    new Set([
+      ...(comp.excludedNationalities || []).map((n) => normalizeCanonicalNationality(n)).filter(Boolean),
+      ...normalizedSlots.flatMap((s) => s.excludedNationalities || []),
+    ])
+  );
+  const mergedExcludedGenders = Array.from(
+    new Set([
+      ...(comp.excludedGenders || []).map((g) => normalizeCanonicalGender(g)).filter(Boolean),
+      ...normalizedSlots.flatMap((s) => s.excludedGenders || []),
+    ])
+  );
+  const mergedRequiredConditions = Array.from(
+    new Set([
+      ...(comp.requiredConditions || []),
+      ...normalizedSlots.flatMap((s) => s.requiredConditions || []),
+    ])
+  );
+  const mergedNgConditions = Array.from(
+    new Set([
+      ...(comp.ngConditions || []),
+      ...normalizedSlots.flatMap((s) => s.ngConditions || []),
+    ])
+  );
 
   return {
     id: comp.id || `kj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -1311,7 +2003,12 @@ export const normalizeKyujinItem = (
     industry: primaryIndustry,
     employmentType: primaryEmpType,
     recruitmentStatus: hasAnyOpen ? '募集中' : '募集終了',
-    excludedNationalities: comp.excludedNationalities,
+    excludedNationalities: mergedExcludedNationalities,
+    excludedGenders: mergedExcludedGenders,
+    requiresInJapan: Boolean(comp.requiresInJapan || normalizedSlots.some((s) => s.requiresInJapan)),
+    requiresTokutei: Boolean(comp.requiresTokutei || normalizedSlots.some((s) => s.requiresTokutei)),
+    requiredConditions: mergedRequiredConditions,
+    ngConditions: mergedNgConditions,
     areaBreakdown: normalizedSlots,
   };
 };
@@ -1552,12 +2249,24 @@ const parseExcelBlockToKyujin = (
     ? 'Không yêu cầu kinh nghiệm (未経験OK)'
     : '';
 
+  const conds = extractNormalizedKyujinConditions({
+    text: fullText,
+    minJlpt,
+    employmentType: finalEmploymentType,
+  });
+
   return {
     companyName: finalCompany,
     sector,
     industry,
     employmentType: finalEmploymentType,
     recruitmentStatus: '募集中',
+    excludedNationalities: conds.excludedNationalities,
+    excludedGenders: conds.excludedGenders,
+    requiresInJapan: conds.requiresInJapan,
+    requiresTokutei: conds.requiresTokutei,
+    requiredConditions: conds.requiredConditions,
+    ngConditions: conds.ngConditions,
     slot: {
       slotId: `slot_xl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       sector,
@@ -1577,6 +2286,12 @@ const parseExcelBlockToKyujin = (
       careQualification: '',
       experienceRequirement: expReq,
       jobDescription: sanitizeJobDescriptionForCandidate(jobDescription),
+      excludedNationalities: conds.excludedNationalities,
+      excludedGenders: conds.excludedGenders,
+      requiresInJapan: conds.requiresInJapan,
+      requiresTokutei: conds.requiresTokutei,
+      requiredConditions: conds.requiredConditions,
+      ngConditions: conds.ngConditions,
     },
   };
 };
@@ -1722,6 +2437,13 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
     }
     const inferredArea = areaM ? areaM[1].trim() : extractPreferredAreaFromChat(block) || 'Nhật Bản';
 
+    const resolvedMinJlpt = jlptM ? jlptM[1].toUpperCase() : '要確認';
+    const conds = extractNormalizedKyujinConditions({
+      text: block,
+      minJlpt: resolvedMinJlpt,
+      employmentType,
+    });
+
     return {
       companyName: compM ? compM[1].trim() : `${sourceTitle} #${idx + 1}`,
       sector,
@@ -1731,7 +2453,7 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
       area: inferredArea,
       salary: salaryInfo.salary,
       hourlyWage: salaryInfo.hourlyWage,
-      minJlpt: jlptM ? jlptM[1].toUpperCase() : '要確認',
+      minJlpt: resolvedMinJlpt,
       housingSupport: /自社寮/.test(block)
         ? '自社寮あり'
         : /借上げ|借り上げ/.test(block)
@@ -1746,6 +2468,12 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
         ? 'Yêu cầu có kinh nghiệm (経験者必須)'
         : '',
       jobDescription: block.slice(0, 600),
+      excludedNationalities: conds.excludedNationalities,
+      excludedGenders: conds.excludedGenders,
+      requiresInJapan: conds.requiresInJapan,
+      requiresTokutei: conds.requiresTokutei,
+      requiredConditions: conds.requiredConditions,
+      ngConditions: conds.ngConditions,
     };
   });
 };
@@ -2822,6 +3550,24 @@ export const buildRirekishoStandaloneHtml = (draft: RirekishoDraft): string => {
   }
   .box-title { font-weight: bold; margin-bottom: 4px; font-size: 9pt; }
   .pre { white-space: pre-wrap; line-height: 1.45; min-height: 44px; }
+  .photo-box {
+    width: 84px;
+    height: 112px;
+    border: 1px dashed #666;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 8.5pt;
+    color: #666;
+    overflow: hidden;
+    flex-shrink: 0;
+    background: #fafafa;
+  }
+  .photo-box img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
   @media print {
     body { padding: 0; }
     .no-print { display: none !important; }
@@ -2835,23 +3581,34 @@ export const buildRirekishoStandaloneHtml = (draft: RirekishoDraft): string => {
         <span class="title">履歴書</span>
         <span class="date">${escapeHtml(draft.dateStr)}</span>
       </div>
-      <table>
-        <tr>
-          <th style="width:22%">フリガナ</th>
-          <td>${escapeHtml(draft.furigana)}</td>
-        </tr>
-        <tr>
-          <th>氏名</th>
-          <td class="name-cell">${escapeHtml(draft.fullName)}</td>
-        </tr>
-        <tr>
-          <th>生年月日</th>
-          <td>${escapeHtml(draft.birthDate)}（満 ${escapeHtml(draft.age)} 歳） ／ 性別：${escapeHtml(
+      <div style="display:flex; gap:8px; align-items:stretch;">
+        <table style="flex:1;">
+          <tr>
+            <th style="width:26%">フリガナ</th>
+            <td>${escapeHtml(draft.furigana)}</td>
+          </tr>
+          <tr>
+            <th>氏名</th>
+            <td class="name-cell">${escapeHtml(draft.fullName)}</td>
+          </tr>
+          <tr>
+            <th>生年月日</th>
+            <td>${escapeHtml(draft.birthDate)}（満 ${escapeHtml(draft.age)} 歳） ／ 性別：${escapeHtml(
     draft.gender
   )}</td>
-        </tr>
+          </tr>
+        </table>
+        <div class="photo-box">
+          ${
+            draft.photoDataUrl && draft.photoDataUrl.startsWith('data:image/')
+              ? `<img src="${draft.photoDataUrl}" alt="証明写真" />`
+              : '証明写真'
+          }
+        </div>
+      </div>
+      <table>
         <tr>
-          <th>現住所</th>
+          <th style="width:22%">現住所</th>
           <td>〒${escapeHtml(draft.postalCode)}<br/>${escapeHtml(draft.address)}</td>
         </tr>
         <tr>
@@ -2949,4 +3706,54 @@ export const buildRirekishoStandaloneHtml = (draft: RirekishoDraft): string => {
   </div>
 </body>
 </html>`;
+};
+
+export const exportRirekishoToExcelFile = (draft: RirekishoDraft): string => {
+  const safeName = String(draft.fullName || '応募者')
+    .replace(/[\\/:*?"<>|\s]+/g, '_')
+    .trim();
+  const dateTag = new Date().toISOString().slice(0, 10);
+  const fileName = `履歴書_${safeName}_${dateTag}.xlsx`;
+
+  const aoa: Array<Array<string>> = [
+    ['履 歴 書', '', draft.dateStr || ''],
+    ['フリガナ', draft.furigana || '', ''],
+    ['氏名', draft.fullName || '', ''],
+    [
+      '生年月日 / 年齢 / 性別',
+      `${draft.birthDate || ''}（満 ${draft.age || ''} 歳）`,
+      draft.gender || '',
+    ],
+    ['郵便番号 / 現住所', `〒${draft.postalCode || ''}`, draft.address || ''],
+    ['電話番号 / Email', draft.phone || '', draft.email || ''],
+    ['国籍 / 在留期限 / 在留資格', draft.nationality || '', `${draft.visaExpiry || ''} / ${draft.visaStatus || ''}`],
+    [],
+    ['年', '月', '学 歴'],
+    ...(draft.educationRows || []).map((r) => [r.year || '', r.month || '', r.content || '']),
+    ['年', '月', '職 歴'],
+    ...(draft.workRows || []).map((r) => [r.year || '', r.month || '', r.content || '']),
+    [],
+    ['年', '月', '免許・資格'],
+    ...(draft.licenseRows || []).map((r) => [r.year || '', r.month || '', r.content || '']),
+    [],
+    ['話せる言語（母国語）', draft.nativeLanguage || '', ''],
+    ['使用可能言語', draft.availableLanguages || '', ''],
+    ['日本語能力CA評価（話す）', draft.caSpeaking || '', ''],
+    ['日本語能力CA評価（聞く）', draft.caListening || '', ''],
+    [],
+    ['志望動機', draft.motivation || '', ''],
+    ['自己PR', draft.selfPr || '', ''],
+    ['本人希望記入欄', draft.personalRequests || '', ''],
+    [],
+    ['アレルギー', draft.allergy || '', ''],
+    ['扶養家族数(配偶者を除く)', draft.dependentsCount || '', ''],
+    ['配偶者 / 配偶者の扶養義務', `${draft.spouse || ''} / ${draft.spouseSupport || ''}`, ''],
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{ wch: 24 }, { wch: 24 }, { wch: 52 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '履歴書');
+  XLSX.writeFile(wb, fileName);
+  return fileName;
 };

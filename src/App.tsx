@@ -32,12 +32,22 @@ import { HomePage } from './components/HomePage';
 import { GeminiChatbotDrawer } from './components/GeminiChatbotDrawer';
 import { ResignationTab } from './components/ResignationTab';
 import {
+  CRM_I18N,
+  getCandidateDisplayName,
+  getResignationDisplayName,
+  readStoredUiLang,
+  saveStoredUiLang,
+  type UiLang,
+} from './i18n/crmTranslations';
+import {
   STORAGE_KEYS,
   SECTORS,
   EMPLOYMENT_TYPES,
   INDUSTRIES,
   KAIGO_FACILITY_TYPES,
   PROGRESS_STATUSES,
+  PROPOSED_NAITEI_STATUSES,
+  PROPOSED_JITAI_STATUSES,
   JLPT_LEVELS,
   INITIAL_CANDIDATES,
   INITIAL_SCHOOL_STUDENTS,
@@ -47,17 +57,21 @@ import {
 } from './data/seedData';
 import type {
   Candidate,
+  CandidateViewMode,
   CareFilterType,
   ChannelType,
   DailyFocusCompletionMap,
   DailyFocusItem,
+  JitaiSubFilter,
   KyujinCompany,
   KyujinSlot,
   MainTabId,
+  ProposedGroupFilter,
   PtPartner,
   ReplyScenario,
   ResignationRecord,
   RirekishoDraft,
+  SavedRirekishoRecord,
 } from './types/crm';
 import {
   buildAnonymousJobPostText,
@@ -65,28 +79,33 @@ import {
   buildRirekishoStandaloneHtml,
   buildSmartReplyMessages,
   calcJapaneseAgeFromBirthDate,
+  classifyProposedSubTab,
   copyTextSafely,
-  createInitialRirekishoDraft,
   detectEmploymentTypeFromText,
   detectIndustryFromText,
   detectSectorFromIndustryOrText,
   doesAreaMatchFilter,
   evaluateCandidateKyujinMatches,
+  exportRirekishoToExcelFile,
   extractCandidateViaServer,
   extractDeclineReason,
   extractKyujinRawTextViaServer,
   extractKyujinViaServer,
+  extractNormalizedKyujinConditions,
   extractNormalizedMendanInfo,
   extractRirekishoTextFromLocalFile,
   extractRirekishoViaServer,
   formatPublicArea,
   getEffectiveProposedCompany,
+  getInitialRirekishoDraftForCandidate,
   getMissingInfoForCandidate,
   getUrgentFollowUpReason,
   isActualProposedRecord,
+  migrateCandidateRecord,
   normalizeBonusInfo,
   normalizeHousingDisplay,
   normalizeKyujinItem,
+  parseBackupCsvToCandidates,
   parseChatIntoUpdates,
   parseExcelFileToKyujinEntries,
   parseFlexibleDateToTimestamp,
@@ -133,12 +152,14 @@ function readFallbackCandidates(): Candidate[] {
     const saved = localStorage.getItem(STORAGE_KEYS.CANDIDATES);
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map(migrateCandidateRecord);
+      }
     }
   } catch {
     // ignore storage parse errors
   }
-  return INITIAL_CANDIDATES;
+  return INITIAL_CANDIDATES.map(migrateCandidateRecord);
 }
 
 function readFallbackSchoolStudents(): Candidate[] {
@@ -146,12 +167,14 @@ function readFallbackSchoolStudents(): Candidate[] {
     const saved = localStorage.getItem(STORAGE_KEYS.SCHOOL_STUDENTS);
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) return parsed;
+      if (Array.isArray(parsed)) {
+        return parsed.map(migrateCandidateRecord);
+      }
     }
   } catch {
     // ignore storage parse errors
   }
-  return INITIAL_SCHOOL_STUDENTS;
+  return INITIAL_SCHOOL_STUDENTS.map(migrateCandidateRecord);
 }
 
 function readFallbackKyujins(): KyujinCompany[] {
@@ -239,13 +262,70 @@ export default function App() {
   });
   const [isSyncingGas, setIsSyncingGas] = useState(false);
 
-  // Navigation & Filters
+  // UI Language & Navigation & Filters
+  const [uiLang, setUiLang] = useState<UiLang>(() => readStoredUiLang());
+  useEffect(() => {
+    saveStoredUiLang(uiLang);
+  }, [uiLang]);
+  const t = CRM_I18N[uiLang];
+
   const [activeTab, setActiveTab] = useState<MainTabId>('all');
+  const [candidateViewMode, setCandidateViewMode] = useState<CandidateViewMode>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.VIEW_MODE);
+      if (saved === 'card' || saved === 'list') return saved;
+    } catch {
+      // ignore storage errors
+    }
+    return 'list';
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.VIEW_MODE, candidateViewMode);
+    } catch {
+      // ignore storage errors
+    }
+  }, [candidateViewMode]);
+
+  const [drawerCandidateId, setDrawerCandidateId] = useState<string | null>(null);
+  const [naiteiPromptModal, setNaiteiPromptModal] = useState<{
+    personId: string;
+    isSchool: boolean;
+    candidateName: string;
+    targetStatus: string;
+    naiteiCompany: string;
+    expectedJoinDate: string;
+    visaSubmissionDeadline: string;
+  } | null>(null);
+  const [jitaiPromptModal, setJitaiPromptModal] = useState<{
+    personId: string;
+    isSchool: boolean;
+    candidateName: string;
+    targetStatus: string;
+    reason: string;
+  } | null>(null);
+  const [kyujinConditionModal, setKyujinConditionModal] = useState<{
+    companyId: string;
+    slotId: string;
+    companyName: string;
+    excludedNationalitiesText: string;
+    excludedGenders: string[];
+    requiresInJapan: boolean;
+    requiresTokutei: boolean;
+    extraRequiredText: string;
+    extraNgText: string;
+  } | null>(null);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [careFilter, setCareFilter] = useState<CareFilterType>('all');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [industryFilter, setIndustryFilter] = useState('all');
+  const [nationalityFilter, setNationalityFilter] = useState('all');
+  const [proposedCompanyFilter, setProposedCompanyFilter] = useState('all');
+  const [expandedJobMatchIds, setExpandedJobMatchIds] = useState<Record<string, boolean>>({});
   const [proposedMonthFilter, setProposedMonthFilter] = useState('all');
-  const [proposedStageFilter, setProposedStageFilter] = useState('all');
+  const [proposedStageFilter, setProposedStageFilter] = useState<ProposedGroupFilter>('in_progress');
+  const [jitaiSubFilter, setJitaiSubFilter] = useState<JitaiSubFilter>('all');
   const [declineReasonQuery, setDeclineReasonQuery] = useState('');
   const [kyujinSearch, setKyujinSearch] = useState('');
   const [kyujinStatusFilter, setKyujinStatusFilter] = useState<'all' | 'open' | 'closed'>('all');
@@ -332,6 +412,12 @@ export default function App() {
   const [rirekishoModal, setRirekishoModal] = useState<{
     person: Candidate;
     draft: RirekishoDraft;
+    sourceFileName?: string;
+    exportedFileName?: string;
+    exportedAt?: string;
+    hasSavedVersion?: boolean;
+    lastSavedAt?: string;
+    showUploadTools?: boolean;
   } | null>(null);
   const [isParsingRirekisho, setIsParsingRirekisho] = useState(false);
   const [rirekishoStatusBanner, setRirekishoStatusBanner] = useState<{
@@ -406,6 +492,9 @@ export default function App() {
   const backupInputRef = useRef<HTMLInputElement | null>(null);
   const kyujinFileInputRef = useRef<HTMLInputElement | null>(null);
   const rirekishoFileInputRef = useRef<HTMLInputElement | null>(null);
+  const rirekishoPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const rirekishoSavedSnapshotRef = useRef<string>('');
+  const rirekishoAutoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -1102,11 +1191,15 @@ export default function App() {
       });
       showToast(
         isNew
-          ? '✅ Đã thêm hồ sơ nghỉ việc mới'
-          : `✅ Đã cập nhật hồ sơ (đã bật bảo vệ chống ghi đè GAS): ${protectedRec.fullName}`
+          ? uiLang === 'jp'
+            ? '✅ 新規退職者データを登録しました'
+            : '✅ Đã thêm hồ sơ nghỉ việc mới'
+          : uiLang === 'jp'
+          ? `✅ 退職者データを更新しました（GAS上書き保護ON）: ${getResignationDisplayName(protectedRec, uiLang)}`
+          : `✅ Đã cập nhật hồ sơ (đã bật bảo vệ chống ghi đè GAS): ${getResignationDisplayName(protectedRec, uiLang)}`
       );
     },
-    [executeCalendarDelete, executeCalendarSyncForDraft, showToast]
+    [executeCalendarDelete, executeCalendarSyncForDraft, showToast, uiLang]
   );
 
   const handleResignationStatusChange = useCallback(
@@ -1117,24 +1210,33 @@ export default function App() {
         updatedAt: new Date().toISOString(),
       };
       setResignations((prev) => prev.map((r) => (r.id === record.id ? updated : r)));
-      showToast(`✅ Đã chuyển trạng thái giấy tờ sang "${nextStatus}"`);
+      showToast(
+        uiLang === 'jp'
+          ? `✅ 書類ステータスを「${nextStatus}」に更新しました`
+          : `✅ Đã chuyển trạng thái giấy tờ sang "${nextStatus}"`
+      );
 
       if (nextStatus === 'Hoàn tất' && record.googleCalendarEventId) {
         void executeCalendarDelete(record.id, record.googleCalendarEventId, true, 'resignation');
       }
     },
-    [executeCalendarDelete, showToast]
+    [executeCalendarDelete, showToast, uiLang]
   );
 
   const handleDeleteResignation = useCallback(
     async (record: ResignationRecord) => {
+      const displayName = getResignationDisplayName(record, uiLang);
       setResignations((prev) => prev.filter((r) => r.id !== record.id));
-      showToast(`🗑️ Đã xóa hồ sơ nghỉ việc: ${record.fullName}`);
+      showToast(
+        uiLang === 'jp'
+          ? `🗑️ 退職者データを削除しました: ${displayName}`
+          : `🗑️ Đã xóa hồ sơ nghỉ việc: ${displayName}`
+      );
       if (record.googleCalendarEventId && auth.currentUser) {
         void executeCalendarDelete(record.id, record.googleCalendarEventId, false, 'resignation');
       }
     },
-    [executeCalendarDelete, showToast]
+    [executeCalendarDelete, showToast, uiLang]
   );
 
   const handleBulkImportResignations = useCallback(
@@ -1167,13 +1269,18 @@ export default function App() {
         });
         return [...newEntries, ...nextList];
       });
-      showToast(`✅ Đã nhập ${rows.length} hồ sơ nghỉ việc từ Excel/CSV`);
+      showToast(
+        uiLang === 'jp'
+          ? `✅ Excel/CSVから退職者データ ${rows.length}件を取り込みました`
+          : `✅ Đã nhập ${rows.length} hồ sơ nghỉ việc từ Excel/CSV`
+      );
     },
-    [gasWriteLocked, showToast]
+    [gasWriteLocked, showToast, uiLang]
   );
 
   const handleConvertResignationToCandidate = useCallback(
     (record: ResignationRecord) => {
+      const displayName = getResignationDisplayName(record, uiLang);
       const existing = candidates.find(
         (c) =>
           (record.convertedCandidateId && c.id === record.convertedCandidateId) ||
@@ -1182,8 +1289,12 @@ export default function App() {
       );
       if (existing) {
         setActiveTab('all');
-        setSearchQuery(existing.name);
-        showToast(`ℹ️ ${record.fullName} đã có trong danh sách Ứng viên tìm việc mới`);
+        setSearchQuery(getCandidateDisplayName(existing, uiLang));
+        showToast(
+          uiLang === 'jp'
+            ? `ℹ️ ${displayName} さんは既に求職者一覧に登録されています`
+            : `ℹ️ ${displayName} đã có trong danh sách Ứng viên tìm việc mới`
+        );
         return;
       }
       const newCand = convertResignationToCandidate(record);
@@ -1193,9 +1304,13 @@ export default function App() {
       );
       setActiveTab('all');
       setEditingPerson({ data: newCand, isSchool: false, isNew: false });
-      showToast(`✅ Đã chuyển "${record.fullName}" sang Ứng viên tìm việc mới`);
+      showToast(
+        uiLang === 'jp'
+          ? `✅ 「${displayName}」さんを新規求職者へ移行しました`
+          : `✅ Đã chuyển "${displayName}" sang Ứng viên tìm việc mới`
+      );
     },
-    [candidates, showToast]
+    [candidates, showToast, uiLang]
   );
 
   const handleTestMessengerWebhook = useCallback(async () => {
@@ -1347,8 +1462,9 @@ export default function App() {
           Array.isArray(data.candidates)
         ) {
           setCandidates((prev) => {
+            const migrated = data.candidates!.map(migrateCandidateRecord);
             const merged = mergePendingWebhookCandidates(
-              data.candidates!,
+              migrated,
               data.pendingWebhookCandidates
             );
             if (JSON.stringify(prev) === JSON.stringify(merged)) return prev;
@@ -1369,10 +1485,11 @@ export default function App() {
           Array.isArray(data.schoolStudents)
         ) {
           setSchoolStudents((prev) => {
-            const nextJson = JSON.stringify(data.schoolStudents);
+            const migrated = data.schoolStudents!.map(migrateCandidateRecord);
+            const nextJson = JSON.stringify(migrated);
             if (JSON.stringify(prev) === nextJson) return prev;
             skipNextSqlSaveRef.current = true;
-            return data.schoolStudents!;
+            return migrated;
           });
         }
 
@@ -1474,7 +1591,7 @@ export default function App() {
         if (data.hasExistingData) {
           skipNextSqlSaveRef.current = true;
           const loadedCandidates = Array.isArray(data.candidates)
-            ? data.candidates
+            ? data.candidates.map(migrateCandidateRecord)
             : [];
           setCandidates(
             mergePendingWebhookCandidates(
@@ -1483,7 +1600,9 @@ export default function App() {
             )
           );
           setSchoolStudents(
-            Array.isArray(data.schoolStudents) ? data.schoolStudents : []
+            Array.isArray(data.schoolStudents)
+              ? data.schoolStudents.map(migrateCandidateRecord)
+              : []
           );
           setKyujins(
             Array.isArray(data.kyujins)
@@ -1664,9 +1783,212 @@ export default function App() {
   }, [gasWebAppUrl]);
 
   // ==========================================================================
-  // RIREKISHO FILE UPLOAD & AI CHAT AUTO-FILL PARSER (VIA SERVER PROXY)
+  // RIREKISHO AUTO-SAVE, PHOTO, EXPORT & FILE/CHAT AUTO-FILL PARSER
   // ==========================================================================
-  const applyExtractedRirekishoToDraft = (extracted: Record<string, unknown> = {}) => {
+  const persistCandidateRirekisho = useCallback(
+    (
+      person: Candidate,
+      record: SavedRirekishoRecord,
+      options?: { syncBasicProfile?: boolean }
+    ) => {
+      const isSchool = Boolean(person._isSchool || person.channel === 'school');
+      const d = record.draft;
+      const updater = (list: Candidate[]) =>
+        list.map((c) => {
+          if (c.id !== person.id) return c;
+          const next: Candidate = {
+            ...c,
+            savedRirekisho: record,
+          };
+          if (options?.syncBasicProfile) {
+            if (!next.furigana && d.furigana) next.furigana = d.furigana;
+            if (!next.birthDate && d.birthDate) next.birthDate = d.birthDate;
+            if (!next.age && d.age) next.age = d.age;
+            if (!next.gender && d.gender) next.gender = d.gender;
+            if (!next.postalCode && d.postalCode) next.postalCode = d.postalCode;
+            if (!next.address && d.address) next.address = d.address;
+            if (!next.phone && d.phone) next.phone = d.phone;
+            if (!next.email && d.email) next.email = d.email;
+            if ((!next.nationality || next.nationality === '国籍不明') && d.nationality) {
+              next.nationality = d.nationality;
+            }
+            if (!next.visaExpiry && d.visaExpiry) next.visaExpiry = d.visaExpiry;
+            if (!next.visaStatus && d.visaStatus) next.visaStatus = d.visaStatus;
+          }
+          return next;
+        });
+
+      if (isSchool) {
+        setSchoolStudents(updater);
+      } else {
+        setCandidates(updater);
+      }
+      rirekishoSavedSnapshotRef.current = JSON.stringify(record.draft);
+    },
+    []
+  );
+
+  const openRirekishoModalForCandidate = useCallback((person: Candidate) => {
+    const existing = person.savedRirekisho;
+    const initialDraft = getInitialRirekishoDraftForCandidate(person);
+    rirekishoSavedSnapshotRef.current = JSON.stringify(initialDraft);
+    setRirekishoStatusBanner(null);
+    setRirekishoChatInput(person.memo || '');
+    setRirekishoModal({
+      person,
+      draft: initialDraft,
+      sourceFileName: existing?.sourceFileName,
+      exportedFileName: existing?.exportedFileName,
+      exportedAt: existing?.exportedAt,
+      hasSavedVersion: Boolean(existing?.draft),
+      lastSavedAt: existing?.updatedAt,
+      showUploadTools: false,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!rirekishoModal) {
+      if (rirekishoAutoSaveTimerRef.current) {
+        clearTimeout(rirekishoAutoSaveTimerRef.current);
+        rirekishoAutoSaveTimerRef.current = null;
+      }
+      return;
+    }
+
+    const serialized = JSON.stringify(rirekishoModal.draft);
+    if (serialized === rirekishoSavedSnapshotRef.current) return;
+
+    if (rirekishoAutoSaveTimerRef.current) {
+      clearTimeout(rirekishoAutoSaveTimerRef.current);
+    }
+
+    const activeSnapshot = rirekishoModal;
+    rirekishoAutoSaveTimerRef.current = setTimeout(() => {
+      rirekishoAutoSaveTimerRef.current = null;
+      const nowIso = new Date().toISOString();
+      const record: SavedRirekishoRecord = {
+        draft: activeSnapshot.draft,
+        sourceFileName: activeSnapshot.sourceFileName,
+        exportedFileName: activeSnapshot.exportedFileName,
+        exportedAt: activeSnapshot.exportedAt,
+        updatedAt: nowIso,
+      };
+      persistCandidateRirekisho(activeSnapshot.person, record);
+      setRirekishoModal((prev) =>
+        prev && prev.person.id === activeSnapshot.person.id
+          ? {
+              ...prev,
+              hasSavedVersion: true,
+              lastSavedAt: nowIso,
+              person: { ...prev.person, savedRirekisho: record },
+            }
+          : prev
+      );
+    }, 550);
+
+    return () => {
+      if (rirekishoAutoSaveTimerRef.current) {
+        clearTimeout(rirekishoAutoSaveTimerRef.current);
+        rirekishoAutoSaveTimerRef.current = null;
+      }
+    };
+  }, [rirekishoModal, persistCandidateRirekisho]);
+
+  const handleSaveRirekishoManual = () => {
+    if (!rirekishoModal) return;
+    if (rirekishoAutoSaveTimerRef.current) {
+      clearTimeout(rirekishoAutoSaveTimerRef.current);
+      rirekishoAutoSaveTimerRef.current = null;
+    }
+    const nowIso = new Date().toISOString();
+    const record: SavedRirekishoRecord = {
+      draft: rirekishoModal.draft,
+      sourceFileName: rirekishoModal.sourceFileName,
+      exportedFileName: rirekishoModal.exportedFileName,
+      exportedAt: rirekishoModal.exportedAt,
+      updatedAt: nowIso,
+    };
+    persistCandidateRirekisho(rirekishoModal.person, record, { syncBasicProfile: true });
+    setRirekishoModal((prev) =>
+      prev
+        ? {
+            ...prev,
+            hasSavedVersion: true,
+            lastSavedAt: nowIso,
+            person: { ...prev.person, savedRirekisho: record },
+          }
+        : prev
+    );
+    setRirekishoStatusBanner({ type: 'success', text: t.rirekisho.savedToast });
+    showToast(t.rirekisho.savedToast);
+  };
+
+  const handleCloseRirekishoModal = () => {
+    if (rirekishoAutoSaveTimerRef.current) {
+      clearTimeout(rirekishoAutoSaveTimerRef.current);
+      rirekishoAutoSaveTimerRef.current = null;
+    }
+    if (rirekishoModal) {
+      const serialized = JSON.stringify(rirekishoModal.draft);
+      if (serialized !== rirekishoSavedSnapshotRef.current) {
+        const nowIso = new Date().toISOString();
+        persistCandidateRirekisho(rirekishoModal.person, {
+          draft: rirekishoModal.draft,
+          sourceFileName: rirekishoModal.sourceFileName,
+          exportedFileName: rirekishoModal.exportedFileName,
+          exportedAt: rirekishoModal.exportedAt,
+          updatedAt: nowIso,
+        });
+      }
+    }
+    setRirekishoModal(null);
+  };
+
+  const handleUploadRirekishoPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !rirekishoModal) return;
+    try {
+      const compressed = await compressImageFileToBase64(file, 480, 0.8);
+      const photoDataUrl = `data:${compressed.mimeType};base64,${compressed.base64Data}`;
+      const nextDraft: RirekishoDraft = {
+        ...rirekishoModal.draft,
+        photoDataUrl,
+      };
+      const nowIso = new Date().toISOString();
+      const record: SavedRirekishoRecord = {
+        draft: nextDraft,
+        sourceFileName: rirekishoModal.sourceFileName,
+        exportedFileName: rirekishoModal.exportedFileName,
+        exportedAt: rirekishoModal.exportedAt,
+        updatedAt: nowIso,
+      };
+      persistCandidateRirekisho(rirekishoModal.person, record);
+      setRirekishoModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              draft: nextDraft,
+              hasSavedVersion: true,
+              lastSavedAt: nowIso,
+              person: { ...prev.person, savedRirekisho: record },
+            }
+          : prev
+      );
+      showToast(t.rirekisho.photoUploadedToast);
+    } catch {
+      showToast(
+        uiLang === 'jp'
+          ? '⚠️ 証明写真の読み込みに失敗しました'
+          : '⚠️ Không thể đọc file ảnh chân dung'
+      );
+    }
+  };
+
+  const applyExtractedRirekishoToDraft = (
+    extracted: Record<string, unknown> = {},
+    sourceFileName?: string
+  ) => {
     if (!extracted || typeof extracted !== 'object') return 0;
     let filledCount = 0;
 
@@ -1738,7 +2060,11 @@ export default function App() {
       mapRows(extracted.workHistoryList, 'workRows');
       mapRows(extracted.qualificationsList, 'licenseRows');
 
-      return { ...prev, draft: d };
+      return {
+        ...prev,
+        draft: d,
+        sourceFileName: sourceFileName || prev.sourceFileName,
+      };
     });
 
     return filledCount;
@@ -1764,9 +2090,9 @@ export default function App() {
 
       try {
         const extracted = await extractRirekishoViaServer(partsPayload, token);
-        const filledCount = applyExtractedRirekishoToDraft(extracted);
+        const filledCount = applyExtractedRirekishoToDraft(extracted, file.name);
         if (filledCount > 0) {
-          const msg = `✅ Đã bóc tách ${filledCount} mục từ "${file.name}" và điền tự động vào Sơ yếu lý lịch 2 cột!`;
+          const msg = `✅ Đã bóc tách ${filledCount} mục từ "${file.name}" và tự động lưu vào Sơ yếu lý lịch 2 cột!`;
           setRirekishoStatusBanner({ type: 'success', text: msg });
           showToast(msg);
           return;
@@ -1778,7 +2104,8 @@ export default function App() {
             rirekishoModal.person
           );
           const localFilled = applyExtractedRirekishoToDraft(
-            localParsed as Record<string, unknown>
+            localParsed as Record<string, unknown>,
+            file.name
           );
           const reason =
             aiErr instanceof Error && aiErr.message.includes('GEMINI_API_KEY')
@@ -1798,7 +2125,8 @@ export default function App() {
           rirekishoModal.person
         );
         const localFilled = applyExtractedRirekishoToDraft(
-          localParsed as Record<string, unknown>
+          localParsed as Record<string, unknown>,
+          file.name
         );
         if (localFilled > 0) {
           const msg = `✅ Đã trích xuất ${localFilled} mục từ văn bản "${file.name}" vào Rirekisho!`;
@@ -1880,6 +2208,31 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     }
   };
 
+  const recordRirekishoExport = (exportedFileName: string) => {
+    if (!rirekishoModal) return;
+    const nowIso = new Date().toISOString();
+    const record: SavedRirekishoRecord = {
+      draft: rirekishoModal.draft,
+      sourceFileName: rirekishoModal.sourceFileName,
+      exportedFileName,
+      exportedAt: nowIso,
+      updatedAt: nowIso,
+    };
+    persistCandidateRirekisho(rirekishoModal.person, record);
+    setRirekishoModal((prev) =>
+      prev
+        ? {
+            ...prev,
+            hasSavedVersion: true,
+            exportedFileName,
+            exportedAt: nowIso,
+            lastSavedAt: nowIso,
+            person: { ...prev.person, savedRirekisho: record },
+          }
+        : prev
+    );
+  };
+
   const handleDownloadRirekishoFile = () => {
     if (!rirekishoModal?.draft) return;
     try {
@@ -1889,25 +2242,47 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         .replace(/[\\/:*?"<>|\s]+/g, '_')
         .trim();
       const dateTag = new Date().toISOString().slice(0, 10);
+      const fileName = `履歴書_${safeName}_${dateTag}.html`;
       const blob = new Blob(['\uFEFF' + htmlContent], {
         type: 'text/html;charset=utf-8',
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `履歴書_${safeName}_${dateTag}.html`;
+      a.download = fileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      showToast(`📥 「履歴書_${safeName}_${dateTag}.html」をダウンロードしました`);
+      recordRirekishoExport(fileName);
+      showToast(`📥 「${fileName}」をダウンロード＆保存しました`);
     } catch {
       showToast('⚠️ 履歴書ファイルのダウンロードに失敗しました');
     }
   };
 
+  const handleExportRirekishoExcel = () => {
+    if (!rirekishoModal?.draft) return;
+    try {
+      const fileName = exportRirekishoToExcelFile(rirekishoModal.draft);
+      recordRirekishoExport(fileName);
+      showToast(t.rirekisho.excelExportedToast(fileName));
+    } catch {
+      showToast(
+        uiLang === 'jp'
+          ? '⚠️ Excel履歴書の出力に失敗しました'
+          : '⚠️ Lỗi xuất file Excel Rirekisho'
+      );
+    }
+  };
+
   const handlePrintRirekishoSafely = () => {
     if (!rirekishoModal?.draft) return;
+    const safeName = String(rirekishoModal.draft.fullName || '応募者')
+      .replace(/[\\/:*?"<>|\s]+/g, '_')
+      .trim();
+    const dateTag = new Date().toISOString().slice(0, 10);
+    recordRirekishoExport(`履歴書_${safeName}_${dateTag}.pdf`);
     const htmlContent = buildRirekishoStandaloneHtml(rirekishoModal.draft);
     const iframe = document.createElement('iframe');
     iframe.style.position = 'fixed';
@@ -2003,28 +2378,67 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     if (!file) return;
     try {
       const text = await file.text();
+      const isCsvFile =
+        file.name.toLowerCase().endsWith('.csv') ||
+        (!text.trim().startsWith('{') && !text.trim().startsWith('['));
+
+      if (isCsvFile) {
+        const migratedRows = parseBackupCsvToCandidates(text);
+        if (migratedRows.length === 0) {
+          showToast(
+            uiLang === 'jp'
+              ? '⚠️ CSVファイルに有効な相談者データが見つかりません'
+              : '⚠️ Không tìm thấy dữ liệu ứng viên hợp lệ trong file CSV'
+          );
+          return;
+        }
+        const csvStudents: Candidate[] = [];
+        const csvCandidates: Candidate[] = [];
+        migratedRows.forEach((item) => {
+          if (item.channel === 'school' || item.schoolName) {
+            csvStudents.push({ ...item, channel: 'school', _isSchool: true });
+          } else {
+            csvCandidates.push({ ...item, _isSchool: false });
+          }
+        });
+        if (csvCandidates.length > 0) {
+          setCandidates(csvCandidates);
+        }
+        if (csvStudents.length > 0) {
+          setSchoolStudents(csvStudents);
+        }
+        setGasWriteLocked(true);
+        showToast(
+          uiLang === 'jp'
+            ? `📂 CSVデータ復元完了：相談者 ${csvCandidates.length}名 ／ 留学生 ${csvStudents.length}名（新構造へ自動変換済）`
+            : `📂 Đã khôi phục & chuẩn hóa CSV: ${csvCandidates.length} ứng viên / ${csvStudents.length} DHS`
+        );
+        return;
+      }
+
       const parsed = JSON.parse(text);
 
-      const rawCandidates: Candidate[] = Array.isArray(parsed)
+      const rawCandidates: unknown[] = Array.isArray(parsed)
         ? parsed
         : Array.isArray(parsed.candidates)
         ? parsed.candidates
         : [];
       const explicitStudents: Candidate[] = Array.isArray(parsed.schoolStudents)
-        ? parsed.schoolStudents
+        ? parsed.schoolStudents.map(migrateCandidateRecord)
         : [];
 
       const separatedStudents = [...explicitStudents];
       const regularCandidates: Candidate[] = [];
-      rawCandidates.forEach((item) => {
-        if (item?.channel === 'school' || item?.schoolName) {
-          separatedStudents.push({ ...item, channel: 'school' });
+      rawCandidates.forEach((rawItem) => {
+        const migrated = migrateCandidateRecord(rawItem);
+        if (migrated.channel === 'school' || migrated.schoolName) {
+          separatedStudents.push({ ...migrated, channel: 'school', _isSchool: true });
         } else {
-          regularCandidates.push(item);
+          regularCandidates.push({ ...migrated, _isSchool: false });
         }
       });
 
-      if (regularCandidates.length > 0 || Array.isArray(parsed.candidates)) {
+      if (regularCandidates.length > 0 || Array.isArray(parsed.candidates) || Array.isArray(parsed)) {
         setCandidates(regularCandidates);
       }
       if (separatedStudents.length > 0 || Array.isArray(parsed.schoolStudents)) {
@@ -2061,12 +2475,20 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       setGasWriteLocked(true);
       showToast(
-        `📂 データ復元完了：相談者 ${regularCandidates.length}名 ／ 留学生 ${separatedStudents.length}名 ／ 求人 ${
-          Array.isArray(parsed.kyujins) ? parsed.kyujins.length : kyujins.length
-        }社`
+        uiLang === 'jp'
+          ? `📂 データ復元完了（自動移行済）：相談者 ${regularCandidates.length}名 ／ 留学生 ${separatedStudents.length}名 ／ 求人 ${
+              Array.isArray(parsed.kyujins) ? parsed.kyujins.length : kyujins.length
+            }社`
+          : `📂 Khôi phục & chuẩn hóa xong: ${regularCandidates.length} ứng viên / ${separatedStudents.length} DHS / ${
+              Array.isArray(parsed.kyujins) ? parsed.kyujins.length : kyujins.length
+            } công ty`
       );
     } catch {
-      showToast('⚠️ JSONファイルの読み込みに失敗しました');
+      showToast(
+        uiLang === 'jp'
+          ? '⚠️ バックアップファイル（JSON/CSV）の読み込みに失敗しました'
+          : '⚠️ Lỗi đọc file backup (JSON/CSV)'
+      );
     } finally {
       e.target.value = '';
     }
@@ -2109,19 +2531,26 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
   const proposedStageCounts = useMemo(() => {
     const counts = {
       all: allProposedPeople.length,
-      企業提案中: 0,
-      '1次面接予定': 0,
-      '2次面接予定': 0,
-      内定: 0,
-      '辞退・終了': 0,
+      in_progress: 0,
+      naitei: 0,
+      jitai: 0,
+      jitaiBreakdown: {
+        内定辞退: 0,
+        選考中辞退: 0,
+        不合格: 0,
+        '辞退・終了': 0,
+      },
     };
     allProposedPeople.forEach((p) => {
-      const st = String(p.progressStatus || '').trim();
-      if (st === '企業提案中' || st === '面接調整中') counts['企業提案中'] += 1;
-      else if (st === '1次面接予定') counts['1次面接予定'] += 1;
-      else if (st === '2次面接予定') counts['2次面接予定'] += 1;
-      else if (st === '内定' || st === '入社手続き中') counts['内定'] += 1;
-      else if (st.includes('辞退') || extractDeclineReason(p)) counts['辞退・終了'] += 1;
+      const grp = classifyProposedSubTab(p);
+      counts[grp] += 1;
+      if (grp === 'jitai') {
+        const st = String(p.progressStatus || '').trim();
+        if (st === '内定辞退') counts.jitaiBreakdown['内定辞退'] += 1;
+        else if (st === '選考中辞退') counts.jitaiBreakdown['選考中辞退'] += 1;
+        else if (st === '不合格') counts.jitaiBreakdown['不合格'] += 1;
+        else counts.jitaiBreakdown['辞退・終了'] += 1;
+      }
     });
     return counts;
   }, [allProposedPeople]);
@@ -2149,7 +2578,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       .map((person) => ({ person, mendan: extractNormalizedMendanInfo(person) }))
       .filter(({ person, mendan }) => {
         const st = String(person.progressStatus || '').trim();
-        if (['内定', '入社手続き中', '辞退・終了'].includes(st)) return false;
+        if ([...PROPOSED_NAITEI_STATUSES, ...PROPOSED_JITAI_STATUSES].includes(st)) return false;
         if (mendan.timestamp > 0) {
           const diffDays = Math.round((mendan.timestamp - todayStart) / 86400000);
           return diffDays >= -1 && diffDays <= 14;
@@ -2162,10 +2591,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
   const urgentFollowUpList = useMemo(() => {
     return allPeopleCombined
-      .map((person) => ({ person, reason: getUrgentFollowUpReason(person) }))
+      .map((person) => ({ person, reason: getUrgentFollowUpReason(person, uiLang) }))
       .filter((item) => Boolean(item.reason))
       .slice(0, 10);
-  }, [allPeopleCombined]);
+  }, [allPeopleCombined, uiLang]);
 
   const incompleteProfileAlerts = useMemo(() => {
     return allPeopleCombined
@@ -2238,63 +2667,92 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     ) {
       notifiedResignationSigRef.current = urgentResignationSignature;
       const lines = urgentResignationAlerts.slice(0, 3).map(({ record, assessment }) => {
+        const displayName = getResignationDisplayName(record, uiLang);
         if (assessment.daysLeft !== null && assessment.daysLeft < 0) {
-          return `• ${record.fullName}: quá hạn ${Math.abs(assessment.daysLeft)} ngày`;
+          return uiLang === 'jp'
+            ? `• ${displayName}: ${Math.abs(assessment.daysLeft)}日超過`
+            : `• ${displayName}: quá hạn ${Math.abs(assessment.daysLeft)} ngày`;
         }
         if (assessment.daysLeft === 0) {
-          return `• ${record.fullName}: hạn nộp giấy tờ HÔM NAY`;
+          return uiLang === 'jp'
+            ? `• ${displayName}: 提出期限 本日`
+            : `• ${displayName}: hạn nộp giấy tờ HÔM NAY`;
         }
-        return `• ${record.fullName}: còn ${assessment.daysLeft} ngày (${record.paperworkDeadline})`;
+        return uiLang === 'jp'
+          ? `• ${displayName}: 残り${assessment.daysLeft}日 (${record.paperworkDeadline})`
+          : `• ${displayName}: còn ${assessment.daysLeft} ngày (${record.paperworkDeadline})`;
       });
       try {
         new window.Notification(
-          `⚠️ Nhắc hạn giấy tờ nghỉ việc (${urgentResignationAlerts.length} hồ sơ)`,
+          t.cornerResigTitle(urgentResignationAlerts.length),
           { body: lines.join('\n') }
         );
       } catch {
         // ignore unsupported Notification constructor contexts
       }
     }
-  }, [urgentResignationAlerts, urgentResignationSignature]);
+  }, [urgentResignationAlerts, urgentResignationSignature, uiLang, t]);
 
   const handleRequestBrowserNotifications = useCallback(async () => {
     if (typeof window === 'undefined' || !('Notification' in window)) {
       setNotificationPermission('unsupported');
-      showToast('ℹ️ Trình duyệt hiện tại không hỗ trợ Web Notification.');
+      showToast(
+        uiLang === 'jp'
+          ? 'ℹ️ このブラウザはWeb通知に対応していません。'
+          : 'ℹ️ Trình duyệt hiện tại không hỗ trợ Web Notification.'
+      );
       return;
     }
     try {
       const perm = await window.Notification.requestPermission();
       setNotificationPermission(perm);
       if (perm === 'granted') {
-        showToast('✅ Đã bật thông báo trình duyệt cho nhắc lịch giấy tờ nghỉ việc!');
+        showToast(
+          uiLang === 'jp'
+            ? '✅ 退職書類リマインドのブラウザ通知を有効にしました！'
+            : '✅ Đã bật thông báo trình duyệt cho nhắc lịch giấy tờ nghỉ việc!'
+        );
       } else {
-        showToast('ℹ️ Bạn chưa cấp quyền thông báo trình duyệt (vẫn có cảnh báo góc màn hình).');
+        showToast(
+          uiLang === 'jp'
+            ? 'ℹ️ ブラウザ通知は未許可です（画面右下のバナーは引き続き表示されます）。'
+            : 'ℹ️ Bạn chưa cấp quyền thông báo trình duyệt (vẫn có cảnh báo góc màn hình).'
+        );
       }
     } catch {
-      showToast('⚠️ Không thể yêu cầu quyền thông báo trên trình duyệt này.');
+      showToast(
+        uiLang === 'jp'
+          ? '⚠️ この環境では通知権限をリクエストできません。'
+          : '⚠️ Không thể yêu cầu quyền thông báo trên trình duyệt này.'
+      );
     }
-  }, [showToast]);
+  }, [showToast, uiLang]);
 
   const dailyFocusItems = useMemo<DailyFocusItem[]>(() => {
     const items: DailyFocusItem[] = [];
     const todayYmd = getJstTodayYmd();
     const [ty, tm, td] = todayYmd.split('-').map(Number);
     const todayUtc = Date.UTC(ty, tm - 1, td);
+    const dfLabels = t.dailyFocusLabels;
 
     // 0. URGENT (<= 3 days or overdue) Resignation paperwork deadlines pinned at VERY TOP
     urgentResignationAlerts.forEach(({ record, assessment }) => {
+      const displayName = getResignationDisplayName(record, uiLang);
       const urgentTitle =
         assessment.daysLeft !== null && assessment.daysLeft < 0
-          ? `⚠️ Quá hạn nộp giấy tờ ${Math.abs(assessment.daysLeft)} ngày: ${record.fullName}`
+          ? dfLabels.overdue(Math.abs(assessment.daysLeft), displayName)
           : assessment.daysLeft === 0
-          ? `⚠️ Hạn nộp giấy tờ HÔM NAY: ${record.fullName}`
-          : `⚠️ Sắp đến hạn nộp giấy tờ trong ${assessment.daysLeft} ngày: ${record.fullName}`;
+          ? dfLabels.dueToday(displayName)
+          : dfLabels.dueInDays(assessment.daysLeft ?? 0, displayName);
       items.push({
         id: `focus_resig_${record.id}`,
         category: 'resignation',
         title: urgentTitle,
-        subtitle: `Hạn ${record.paperworkDeadline || '-'} (Nghỉ ${record.resignationDate || '-'}) · ${record.previousCompany}`,
+        subtitle: dfLabels.resigSub(
+          record.paperworkDeadline || '-',
+          record.resignationDate || '-',
+          record.previousCompany
+        ),
         urgency: 'critical',
         targetTab: 'resignation',
         entityId: record.id,
@@ -2312,11 +2770,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         const [py, pm, pd] = ymd.split('-').map(Number);
         const diffDays = Math.round((Date.UTC(py, pm - 1, pd) - todayUtc) / 86400000);
         if (diffDays === 0 || diffDays === 1) {
+          const displayName = getCandidateDisplayName(p, uiLang);
           items.push({
             id: `focus_mendan_${p.id}_${ymd}`,
             category: 'mendan',
-            title: `${diffDays === 0 ? 'Hôm nay' : 'Ngày mai'}: ${p.name}`,
-            subtitle: p.interviewDate || mInfo.dateLabel || p.progressStatus || 'Lịch Mendan',
+            title: `${diffDays === 0 ? dfLabels.today : dfLabels.tomorrow}: ${displayName}`,
+            subtitle:
+              p.interviewDate || mInfo.dateLabel || p.progressStatus || dfLabels.mendanFallback,
             urgency: diffDays === 0 ? 'critical' : 'warning',
             targetTab: p._isSchool ? 'school' : 'mendan',
             entityId: p.id,
@@ -2329,10 +2789,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     resignationAlerts
       .filter(({ assessment }) => assessment.urgency === 'warn7')
       .forEach(({ record, assessment }) => {
+        const displayName = getResignationDisplayName(record, uiLang);
         items.push({
           id: `focus_resig_${record.id}`,
           category: 'resignation',
-          title: `Giấy tờ nghỉ việc: ${record.fullName}`,
+          title: dfLabels.resigWarn(displayName),
           subtitle: `${assessment.label} · ${record.previousCompany}`,
           urgency: 'warning',
           targetTab: 'resignation',
@@ -2342,15 +2803,49 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
     // 3. Uncontacted > 3 days
     urgentFollowUpList.slice(0, 5).forEach(({ person, reason }) => {
+      const displayName = getCandidateDisplayName(person, uiLang);
       items.push({
         id: `focus_uncontacted_${person.id}`,
         category: 'uncontacted',
-        title: `Follow-up: ${person.name}`,
-        subtitle: reason || 'Chưa liên hệ > 3 ngày',
+        title: dfLabels.followup(displayName),
+        subtitle: reason || dfLabels.uncontactedFallback,
         urgency: 'warning',
         targetTab: person._isSchool ? 'school' : 'all',
         entityId: person.id,
       });
+    });
+
+    // 3b. Naitei Visa Application Submission Deadline (<= 7 days / overdue)
+    allPeopleCombined.forEach((p) => {
+      const deadlineStr = String(p.visaSubmissionDeadline || '').trim();
+      const st = String(p.progressStatus || '').trim();
+      if (!deadlineStr || st === '入社済み' || PROPOSED_JITAI_STATUSES.includes(st)) return;
+      const dlTs = parseFlexibleDateToTimestamp(deadlineStr, ty);
+      if (dlTs > 0) {
+        const d = new Date(dlTs + 9 * 60 * 60 * 1000);
+        const ymd = d.toISOString().slice(0, 10);
+        const [py, pm, pd] = ymd.split('-').map(Number);
+        const diffDays = Math.round((Date.UTC(py, pm - 1, pd) - todayUtc) / 86400000);
+        if (diffDays <= 7) {
+          const displayName = getCandidateDisplayName(p, uiLang);
+          const compLabel = p.naiteiCompany || getEffectiveProposedCompany(p) || '';
+          const joinLabel = p.expectedJoinDate ? ` · ${p.expectedJoinDate}` : '';
+          items.push({
+            id: `focus_visa_sub_${p.id}`,
+            category: 'visa_submission',
+            title:
+              diffDays < 0
+                ? t.visaSubLabels.overdue(Math.abs(diffDays), displayName)
+                : diffDays === 0
+                ? t.visaSubLabels.dueToday(displayName)
+                : t.visaSubLabels.dueInDays(diffDays, displayName),
+            subtitle: `${deadlineStr}${compLabel ? ` · ${compLabel}` : ''}${joinLabel}`,
+            urgency: diffDays <= 2 ? 'critical' : 'warning',
+            targetTab: 'proposed',
+            entityId: p.id,
+          });
+        }
+      }
     });
 
     // 4. Residence card expiry < 90 days
@@ -2360,14 +2855,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       if (expTs > 0) {
         const diffDays = Math.round((expTs - todayUtc) / 86400000);
         if (diffDays >= -30 && diffDays <= 90) {
+          const displayName = getCandidateDisplayName(p, uiLang);
           items.push({
             id: `focus_visa_${p.id}`,
             category: 'visa_expiry',
-            title: `Hạn thẻ ngoại kiều: ${p.name}`,
+            title: dfLabels.visaExp(displayName),
             subtitle:
               diffDays < 0
-                ? `Đã hết hạn ${Math.abs(diffDays)} ngày (${p.visaExpiry})`
-                : `Còn ${diffDays} ngày (${p.visaExpiry})`,
+                ? dfLabels.visaExpired(Math.abs(diffDays), p.visaExpiry)
+                : dfLabels.visaRemain(diffDays, p.visaExpiry),
             urgency: diffDays <= 30 ? 'critical' : 'warning',
             targetTab: p._isSchool ? 'school' : 'all',
             entityId: p.id,
@@ -2376,8 +2872,16 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       }
     });
 
-    return items.slice(0, 14);
-  }, [allPeopleCombined, resignationAlerts, urgentResignationAlerts, urgentFollowUpList]);
+    return items.slice(0, 16);
+  }, [
+    allPeopleCombined,
+    resignationAlerts,
+    urgentResignationAlerts,
+    urgentFollowUpList,
+    t.dailyFocusLabels,
+    t.visaSubLabels,
+    uiLang,
+  ]);
 
   const toggleDailyFocusItem = useCallback((id: string) => {
     setDailyFocusCompleted((prev) => ({
@@ -2385,6 +2889,43 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       [id]: !prev[id],
     }));
   }, []);
+
+  const industryFilterOptions = useMemo(() => {
+    const set = new Set<string>();
+    allPeopleCombined.forEach((p) => {
+      const val = String(p.desiredIndustry || '').trim();
+      if (val && val !== '未設定' && val !== 'Chưa rõ') {
+        val
+          .split(/[/・、,]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .forEach((part) => set.add(part));
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [allPeopleCombined]);
+
+  const nationalityFilterOptions = useMemo(() => {
+    const set = new Set<string>();
+    allPeopleCombined.forEach((p) => {
+      const val = String(p.nationality || '').trim();
+      if (val && val !== 'undefined' && val !== 'null') {
+        set.add(val);
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [allPeopleCombined]);
+
+  const proposedCompanyFilterOptions = useMemo(() => {
+    const set = new Set<string>();
+    allPeopleCombined.forEach((p) => {
+      const comp = String(getEffectiveProposedCompany(p) || '').trim();
+      if (comp && comp !== '-' && comp !== '未設定') {
+        set.add(comp);
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [allPeopleCombined]);
 
   const filteredCandidates = useMemo(() => {
     let baseList: Candidate[] = [];
@@ -2439,6 +2980,27 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         return false;
       }
 
+      if (industryFilter !== 'all') {
+        const pInd = String(p.desiredIndustry || '').toLowerCase();
+        if (!pInd.includes(industryFilter.toLowerCase())) {
+          return false;
+        }
+      }
+
+      if (nationalityFilter !== 'all') {
+        const pNat = String(p.nationality || '').trim();
+        if (pNat !== nationalityFilter) {
+          return false;
+        }
+      }
+
+      if (proposedCompanyFilter !== 'all') {
+        const pComp = String(getEffectiveProposedCompany(p) || '').trim();
+        if (pComp !== proposedCompanyFilter) {
+          return false;
+        }
+      }
+
       if (activeTab === 'proposed' && proposedMonthFilter !== 'all') {
         const mInfo = extractNormalizedMendanInfo(p);
         const ym = String(mInfo.dateLabel || p.lastContactDate || '').slice(0, 7);
@@ -2446,15 +3008,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       }
 
       if (activeTab === 'proposed' && proposedStageFilter !== 'all') {
-        const st = String(p.progressStatus || '').trim();
-        if (proposedStageFilter === '企業提案中') {
-          if (st !== '企業提案中' && st !== '面接調整中') return false;
-        } else if (proposedStageFilter === '内定') {
-          if (st !== '内定' && st !== '入社手続き中') return false;
-        } else if (proposedStageFilter === '辞退・終了') {
-          if (!st.includes('辞退') && !extractDeclineReason(p)) return false;
-        } else if (st !== proposedStageFilter) {
-          return false;
+        const grp = classifyProposedSubTab(p);
+        if (grp !== proposedStageFilter) return false;
+        if (proposedStageFilter === 'jitai' && jitaiSubFilter !== 'all') {
+          const st = String(p.progressStatus || '').trim();
+          if (jitaiSubFilter === '辞退・終了') {
+            if (['内定辞退', '選考中辞退', '不合格'].includes(st)) return false;
+          } else if (st !== jitaiSubFilter) {
+            return false;
+          }
         }
       }
 
@@ -2472,7 +3034,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         const mInfo = extractNormalizedMendanInfo(p);
         if (!mInfo.hasMendan) return false;
       } else if (careFilter === 'urgent') {
-        if (!getUrgentFollowUpReason(p)) return false;
+        if (!getUrgentFollowUpReason(p, uiLang)) return false;
       } else if (careFilter === 'declined') {
         const reason = extractDeclineReason(p);
         if (!reason) return false;
@@ -2504,10 +3066,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     allProposedPeople,
     searchQuery,
     statusFilter,
+    industryFilter,
+    nationalityFilter,
+    proposedCompanyFilter,
     proposedMonthFilter,
     proposedStageFilter,
+    jitaiSubFilter,
     careFilter,
     declineReasonQuery,
+    uiLang,
   ]);
 
   const kyujinStats = useMemo(() => {
@@ -2631,7 +3198,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       list.map((p) => (p.id === person.id ? { ...p, lastContactDate: todayIso } : p));
     if (isSchool) setSchoolStudents(updater);
     else setCandidates(updater);
-    showToast(`✅ ${person.name} さんの最終連絡日を本日（${todayIso}）に更新しました`);
+    showToast(t.toasts.contactedUpdated(getCandidateDisplayName(person, uiLang), todayIso));
   };
 
   const handleQuickStatusChange = (personId: string, isSchool: boolean, newStatus: string) => {
@@ -2642,7 +3209,171 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       );
     if (isSchool) setSchoolStudents(updater);
     else setCandidates(updater);
-    showToast(`✅ ステータスを「${newStatus}」に更新しました`);
+    showToast(t.toasts.statusUpdated(newStatus));
+  };
+
+  const handleStatusTransitionRequest = (
+    person: Candidate,
+    isSchool: boolean,
+    newStatus: string
+  ) => {
+    const candidateName = getCandidateDisplayName(person, uiLang);
+    if (PROPOSED_NAITEI_STATUSES.includes(newStatus)) {
+      setNaiteiPromptModal({
+        personId: person.id,
+        isSchool,
+        candidateName,
+        targetStatus: newStatus,
+        naiteiCompany: person.naiteiCompany || getEffectiveProposedCompany(person) || '',
+        expectedJoinDate: person.expectedJoinDate || '',
+        visaSubmissionDeadline: person.visaSubmissionDeadline || '',
+      });
+      return;
+    }
+    if (PROPOSED_JITAI_STATUSES.includes(newStatus)) {
+      setJitaiPromptModal({
+        personId: person.id,
+        isSchool,
+        candidateName,
+        targetStatus: newStatus,
+        reason: person.declineReason || '',
+      });
+      return;
+    }
+    handleQuickStatusChange(person.id, isSchool, newStatus);
+  };
+
+  const handleConfirmNaiteiPrompt = () => {
+    if (!naiteiPromptModal) return;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const {
+      personId,
+      isSchool,
+      targetStatus,
+      naiteiCompany,
+      expectedJoinDate,
+      visaSubmissionDeadline,
+    } = naiteiPromptModal;
+    const cleanComp = naiteiCompany.trim();
+    const noteLine = `[${todayIso} ${targetStatus}] ${cleanComp || '-'}${
+      expectedJoinDate ? ` · 入社予定: ${expectedJoinDate}` : ''
+    }${visaSubmissionDeadline ? ` · ビザ書類期限: ${visaSubmissionDeadline}` : ''}`;
+
+    const updater = (list: Candidate[]) =>
+      list.map((p) => {
+        if (p.id !== personId) return p;
+        return {
+          ...p,
+          progressStatus: targetStatus,
+          naiteiCompany: cleanComp || p.naiteiCompany || p.proposedCompany || '',
+          proposedCompany: p.proposedCompany || cleanComp,
+          expectedJoinDate: expectedJoinDate.trim(),
+          visaSubmissionDeadline: visaSubmissionDeadline.trim(),
+          lastContactDate: todayIso,
+          memo: p.memo ? `${noteLine}\n${p.memo}` : noteLine,
+        };
+      });
+    if (isSchool) setSchoolStudents(updater);
+    else setCandidates(updater);
+    setNaiteiPromptModal(null);
+    showToast(t.toasts.statusUpdated(targetStatus));
+  };
+
+  const handleConfirmJitaiPrompt = () => {
+    if (!jitaiPromptModal) return;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const { personId, isSchool, targetStatus, reason } = jitaiPromptModal;
+    const cleanReason = reason.trim();
+    const noteLine = `[${todayIso} ${targetStatus}] ${
+      cleanReason ? `辞退/不合格理由: ${cleanReason}` : targetStatus
+    }`;
+
+    const updater = (list: Candidate[]) =>
+      list.map((p) => {
+        if (p.id !== personId) return p;
+        return {
+          ...p,
+          progressStatus: targetStatus,
+          declineReason: cleanReason || p.declineReason || targetStatus,
+          lastContactDate: todayIso,
+          memo: p.memo ? `${noteLine}\n${p.memo}` : noteLine,
+        };
+      });
+    if (isSchool) setSchoolStudents(updater);
+    else setCandidates(updater);
+    setJitaiPromptModal(null);
+    showToast(t.toasts.statusUpdated(targetStatus));
+  };
+
+  const handleSaveKyujinConditions = () => {
+    if (!kyujinConditionModal) return;
+    const {
+      companyId,
+      slotId,
+      excludedNationalitiesText,
+      excludedGenders,
+      requiresInJapan,
+      requiresTokutei,
+      extraRequiredText,
+      extraNgText,
+    } = kyujinConditionModal;
+    const nats = excludedNationalitiesText
+      .split(/[,、・\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const reqs = extraRequiredText
+      .split(/[,、\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const ngs = extraNgText
+      .split(/[,、\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    setKyujins((prev) =>
+      prev.map((comp) => {
+        if (comp.id !== companyId) return comp;
+        const updatedSlots = (comp.areaBreakdown || []).map((sl) => {
+          if (sl.slotId !== slotId) return sl;
+          const merged = extractNormalizedKyujinConditions({
+            text: `${sl.jobDescription || ''} ${sl.experienceDetail || ''}`,
+            minJlpt: sl.minJlpt,
+            employmentType: sl.employmentType || comp.employmentType,
+            existingExcludedNationalities: nats,
+            existingExcludedGenders: excludedGenders,
+            existingRequiresInJapan: requiresInJapan,
+            existingRequiresTokutei: requiresTokutei,
+            existingRequiredConditions: reqs,
+            existingNgConditions: ngs,
+          });
+          return {
+            ...sl,
+            excludedNationalities: merged.excludedNationalities,
+            excludedGenders: merged.excludedGenders,
+            requiresInJapan: merged.requiresInJapan,
+            requiresTokutei: merged.requiresTokutei,
+            requiredConditions: merged.requiredConditions,
+            ngConditions: merged.ngConditions,
+          };
+        });
+        return normalizeKyujinItem({
+          ...comp,
+          excludedNationalities: undefined,
+          excludedGenders: undefined,
+          requiresInJapan: undefined,
+          requiresTokutei: undefined,
+          requiredConditions: undefined,
+          ngConditions: undefined,
+          areaBreakdown: updatedSlots,
+        });
+      })
+    );
+    setKyujinConditionModal(null);
+    showToast(
+      uiLang === 'jp'
+        ? '✅ 求人の必須条件・NG条件を更新しました'
+        : '✅ Đã cập nhật điều kiện bắt buộc & điều kiện NG cho đơn tuyển dụng'
+    );
   };
 
   const handleProposeCompanyToCandidate = (
@@ -2665,7 +3396,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       );
     if (isSchool) setSchoolStudents(updater);
     else setCandidates(updater);
-    showToast(`📨 ${person.name} さんに「${companyName}」を提案済みに設定しました`);
+    showToast(t.toasts.proposedSet(getCandidateDisplayName(person, uiLang), companyName));
   };
 
   const mergeExtractedCandidateData = (
@@ -3200,11 +3931,16 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
     const label =
       nextChannel === 'company'
-        ? 'FB会社公式'
+        ? t.tabs.company
         : nextChannel === 'school'
-        ? '日本語学校・留学生'
-        : 'FB個人';
-    showToast(`🔄 Đã chuyển "${person.name}" sang kênh ${label} (bảo toàn 100% dữ liệu)`);
+        ? t.tabs.school
+        : t.tabs.personal;
+    const displayName = getCandidateDisplayName(person, uiLang);
+    showToast(
+      uiLang === 'jp'
+        ? `🔄 「${displayName}」さんのチャネルを ${label} に変更しました（データ保持100%）`
+        : `🔄 Đã chuyển "${displayName}" sang kênh ${label} (bảo toàn 100% dữ liệu)`
+    );
   };
 
   const handleSaveEditingPerson = () => {
@@ -3213,7 +3949,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     const trimmedName = String(data.name || '').trim();
     const trimmedFb = String(data.fbName || '').trim();
     if (!trimmedName && !trimmedFb) {
-      showToast('⚠️ Vui lòng nhập Họ tên khai sinh hoặc Tên Facebook');
+      showToast(
+        uiLang === 'jp'
+          ? '⚠️ 氏名またはFBアカウント名を入力してください'
+          : '⚠️ Vui lòng nhập Họ tên khai sinh hoặc Tên Facebook'
+      );
       return;
     }
 
@@ -3259,7 +3999,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     }
 
     setEditingPerson(null);
-    showToast(isNew ? '✅ 新規登録しました' : '✅ プロフィールを更新しました');
+    showToast(isNew ? t.toasts.profileSavedNew : t.toasts.profileSavedEdit);
 
     const scheduleChanged =
       !prevPerson ||
@@ -3271,16 +4011,30 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         (savedPerson.proposedCompany || '').trim();
 
     const nextDraft = buildCandidateCalendarEventDraft(savedPerson);
+    const savedDisplayName = getCandidateDisplayName(savedPerson, uiLang);
 
     if (nextDraft && scheduleChanged) {
       const hasExistingEvent = Boolean(savedPerson.googleCalendarEventId);
       setConfirmDialog({
         title: hasExistingEvent
-          ? 'Cập nhật lịch trên Google Calendar?'
+          ? uiLang === 'jp'
+            ? 'Googleカレンダーの予定を更新しますか？'
+            : 'Cập nhật lịch trên Google Calendar?'
+          : uiLang === 'jp'
+          ? 'Googleカレンダーに新規予定を作成しますか？'
           : 'Tạo sự kiện mới trên Google Calendar?',
-        message: `Đã lưu lịch hẹn của ${savedPerson.name} trong CRM.\n• Tiêu đề: ${nextDraft.eventTitle}\n• Thời gian: ${nextDraft.displayDateTime}\n• Nhắc nhở: 30 phút & 10 phút trước.\n\nBạn có muốn đồng bộ lên Google Calendar ngay bây giờ không?`,
-        confirmLabel: hasExistingEvent ? 'Cập nhật Calendar' : 'Tạo lịch trên Calendar',
-        cancelLabel: 'Chỉ lưu CRM',
+        message:
+          uiLang === 'jp'
+            ? `${savedDisplayName} さんの予定をCRMに保存しました。\n• 件名: ${nextDraft.eventTitle}\n• 日時: ${nextDraft.displayDateTime}\n• リマインダー: 30分前・10分前\n\n今すぐGoogleカレンダーへ同期しますか？`
+            : `Đã lưu lịch hẹn của ${savedDisplayName} trong CRM.\n• Tiêu đề: ${nextDraft.eventTitle}\n• Thời gian: ${nextDraft.displayDateTime}\n• Nhắc nhở: 30 phút & 10 phút trước.\n\nBạn có muốn đồng bộ lên Google Calendar ngay bây giờ không?`,
+        confirmLabel: hasExistingEvent
+          ? uiLang === 'jp'
+            ? 'カレンダーを更新'
+            : 'Cập nhật Calendar'
+          : uiLang === 'jp'
+          ? 'カレンダーに作成'
+          : 'Tạo lịch trên Calendar',
+        cancelLabel: uiLang === 'jp' ? 'CRMのみ保存' : 'Chỉ lưu CRM',
         tone: 'accent',
         onConfirm: () => {
           setConfirmDialog(null);
@@ -3290,10 +4044,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     } else if (!nextDraft && prevPerson?.googleCalendarEventId) {
       const staleEventId = prevPerson.googleCalendarEventId;
       setConfirmDialog({
-        title: 'Hủy sự kiện trên Google Calendar?',
-        message: `Bạn đã xóa ngày giờ lịch hẹn của ${savedPerson.name}. Bạn có muốn xóa sự kiện tương ứng khỏi Google Calendar không?`,
-        confirmLabel: 'Xóa trên Google Calendar',
-        cancelLabel: 'Giữ lại',
+        title:
+          uiLang === 'jp'
+            ? 'Googleカレンダーの予定を削除しますか？'
+            : 'Hủy sự kiện trên Google Calendar?',
+        message:
+          uiLang === 'jp'
+            ? `${savedDisplayName} さんの面談日時が削除されました。連携していたGoogleカレンダーの予定も削除しますか？`
+            : `Bạn đã xóa ngày giờ lịch hẹn của ${savedDisplayName}. Bạn có muốn xóa sự kiện tương ứng khỏi Google Calendar không?`,
+        confirmLabel:
+          uiLang === 'jp' ? 'Googleカレンダーから削除' : 'Xóa trên Google Calendar',
+        cancelLabel: uiLang === 'jp' ? '残す' : 'Giữ lại',
         tone: 'danger',
         onConfirm: () => {
           setConfirmDialog(null);
@@ -3308,14 +4069,19 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       (p) => p.id === personId
     );
     const linkedEventId = targetPerson?.googleCalendarEventId;
+    const targetDisplayName = getCandidateDisplayName(targetPerson, uiLang);
 
     setConfirmDialog({
-      title: '削除の確認',
+      title: uiLang === 'jp' ? '削除の確認' : 'Xác nhận xóa hồ sơ',
       message: linkedEventId
-        ? `この相談者データ（${targetPerson?.name || ''}）を削除しますか？関連付けられた Google Calendar の予定も同時に削除されます。`
-        : 'この相談者データを削除してもよろしいですか？',
-      confirmLabel: '削除を実行する',
-      cancelLabel: 'キャンセル',
+        ? uiLang === 'jp'
+          ? `この相談者データ（${targetDisplayName}）を削除しますか？関連付けられた Google Calendar の予定も同時に削除されます。`
+          : `Bạn có chắc muốn xóa hồ sơ (${targetDisplayName})? Sự kiện liên kết trên Google Calendar cũng sẽ bị xóa.`
+        : uiLang === 'jp'
+        ? `この相談者データ（${targetDisplayName}）を削除してもよろしいですか？`
+        : `Bạn có chắc chắn muốn xóa hồ sơ (${targetDisplayName}) không?`,
+      confirmLabel: uiLang === 'jp' ? '削除を実行する' : 'Xác nhận xóa',
+      cancelLabel: t.cancel,
       tone: 'danger',
       onConfirm: () => {
         if (isSchool) {
@@ -3324,7 +4090,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           setCandidates((prev) => prev.filter((c) => c.id !== personId));
         }
         setConfirmDialog(null);
-        showToast('🗑️ 削除しました');
+        showToast(t.toasts.deletedCandidate);
         if (linkedEventId) {
           void executeCalendarDelete(personId, linkedEventId, false);
         }
@@ -3610,7 +4376,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
   );
 
   const mapServerKyujinItemsToEntries = (
-    items: Array<Record<string, string>>,
+    items: Array<Record<string, unknown>>,
     sourceName: string
   ) => {
     const fallbackComp = sourceName
@@ -3620,64 +4386,76 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       .trim();
 
     return items.map((parsed, idx) => {
-      const cleanArea = formatPublicArea(parsed.area || '') || String(parsed.area || '').trim();
-      const cleanDesc = sanitizeJobDescriptionForCandidate(parsed.jobDescription || '');
-      const shiftLabel = String(parsed.shiftTime || '').trim();
+      const str = (key: string) => String(parsed[key] ?? '').trim();
+      const strArr = (key: string) =>
+        Array.isArray(parsed[key])
+          ? (parsed[key] as unknown[]).map((v) => String(v ?? '').trim()).filter(Boolean)
+          : [];
+      const cleanArea = formatPublicArea(str('area')) || str('area');
+      const cleanDesc = sanitizeJobDescriptionForCandidate(str('jobDescription'));
+      const shiftLabel = str('shiftTime');
       const industry = detectIndustryFromText(
-        `${parsed.industry || ''} ${cleanDesc}`,
-        `${sourceName} ${parsed.industry || ''}`
+        `${str('industry')} ${cleanDesc}`,
+        `${sourceName} ${str('industry')}`
       );
       const sector =
-        String(parsed.sector || '').trim() ||
-        detectSectorFromIndustryOrText(industry, `${parsed.industry || ''} ${cleanDesc}`);
+        str('sector') ||
+        detectSectorFromIndustryOrText(industry, `${str('industry')} ${cleanDesc}`);
 
       const rawSalaryHint = [
-        parsed.salary && !/要確認/.test(parsed.salary) ? parsed.salary : '',
-        parsed.hourlyWage && !/要確認/.test(parsed.hourlyWage) ? `時給 ${parsed.hourlyWage}` : '',
+        str('salary') && !/要確認/.test(str('salary')) ? str('salary') : '',
+        str('hourlyWage') && !/要確認/.test(str('hourlyWage'))
+          ? `時給 ${str('hourlyWage')}`
+          : '',
         cleanDesc,
       ]
         .filter(Boolean)
         .join('\n');
       const parsedSalary = extractKyujinSalaryInfo(rawSalaryHint, {
-        assumeBareNumberIsSalary: Boolean(parsed.salary && !/要確認/.test(parsed.salary)),
+        assumeBareNumberIsSalary: Boolean(str('salary') && !/要確認/.test(str('salary'))),
       });
       const resolvedSalary =
         parsedSalary.salaryType !== 'unknown'
           ? parsedSalary.salary
-          : String(
-              parsed.salary || (parsed.hourlyWage ? `時給 ${parsed.hourlyWage}` : '給与要確認')
-            ).trim();
+          : str('salary') || (str('hourlyWage') ? `時給 ${str('hourlyWage')}` : '給与要確認');
       const resolvedHourlyWage =
-        parsedSalary.salaryType === 'hourly'
-          ? parsedSalary.hourlyWage
-          : String(parsed.hourlyWage || '').trim();
+        parsedSalary.salaryType === 'hourly' ? parsedSalary.hourlyWage : str('hourlyWage');
 
       let employmentType =
-        String(parsed.employmentType || '').trim() ||
+        str('employmentType') ||
         detectEmploymentTypeFromText(
           `${resolvedSalary} ${resolvedHourlyWage} ${cleanDesc}`,
           sourceName
         );
       if (
-        !String(parsed.employmentType || '').trim() &&
+        !str('employmentType') &&
         parsedSalary.salaryType === 'hourly' &&
         !/tokutei|特定技能|正社員/i.test(cleanDesc)
       ) {
         employmentType = 'Baito / Làm thêm (アルバイト・パート)';
       }
 
-      const rawJlpt = String(parsed.minJlpt || '').trim();
+      const rawJlpt = str('minJlpt');
       const normalizedJlpt = /^(N[1-5]|日常会話|不問)$/.test(rawJlpt)
         ? rawJlpt
         : '要確認';
       const derivedCode =
-        String(parsed.jobCode || '').trim() ||
-        cleanArea ||
-        `${sourceName.replace(/\.[^.]+$/, '')}-${idx + 1}`;
-      const bonusNorm = normalizeBonusInfo(parsed.bonus, parsed.bonusDetail, cleanDesc);
+        str('jobCode') || cleanArea || `${sourceName.replace(/\.[^.]+$/, '')}-${idx + 1}`;
+      const bonusNorm = normalizeBonusInfo(str('bonus'), str('bonusDetail'), cleanDesc);
+      const conds = extractNormalizedKyujinConditions({
+        text: `${cleanDesc} ${str('experienceDetail')} ${str('experienceRequirement')}`,
+        minJlpt: normalizedJlpt,
+        employmentType,
+        existingExcludedNationalities: strArr('excludedNationalities'),
+        existingExcludedGenders: strArr('excludedGenders'),
+        existingRequiresInJapan: Boolean(parsed.requiresInJapan),
+        existingRequiresTokutei: Boolean(parsed.requiresTokutei),
+        existingRequiredConditions: strArr('requiredConditions'),
+        existingNgConditions: strArr('ngConditions'),
+      });
 
       return {
-        companyName: String(parsed.companyName || fallbackComp || '新規取込企業')
+        companyName: (str('companyName') || fallbackComp || '新規取込企業')
           .replace(/\s*代表者.*$/, '')
           .trim(),
         sector,
@@ -3693,20 +4471,26 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           area: cleanArea || '勤務地要確認',
           shiftTime: shiftLabel,
           salary: resolvedSalary,
-          nightShiftAllowance: String(parsed.nightShiftAllowance || '').trim(),
-          estimatedNetSalary: String(parsed.estimatedNetSalary || '').trim(),
+          nightShiftAllowance: str('nightShiftAllowance'),
+          estimatedNetSalary: str('estimatedNetSalary'),
           hourlyWage: resolvedHourlyWage,
-          commuteAllowance: String(parsed.commuteAllowance || '').trim(),
-          shiftsPerWeek: String(parsed.shiftsPerWeek || '').trim(),
+          commuteAllowance: str('commuteAllowance'),
+          shiftsPerWeek: str('shiftsPerWeek'),
           bonus: bonusNorm.bonus,
           bonusDetail: bonusNorm.bonusDetail,
           minJlpt: normalizedJlpt,
-          housingSupport: normalizeHousingDisplay(parsed.housingSupport),
+          housingSupport: normalizeHousingDisplay(str('housingSupport')),
           recruitmentStatus: '募集中',
-          careQualification: parsed.careQualification || '',
-          experienceRequirement: String(parsed.experienceRequirement || '').trim(),
-          experienceDetail: String(parsed.experienceDetail || '').trim(),
+          careQualification: str('careQualification'),
+          experienceRequirement: str('experienceRequirement'),
+          experienceDetail: str('experienceDetail'),
           jobDescription: cleanDesc,
+          excludedNationalities: conds.excludedNationalities,
+          excludedGenders: conds.excludedGenders,
+          requiresInJapan: conds.requiresInJapan,
+          requiresTokutei: conds.requiresTokutei,
+          requiredConditions: conds.requiredConditions,
+          ngConditions: conds.ngConditions,
         } satisfies KyujinSlot,
       };
     });
@@ -3817,7 +4601,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     setKyujinImportProgress({ current: 1, total: 1, label: 'Phân tích văn bản Kyujin' });
     try {
       const token = await getFirebaseIdToken();
-      let items: Array<Record<string, string>> = [];
+      let items: Array<Record<string, unknown>> = [];
       try {
         items = await extractKyujinRawTextViaServer(raw, token);
       } catch {
@@ -3848,10 +4632,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     const isSchool = Boolean(person._isSchool || person.channel === 'school');
     const mendanInfo = extractNormalizedMendanInfo(person);
     const missingItems = getMissingInfoForCandidate(person);
-    const matchEval = evaluateCandidateKyujinMatches(person, kyujins);
+    const matchEval = evaluateCandidateKyujinMatches(person, kyujins, uiLang);
     const matchingKyujins = matchEval.matches;
+    const isJobMatchExpanded = Boolean(expandedJobMatchIds[person.id]);
+    const visibleMatches = isJobMatchExpanded ? matchingKyujins : matchingKyujins.slice(0, 2);
     const proposedComp = getEffectiveProposedCompany(person);
     const declineReason = extractDeclineReason(person);
+    const displayName = getCandidateDisplayName(person, uiLang);
     const now = new Date();
     const todayIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
       now.getDate()
@@ -3861,16 +4648,16 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     return (
       <div
         key={person.id}
-        className="rounded-lg border border-[#27272a] bg-[#141417] p-4 transition-colors hover:border-[#3f3f46]"
+        className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)] transition-colors hover:border-[#CBD5E1]"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex flex-wrap items-center gap-2.5">
-              <span className="text-base font-semibold tracking-tight text-[#edeeef]">
-                {person.name}
+              <span className="text-base font-semibold tracking-tight text-[#0F172A]">
+                {displayName}
               </span>
-              {person.fbName && person.fbName !== person.name && (
-                <span className="font-mono text-[11px] text-[#38bdf8]">
+              {person.fbName && person.fbName !== displayName && (
+                <span className="font-mono text-[11px] font-medium text-sky-700">
                   FB: {person.fbName}
                 </span>
               )}
@@ -3879,50 +4666,64 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 onChange={(e) =>
                   handleQuickChannelChange(person, e.target.value as ChannelType)
                 }
-                title="Chuyển nhanh kênh nguồn (FB個人 / FB会社公式 / 留学生)"
-                className="rounded border border-[#27272a] bg-[#0c0c0e] px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-[#94949e] hover:border-[#22c55e] hover:text-[#edeeef] focus:border-[#22c55e] focus:outline-none cursor-pointer"
+                title={t.quickChannelTitle}
+                className="rounded border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-0.5 text-[10px] font-semibold text-[#475569] hover:border-[#16A34A] hover:text-[#0F172A] focus:border-[#16A34A] focus:outline-none cursor-pointer"
               >
-                <option value="personal" className="bg-[#141417] text-[#edeeef]">
-                  FB個人
-                </option>
-                <option value="company" className="bg-[#141417] text-[#edeeef]">
-                  FB会社公式
-                </option>
-                <option value="school" className="bg-[#141417] text-[#edeeef]">
-                  留学生
-                </option>
+                <option value="personal">{t.channelPersonal}</option>
+                <option value="company">{t.channelCompany}</option>
+                <option value="school">{t.channelSchool}</option>
               </select>
               {isContactedToday ? (
-                <span className="font-mono text-[10px] text-[#22c55e] tabular-nums">
-                  CONTACTED {todayIso}
+                <span className="rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-700 tabular-nums">
+                  {t.contactedPrefix} {todayIso}
                 </span>
               ) : (
                 person.lastContactDate && (
-                  <span className="font-mono text-[10px] text-[#94949e] tabular-nums">
-                    LAST: {person.lastContactDate}
+                  <span className="font-mono text-[10px] text-[#64748B] tabular-nums">
+                    {t.lastContactPrefix} {person.lastContactDate}
                   </span>
                 )
               )}
               {proposedComp && (
-                <span className="font-mono text-[10px] text-sky-400">
-                  PROPOSED: {proposedComp}
+                <span className="rounded bg-sky-50 border border-sky-200 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-sky-700">
+                  {t.proposedPrefix} {proposedComp}
                 </span>
               )}
             </div>
-            <div className="mt-1 font-mono text-[10px] uppercase tracking-wider text-[#22c55e]">
-              STATUS: {person.progressStatus || '新規相談'}
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider">
+              <span
+                className={`rounded px-1.5 py-0.5 ${
+                  person.progressStatus === '内定辞退'
+                    ? 'border border-orange-300 bg-orange-50 text-orange-800'
+                    : PROPOSED_NAITEI_STATUSES.includes(person.progressStatus || '')
+                    ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : PROPOSED_JITAI_STATUSES.includes(person.progressStatus || '')
+                    ? 'border border-rose-200 bg-rose-50 text-rose-700'
+                    : 'text-emerald-700'
+                }`}
+              >
+                {t.statusPrefix} {person.progressStatus || '新規相談'}
+              </span>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
             <select
               value={person.progressStatus || '新規相談'}
-              onChange={(e) => handleQuickStatusChange(person.id, isSchool, e.target.value)}
-              title="進捗ステータスを1タップ変更"
-              className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-2.5 py-1.5 text-[11px] font-semibold text-[#edeeef] focus:border-[#22c55e] focus:outline-none whitespace-nowrap shrink-0"
+              onChange={(e) => handleStatusTransitionRequest(person, isSchool, e.target.value)}
+              title={t.quickStatusTitle}
+              className={`rounded-md border px-2.5 py-1.5 text-[11px] font-semibold focus:border-[#16A34A] focus:outline-none whitespace-nowrap shrink-0 cursor-pointer ${
+                person.progressStatus === '内定辞退'
+                  ? 'border-orange-300 bg-orange-50 text-orange-800'
+                  : PROPOSED_NAITEI_STATUSES.includes(person.progressStatus || '')
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : PROPOSED_JITAI_STATUSES.includes(person.progressStatus || '')
+                  ? 'border-rose-200 bg-rose-50 text-rose-700'
+                  : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#0F172A]'
+              }`}
             >
               {PROGRESS_STATUSES.map((st) => (
-                <option key={st} value={st} className="bg-[#141417] text-[#edeeef]">
+                <option key={st} value={st}>
                   {st}
                 </option>
               ))}
@@ -3933,11 +4734,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               onClick={() => handleMarkContactedToday(person, isSchool)}
               className={`rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 isContactedToday
-                  ? 'border-[#22c55e]/50 bg-[#22c55e]/15 text-[#22c55e]'
-                  : 'border-[#27272a] bg-transparent text-[#94949e] hover:border-[#94949e] hover:text-[#edeeef]'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : 'border-[#E2E8F0] bg-white text-[#475569] hover:border-[#CBD5E1] hover:bg-[#F8FAFC] hover:text-[#0F172A]'
               }`}
             >
-              {isContactedToday ? '本日連絡済' : '今日連絡済み'}
+              {isContactedToday ? t.contactedTodayBtn : t.markContactedTodayBtn}
             </button>
 
             <button
@@ -3948,25 +4749,34 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   scenario: missingItems.length > 0 ? 'first_mendan' : 'recommend_job',
                 })
               }
-              className="rounded-md bg-[#22c55e] px-3 py-1.5 text-[11px] font-semibold text-[#0c0c0e] transition-opacity hover:opacity-90 whitespace-nowrap shrink-0 cursor-pointer"
+              className="rounded-md bg-[#16A34A] px-3 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-[#15803D] whitespace-nowrap shrink-0 cursor-pointer"
             >
-              返信文提案
+              {t.suggestReplyBtn}
             </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                setRirekishoStatusBanner(null);
-                setRirekishoChatInput(person.memo || '');
-                setRirekishoModal({
-                  person,
-                  draft: createInitialRirekishoDraft(person),
-                });
-              }}
-              className="rounded-md border border-[#27272a] bg-transparent px-3 py-1.5 text-[11px] font-semibold text-[#edeeef] hover:border-[#94949e] whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              履歴書作成
-            </button>
+            {(() => {
+              const hasSavedCv = Boolean(person.savedRirekisho?.draft);
+              return (
+                <button
+                  type="button"
+                  onClick={() => openRirekishoModalForCandidate(person)}
+                  className={`inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-[11px] font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    hasSavedCv
+                      ? 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                      : 'border-[#E2E8F0] bg-white text-[#0F172A] hover:border-[#CBD5E1] hover:bg-[#F8FAFC]'
+                  }`}
+                  title={
+                    hasSavedCv && person.savedRirekisho?.updatedAt
+                      ? `${t.editSavedRirekishoBtn} (${person.savedRirekisho.updatedAt
+                          .slice(0, 16)
+                          .replace('T', ' ')})`
+                      : t.createRirekishoBtn
+                  }
+                >
+                  {hasSavedCv ? `✅ ${t.editSavedRirekishoBtn}` : t.createRirekishoBtn}
+                </button>
+              );
+            })()}
 
             <button
               type="button"
@@ -3974,21 +4784,21 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               onClick={() => requestSyncCandidateCalendar(person)}
               className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
                 person.googleCalendarEventId
-                  ? 'border-[#22c55e]/50 bg-[#22c55e]/10 text-[#22c55e] hover:bg-[#22c55e]/20'
-                  : 'border-[#27272a] bg-transparent text-[#94949e] hover:border-[#22c55e] hover:text-[#22c55e]'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                  : 'border-[#E2E8F0] bg-white text-[#475569] hover:border-emerald-300 hover:text-emerald-700'
               }`}
               title={
                 person.googleCalendarEventId
-                  ? 'Đã đồng bộ Google Calendar · Bấm để cập nhật'
-                  : 'Đồng bộ lịch Mendan / Phỏng vấn lên Google Calendar'
+                  ? t.syncCalendarTitleSynced
+                  : t.syncCalendarTitleNew
               }
             >
               <Calendar className="h-3 w-3" aria-hidden="true" />
               {syncingCalendarId === person.id
-                ? 'Đang đồng bộ...'
+                ? t.syncingCalendarBtn
                 : person.googleCalendarEventId
-                ? 'Đã đồng bộ Calendar'
-                : 'Đồng bộ Google Calendar'}
+                ? t.syncedCalendarBtn
+                : t.syncCalendarBtn}
             </button>
 
             {(() => {
@@ -3999,11 +4809,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     href={fbMessengerUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 rounded-md border border-[#38bdf8]/40 bg-[#38bdf8]/10 px-2.5 py-1.5 text-[11px] font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 whitespace-nowrap shrink-0"
-                    title="Mở trang cá nhân / Messenger của ứng viên"
+                    className="inline-flex items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap shrink-0"
+                    title={t.openMessengerBtn}
                   >
                     <MessageCircle className="h-3 w-3" aria-hidden="true" />
-                    Mở Messenger
+                    {t.openMessengerBtn}
                   </a>
                 );
               }
@@ -4013,11 +4823,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     href="https://business.facebook.com/latest/inbox/all"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 rounded-md border border-[#38bdf8]/40 bg-[#38bdf8]/10 px-2.5 py-1.5 text-[11px] font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 whitespace-nowrap shrink-0"
-                    title={`Mở hộp thư Meta Business (Sender ID: ${person.fbSenderId})`}
+                    className="inline-flex items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap shrink-0"
+                    title={`Meta Business (Sender ID: ${person.fbSenderId})`}
                   >
                     <MessageCircle className="h-3 w-3" aria-hidden="true" />
-                    Hộp thư FB
+                    {t.fbInboxBtn}
                   </a>
                 );
               }
@@ -4030,11 +4840,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   href={person.googleCalendarEventLink}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 rounded-md border border-[#27272a] px-2 py-1.5 text-[11px] font-semibold text-[#edeeef] hover:border-[#22c55e] hover:text-[#22c55e] whitespace-nowrap shrink-0"
-                  title="Mở sự kiện trên Google Calendar"
+                  className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-[11px] font-semibold text-[#0F172A] hover:border-emerald-300 hover:text-emerald-700 whitespace-nowrap shrink-0"
+                  title={t.openCalendarBtn}
                 >
                   <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                  Mở Calendar
+                  {t.openCalendarBtn}
                 </a>
               )}
 
@@ -4047,76 +4857,80 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   isNew: false,
                 })
               }
-              className="rounded-md border border-[#27272a] bg-transparent px-2.5 py-1.5 text-[11px] font-semibold text-[#94949e] hover:border-[#94949e] hover:text-[#edeeef] whitespace-nowrap shrink-0 cursor-pointer"
+              className="rounded-md border border-[#E2E8F0] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#475569] hover:border-[#CBD5E1] hover:bg-[#F8FAFC] hover:text-[#0F172A] whitespace-nowrap shrink-0 cursor-pointer"
             >
-              編集
+              {t.editBtn}
             </button>
 
             <button
               type="button"
               onClick={() => handleDeletePerson(person.id, isSchool)}
-              className="rounded-md border border-[#ef4444]/30 bg-transparent px-2.5 py-1.5 text-[11px] font-semibold text-[#ef4444] hover:bg-[#ef4444]/10 whitespace-nowrap shrink-0 cursor-pointer"
+              className="rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap shrink-0 cursor-pointer"
             >
-              削除
+              {t.deleteBtn}
             </button>
           </div>
         </div>
 
         {/* Structured Key-Value Grid */}
-        <div className="mt-3 grid grid-cols-2 gap-3 border-t border-dashed border-[#27272a] pt-3 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="mt-3 grid grid-cols-2 gap-3 border-t border-dashed border-[#E2E8F0] pt-3 sm:grid-cols-3 lg:grid-cols-5">
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-              FB NAME
+            <div className="font-mono text-[10px] font-medium uppercase tracking-wider text-[#64748B]">
+              {t.cardLabels.fbName}
             </div>
-            <div className="mt-0.5 break-words text-xs font-medium text-[#edeeef]">
-              {person.fbName || person.name || '-'}
+            <div className="mt-0.5 break-words text-xs font-medium text-[#0F172A]">
+              {person.fbName || displayName}
             </div>
           </div>
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-              NATIONALITY / VISA
+            <div className="font-mono text-[10px] font-medium uppercase tracking-wider text-[#64748B]">
+              {t.cardLabels.natVisa}
             </div>
-            <div className="mt-0.5 text-xs font-medium text-[#edeeef] tabular-nums">
-              {person.nationality || '未設定'}
-              {person.age ? ` / ${person.age}歳` : ''}
+            <div className="mt-0.5 text-xs font-medium text-[#0F172A] tabular-nums">
+              {person.nationality || t.cardLabels.unset}
+              {person.age ? ` / ${person.age} ${t.cardLabels.ageUnit}` : ''}
             </div>
             {person.visaStatus && (
-              <div className="mt-0.5 text-[11px] text-[#94949e]">{person.visaStatus}</div>
+              <div className="mt-0.5 text-[11px] text-[#64748B]">{person.visaStatus}</div>
             )}
           </div>
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-              LANGUAGE &amp; CERT
+            <div className="font-mono text-[10px] font-medium uppercase tracking-wider text-[#64748B]">
+              {t.cardLabels.langCert}
             </div>
-            <div className="mt-0.5 font-mono text-xs font-semibold text-[#22c55e]">
-              {person.jlpt || '要確認'}
+            <div className="mt-0.5 font-mono text-xs font-semibold text-emerald-700">
+              {person.jlpt || t.cardLabels.unset}
             </div>
             {(person.passedExam || person.japanExperience) && (
-              <div className="mt-0.5 text-[11px] text-[#94949e]">
+              <div className="mt-0.5 text-[11px] text-[#64748B]">
                 {[person.japanExperience, person.passedExam].filter(Boolean).join(' · ')}
               </div>
             )}
           </div>
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-              FIELD / DESIRED AREAS
+            <div className="font-mono text-[10px] font-medium uppercase tracking-wider text-[#64748B]">
+              {t.cardLabels.fieldArea}
             </div>
-            <div className="mt-0.5 break-words text-xs font-medium text-[#edeeef]">
-              {person.desiredIndustry || '未設定'}
+            <div className="mt-0.5 break-words text-xs font-medium text-[#0F172A]">
+              {person.desiredIndustry || t.cardLabels.unset}
               {person.desiredArea ? ` (${person.desiredArea})` : ''}
             </div>
           </div>
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-              {person.visaExpiry ? 'VISA EXP' : mendanInfo.hasMendan ? 'MENDAN' : 'SCHOOL'}
+            <div className="font-mono text-[10px] font-medium uppercase tracking-wider text-[#64748B]">
+              {person.visaExpiry
+                ? t.cardLabels.visaExp
+                : mendanInfo.hasMendan
+                ? t.cardLabels.mendan
+                : t.cardLabels.school}
             </div>
             <div
               className={`mt-0.5 font-mono text-xs font-medium tabular-nums ${
                 person.visaExpiry
-                  ? 'text-[#ef4444]'
+                  ? 'text-rose-700'
                   : mendanInfo.hasMendan
-                  ? 'text-[#f59e0b]'
-                  : 'text-[#94949e]'
+                  ? 'text-amber-700'
+                  : 'text-[#64748B]'
               }`}
             >
               {person.visaExpiry || mendanInfo.dateLabel || person.schoolName || '-'}
@@ -4124,27 +4938,56 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </div>
         </div>
 
+        {(person.naiteiCompany || person.expectedJoinDate || person.visaSubmissionDeadline) && (
+          <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-md border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-xs">
+            <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-emerald-800">
+              🎉 {t.drawer.naiteiBannerTitle}:
+            </span>
+            {person.naiteiCompany && (
+              <span className="font-semibold text-[#0F172A]">
+                {t.drawer.naiteiComp} {person.naiteiCompany}
+              </span>
+            )}
+            {person.expectedJoinDate && (
+              <span className="font-mono font-medium text-emerald-800 tabular-nums">
+                {t.drawer.expectedJoin} {person.expectedJoinDate}
+              </span>
+            )}
+            {person.visaSubmissionDeadline && (
+              <span className="font-mono font-semibold text-amber-800 tabular-nums">
+                {t.drawer.visaDeadline} {person.visaSubmissionDeadline}
+              </span>
+            )}
+          </div>
+        )}
+
         {(person.conversionGoal || person.salaryExpectation) && (
-          <div className="mt-2.5 grid grid-cols-1 gap-2 rounded-md border border-[#27272a] bg-[#0c0c0e]/70 px-3 py-2 text-xs sm:grid-cols-2">
+          <div className="mt-2.5 grid grid-cols-1 gap-2 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs sm:grid-cols-2">
             {person.conversionGoal && (
               <div>
-                <span className="font-mono text-[10px] uppercase text-[#38bdf8]">MỤC TIÊU: </span>
-                <span className="text-[#edeeef]">{person.conversionGoal}</span>
+                <span className="font-mono text-[10px] font-semibold uppercase text-sky-700">
+                  {t.cardLabels.goal}{' '}
+                </span>
+                <span className="text-[#0F172A]">{person.conversionGoal}</span>
               </div>
             )}
             {person.salaryExpectation && (
               <div>
-                <span className="font-mono text-[10px] uppercase text-[#22c55e]">LƯƠNG KỲ VỌNG: </span>
-                <span className="text-[#edeeef]">{person.salaryExpectation}</span>
+                <span className="font-mono text-[10px] font-semibold uppercase text-emerald-700">
+                  {t.cardLabels.salaryExp}{' '}
+                </span>
+                <span className="text-[#0F172A]">{person.salaryExpectation}</span>
               </div>
             )}
           </div>
         )}
 
         {(person.negotiationLog || person.memo) && (
-          <div className="mt-2.5 whitespace-pre-line rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-2.5 text-xs leading-relaxed text-[#edeeef]/90">
+          <div className="mt-2.5 whitespace-pre-line rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs leading-relaxed text-[#334155]">
             {person.negotiationLog && person.negotiationLog !== person.memo
-              ? `${person.negotiationLog}${person.memo ? `\n\n--- Ghi chú thêm ---\n${person.memo}` : ''}`
+              ? `${person.negotiationLog}${
+                  person.memo ? `\n\n--- ${t.cardLabels.extraNotes} ---\n${person.memo}` : ''
+                }`
               : person.memo || person.negotiationLog}
           </div>
         )}
@@ -4155,14 +4998,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             Boolean(person.interviewDate && parseFlexibleDateToTimestamp(person.interviewDate) < Date.now()) ||
             /面接|内定/.test(String(person.progressStatus || ''));
           return (
-            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-2 text-xs">
+            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-[10px] uppercase tracking-wider text-[#22c55e]">
-                  Gợi ý tiếp theo:
+                <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+                  {t.cardLabels.nextAction}
                 </span>
                 {missingItems.length > 0 && (
-                  <span className="text-[#f59e0b]">
-                    Thiếu {missingItems.length} mục ({missingItems.map((m) => m.vi).join(', ')})
+                  <span className="font-medium text-amber-800">
+                    {t.cardLabels.missingCount(
+                      missingItems.length,
+                      missingItems.map((m) => (uiLang === 'jp' ? m.ja : m.vi)).join(', ')
+                    )}
                   </span>
                 )}
               </div>
@@ -4173,17 +5019,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     onClick={() =>
                       setReplyModal({ person, scenario: 'missing_info_request' })
                     }
-                    className="rounded border border-[#f59e0b]/60 bg-[#f59e0b]/10 px-2.5 py-1 text-[11px] font-semibold text-[#f59e0b] hover:bg-[#f59e0b]/20 whitespace-nowrap cursor-pointer"
+                    className="rounded border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 whitespace-nowrap cursor-pointer"
                   >
-                    Xin thông tin thiếu
+                    {t.cardLabels.askMissingBtn}
                   </button>
                 )}
                 <button
                   type="button"
                   onClick={() => setReplyModal({ person, scenario: 'recommend_job' })}
-                  className="rounded border border-[#22c55e]/50 bg-[#22c55e]/10 px-2.5 py-1 text-[11px] font-semibold text-[#22c55e] hover:bg-[#22c55e]/20 whitespace-nowrap cursor-pointer"
+                  className="rounded border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100 whitespace-nowrap cursor-pointer"
                 >
-                  Gửi 3 Job phù hợp nhất
+                  {t.cardLabels.send3JobsBtn}
                 </button>
                 {isInterviewPassed && (
                   <button
@@ -4191,9 +5037,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     onClick={() =>
                       setReplyModal({ person, scenario: 'post_interview_followup' })
                     }
-                    className="rounded border border-[#38bdf8]/50 bg-[#38bdf8]/10 px-2.5 py-1 text-[11px] font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 whitespace-nowrap cursor-pointer"
+                    className="rounded border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap cursor-pointer"
                   >
-                    Hỏi thăm sau phỏng vấn
+                    {t.cardLabels.postInterviewBtn}
                   </button>
                 )}
               </div>
@@ -4202,9 +5048,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         })()}
 
         {declineReason && (
-          <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#ef4444]/40 bg-[#ef4444]/10 px-3 py-2 text-xs">
-            <span className="font-semibold text-[#ef4444]">
-              辞退理由: <span className="font-normal text-[#edeeef]">{declineReason}</span>
+          <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs">
+            <span className="font-semibold text-rose-700">
+              {t.cardLabels.declineReason}{' '}
+              <span className="font-normal text-[#0F172A]">{declineReason}</span>
             </span>
             <button
               type="button"
@@ -4215,132 +5062,164 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   isNew: false,
                 })
               }
-              className="rounded border border-[#ef4444]/40 px-2 py-0.5 text-[11px] font-semibold text-[#ef4444] hover:bg-[#ef4444]/15 whitespace-nowrap shrink-0 cursor-pointer"
+              className="rounded border border-rose-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap shrink-0 cursor-pointer"
             >
-              理由を追記・修正
+              {t.cardLabels.editDeclineReason}
             </button>
           </div>
         )}
 
         {(matchingKyujins.length > 0 || Boolean(matchEval.noticeMessage)) && (
-          <div className="mt-3 pt-2">
-            <div className="mb-1.5 font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-              Job Match Suggestions ({matchingKyujins.length})
+          <div className="mt-3 border-t border-[#E2E8F0] pt-2.5">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                {t.jobMatch.title} ({matchingKyujins.length})
+              </span>
+              {matchingKyujins.length > 2 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExpandedJobMatchIds((prev) => ({
+                      ...prev,
+                      [person.id]: !prev[person.id],
+                    }))
+                  }
+                  className="rounded border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-0.5 text-[11px] font-semibold text-sky-700 hover:border-sky-300 hover:bg-sky-50 whitespace-nowrap cursor-pointer"
+                >
+                  {isJobMatchExpanded
+                    ? t.jobMatch.collapse
+                    : t.jobMatch.showMore(matchingKyujins.length - 2)}
+                </button>
+              )}
             </div>
             {matchEval.noticeMessage && (
               <div
                 className={`mb-2 rounded-md border px-3 py-2 text-[11px] ${
                   matchingKyujins.length > 0
-                    ? 'border-[#f59e0b]/40 bg-[#f59e0b]/10 text-[#f59e0b]'
-                    : 'border-[#27272a] bg-[#0c0c0e] text-[#94949e]'
+                    ? 'border-amber-300 bg-amber-50 text-amber-800'
+                    : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B]'
                 }`}
               >
                 {matchEval.noticeMessage}
               </div>
             )}
-            {matchingKyujins.length > 0 && (
+            {visibleMatches.length > 0 && (
               <div className="space-y-1.5">
-                {matchingKyujins.map(({ company, slot, score, reasons }) => {
-                const isBaito = /baito|アルバイト|パート/i.test(
-                  slot.employmentType || company.employmentType || ''
-                );
-                return (
-                  <div
-                    key={slot.slotId}
-                    className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-2 text-xs"
-                  >
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span
-                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums ${
-                            score >= 75
-                              ? 'bg-[#22c55e]/20 text-[#22c55e]'
-                              : score >= 55
-                              ? 'bg-[#38bdf8]/20 text-[#38bdf8]'
-                              : 'bg-[#f59e0b]/20 text-[#f59e0b]'
-                          }`}
-                        >
-                          Khớp {score}%
-                        </span>
-                        <span className="font-semibold text-[#edeeef]">
-                          {company.companyName}
-                        </span>
-                        <span
-                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
-                            isBaito
-                              ? 'bg-[#38bdf8]/15 text-[#38bdf8]'
-                              : 'bg-[#27272a] text-[#94949e]'
-                          }`}
-                        >
-                          {isBaito ? 'Baito' : slot.employmentType || 'Tokutei'}
-                        </span>
-                        <span className="text-[#94949e]">{formatPublicArea(slot.area)}</span>
-                        <span className="font-mono text-[#22c55e] tabular-nums">
-                          {(() => {
-                            const m = getKyujinSlotSalaryDisplayMeta(
-                              slot,
-                              slot.employmentType || company.employmentType || ''
-                            );
-                            return m.isHourly ? `時給 ${m.displayValue}` : m.displayValue;
-                          })()}
-                        </span>
-                        <span className="font-mono text-[11px] text-[#94949e]">
-                          {slot.minJlpt}
-                        </span>
-                      </div>
-                      {reasons && reasons.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5">
-                          {reasons.map((rs, rIdx) => (
-                            <span
-                              key={rIdx}
-                              className="rounded border border-[#27272a] bg-[#141417] px-1.5 py-0.5 text-[10px] text-[#edeeef]/85"
-                            >
-                              {rs}
-                            </span>
-                          ))}
+                {visibleMatches.map(({ company, slot, score, reasons }) => {
+                  const isBaito = /baito|アルバイト|パート/i.test(
+                    slot.employmentType || company.employmentType || ''
+                  );
+                  return (
+                    <div
+                      key={slot.slotId}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs"
+                    >
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums ${
+                              score >= 75
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                : score >= 55
+                                ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                : 'border-amber-300 bg-amber-50 text-amber-800'
+                            }`}
+                          >
+                            {t.jobMatch.matchPct(score)}
+                          </span>
+                          <span className="font-semibold text-[#0F172A]">
+                            {company.companyName}
+                          </span>
+                          <span
+                            className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+                              isBaito
+                                ? 'bg-sky-50 text-sky-700 border border-sky-200'
+                                : 'bg-slate-200/70 text-[#475569]'
+                            }`}
+                          >
+                            {isBaito ? 'Baito' : slot.employmentType || 'Tokutei'}
+                          </span>
+                          <span className="text-[#475569]">{formatPublicArea(slot.area)}</span>
+                          <span className="font-mono font-semibold text-emerald-700 tabular-nums">
+                            {(() => {
+                              const m = getKyujinSlotSalaryDisplayMeta(
+                                slot,
+                                slot.employmentType || company.employmentType || ''
+                              );
+                              return m.isHourly
+                                ? `${t.jobMatch.hourlyPrefix} ${m.displayValue}`
+                                : m.displayValue;
+                            })()}
+                          </span>
+                          <span className="font-mono text-[11px] text-[#64748B]">
+                            {slot.minJlpt}
+                          </span>
                         </div>
-                      )}
+                        {reasons && reasons.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {reasons.map((rs, rIdx) => (
+                              <span
+                                key={rIdx}
+                                className="rounded border border-[#E2E8F0] bg-white px-1.5 py-0.5 text-[10px] text-[#475569]"
+                              >
+                                {rs}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className="inline-flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const post = buildAnonymousJobPostText(company, slot, uiLang);
+                            const ok = await copyTextSafely(post);
+                            showToast(
+                              ok ? t.toasts.copiedInvite(score) : t.toasts.copyFailed
+                            );
+                          }}
+                          className="rounded border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap cursor-pointer"
+                        >
+                          {t.jobMatch.createInviteBtn}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPreviewModal({ company, slot })}
+                          className="rounded border border-[#E2E8F0] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#475569] hover:border-[#CBD5E1] hover:text-[#0F172A] whitespace-nowrap cursor-pointer"
+                        >
+                          {t.jobMatch.previewAnonBtn}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleProposeCompanyToCandidate(
+                              person,
+                              isSchool,
+                              company.companyName
+                            )
+                          }
+                          className="rounded border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100 whitespace-nowrap cursor-pointer"
+                        >
+                          {t.jobMatch.proposeBtn}
+                        </button>
+                      </div>
                     </div>
-                    <div className="inline-flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          const post = buildAnonymousJobPostText(company, slot, 'vi');
-                          const ok = await copyTextSafely(post);
-                          showToast(
-                            ok
-                              ? `📋 Đã tạo & sao chép tin mời ứng tuyển ẩn danh (${score}% khớp)`
-                              : '⚠️ Không thể sao chép tự động'
-                          );
-                        }}
-                        className="rounded border border-[#38bdf8]/40 bg-[#38bdf8]/10 px-2.5 py-1 text-[11px] font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 whitespace-nowrap cursor-pointer"
-                      >
-                        Tạo tin mời ứng tuyển
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setPreviewModal({ company, slot })}
-                        className="rounded border border-[#27272a] px-2.5 py-1 text-[11px] font-semibold text-[#94949e] hover:border-[#94949e] hover:text-[#edeeef] whitespace-nowrap cursor-pointer"
-                      >
-                        Xem ẩn danh
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleProposeCompanyToCandidate(
-                            person,
-                            isSchool,
-                            company.companyName
-                          )
-                        }
-                        className="rounded border border-[#22c55e]/50 bg-[#22c55e]/15 px-2.5 py-1 text-[11px] font-semibold text-[#22c55e] hover:bg-[#22c55e]/25 whitespace-nowrap cursor-pointer"
-                      >
-                        Đề xuất
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+                {matchingKyujins.length > 2 && !isJobMatchExpanded && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpandedJobMatchIds((prev) => ({
+                        ...prev,
+                        [person.id]: true,
+                      }))
+                    }
+                    className="w-full rounded-md border border-dashed border-[#CBD5E1] bg-white py-1.5 text-center text-[11px] font-semibold text-sky-700 hover:border-sky-300 hover:bg-sky-50 cursor-pointer"
+                  >
+                    {t.jobMatch.showMore(matchingKyujins.length - 2)}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -4361,7 +5240,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       .slice(0, 5)
       .map(
         ({ person, mendan }) =>
-          `${person.name} (${person.jlpt || 'Chưa rõ JLPT'}, lịch: ${mendan.dateLabel || person.progressStatus || 'Đang điều phối'})`
+          `${getCandidateDisplayName(person, uiLang)} (${person.jlpt || 'Chưa rõ JLPT'}, lịch: ${mendan.dateLabel || person.progressStatus || 'Đang điều phối'})`
       )
       .join('; ');
     return [
@@ -4377,12 +5256,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     ptPartners.length,
     urgentFollowUpList.length,
     upcomingMendanAlerts,
+    uiLang,
   ]);
 
   return (
-    <div className="min-h-screen bg-[#0c0c0e] text-[#edeeef]">
+    <div className="min-h-screen bg-[#F8FAFC] text-[#0F172A]">
       {toastMsg && (
-        <div className="fixed bottom-20 right-5 z-[10000] rounded-lg border border-[#22c55e]/50 bg-[#141417] px-4 py-3 text-xs font-bold text-[#22c55e] shadow-xl">
+        <div className="fixed bottom-20 right-5 z-[10000] rounded-lg border border-emerald-200 bg-white px-4 py-3 text-xs font-bold text-emerald-700 shadow-lg">
           {toastMsg}
         </div>
       )}
@@ -4391,7 +5271,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       <input
         ref={backupInputRef}
         type="file"
-        accept=".json,application/json"
+        accept=".json,.csv,application/json,text/csv"
         onChange={handleImportBackupJson}
         className="hidden"
       />
@@ -4410,6 +5290,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         onChange={handleImportExistingRirekishoFile}
         className="hidden"
       />
+      <input
+        ref={rirekishoPhotoInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleUploadRirekishoPhoto}
+        className="hidden"
+      />
 
       {viewMode === 'home' ? (
         <HomePage
@@ -4421,6 +5308,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           upcomingMendanCount={upcomingMendanAlerts.length}
           userEmail={authUser?.email || null}
           authLoading={authLoading}
+          lang={uiLang}
+          onChangeLang={setUiLang}
           onStartWorkspace={(targetTab) => {
             if (targetTab) setActiveTab(targetTab);
             setViewMode('workspace');
@@ -4432,13 +5321,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       ) : (
         <div className="flex min-h-screen flex-col lg:grid lg:h-screen lg:grid-cols-[240px_1fr_320px] lg:grid-rows-[64px_1fr] lg:overflow-hidden">
           {/* TOP HEADER BAR */}
-          <header className="flex min-h-[64px] flex-wrap items-center justify-between gap-3 border-b border-[#27272a] bg-[#141417] px-5 py-2 lg:col-span-3">
+          <header className="flex min-h-[64px] flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] bg-white px-5 py-2 shadow-[0_1px_2px_rgba(0,0,0,0.03)] lg:col-span-3">
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
                 onClick={() => setViewMode('home')}
-                className="flex items-center gap-2 text-sm font-bold tracking-tight text-[#edeeef] hover:text-[#22c55e] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                title="Trang chủ"
+                className="flex items-center gap-2 text-sm font-bold tracking-tight text-[#0F172A] hover:text-[#16A34A] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                title={t.homeTooltip}
               >
                 <svg
                   width="18"
@@ -4453,7 +5342,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   <path d="M9 3v18" />
                   <path d="M3 9h18" />
                 </svg>
-                特定技能FB相談者管理
+                {t.brandTitle}
               </button>
 
               <button
@@ -4461,42 +5350,42 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 onClick={() => {
                   const next = !gasWriteLocked;
                   setGasWriteLocked(next);
-                  showToast(
-                    next
-                      ? '🔒 GAS上書き保護を有効にしました'
-                      : '🔓 GAS上書き保護を解除しました（同期可能）'
-                  );
+                  showToast(next ? t.toasts.gasLockedOn : t.toasts.gasLockedOff);
                 }}
                 className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   gasWriteLocked
-                    ? 'bg-[#22c55e] text-[#0c0c0e]'
-                    : 'border border-[#f59e0b] bg-[#f59e0b]/15 text-[#f59e0b]'
+                    ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
+                    : 'border border-amber-300 bg-amber-50 text-amber-800'
                 }`}
               >
-                {gasWriteLocked ? 'GAS上書き保護中' : 'GAS同期許可中'}
+                {gasWriteLocked ? t.gasLocked : t.gasUnlocked}
               </button>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <span className="hidden font-mono text-[10px] uppercase tracking-wider text-[#94949e] xl:inline tabular-nums">
-                相談者 {candidates.length}名 · 留学生 {schoolStudents.length}名 · 求人{' '}
-                {kyujinStats.totalCompanies}社 ({kyujinStats.totalSlots}枠)
+              <span className="hidden font-mono text-[10px] uppercase tracking-wider text-[#64748B] xl:inline tabular-nums">
+                {t.headerSummary(
+                  candidates.length,
+                  schoolStudents.length,
+                  kyujinStats.totalCompanies,
+                  kyujinStats.totalSlots
+                )}
               </span>
 
               <button
                 type="button"
                 onClick={() => backupInputRef.current?.click()}
-                className="rounded-md border border-[#27272a] bg-transparent px-3 py-1.5 text-[11px] font-semibold text-[#94949e] hover:border-[#94949e] hover:text-[#edeeef] whitespace-nowrap shrink-0 cursor-pointer"
+                className="rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-[11px] font-semibold text-[#475569] hover:border-[#CBD5E1] hover:bg-[#F8FAFC] hover:text-[#0F172A] whitespace-nowrap shrink-0 cursor-pointer"
               >
-                データ復元
+                {t.restoreData}
               </button>
 
               <button
                 type="button"
                 onClick={handleExportBackupJson}
-                className="rounded-md border border-[#27272a] bg-transparent px-3 py-1.5 text-[11px] font-semibold text-[#94949e] hover:border-[#94949e] hover:text-[#edeeef] whitespace-nowrap shrink-0 cursor-pointer"
+                className="rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-[11px] font-semibold text-[#475569] hover:border-[#CBD5E1] hover:bg-[#F8FAFC] hover:text-[#0F172A] whitespace-nowrap shrink-0 cursor-pointer"
               >
-                バックアップ保存
+                {t.backupJson}
               </button>
 
               <button
@@ -4504,49 +5393,79 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 onClick={openMessengerLinkModal}
                 className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   webhookStatus?.configured || fbPageLink
-                    ? 'border-[#38bdf8]/50 bg-[#38bdf8]/10 text-[#38bdf8] hover:bg-[#38bdf8]/20'
-                    : 'border-[#27272a] bg-[#0c0c0e] text-[#edeeef] hover:border-[#38bdf8]'
+                    ? 'border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100'
+                    : 'border-[#E2E8F0] bg-white text-[#0F172A] hover:border-sky-300'
                 }`}
-                title="Cấu hình liên kết Facebook Messenger Fanpage & Webhook"
+                title={t.linkMessenger}
               >
                 <span
                   className={`inline-block h-1.5 w-1.5 rounded-full ${
                     webhookStatus?.configured
-                      ? 'bg-[#22c55e]'
+                      ? 'bg-[#16A34A]'
                       : fbPageLink
-                      ? 'bg-[#38bdf8]'
-                      : 'bg-[#f59e0b]'
+                      ? 'bg-sky-500'
+                      : 'bg-amber-500'
                   }`}
                 />
                 <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
-                Liên kết Messenger FB
+                {t.linkMessenger}
               </button>
+
+              {/* Language Switcher [VI | JP] */}
+              <div
+                className="inline-flex items-center rounded-md border border-[#E2E8F0] bg-[#F8FAFC] p-0.5 shrink-0"
+                role="group"
+                aria-label="Language switcher"
+              >
+                <button
+                  type="button"
+                  onClick={() => setUiLang('vi')}
+                  className={`rounded px-2 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                    uiLang === 'vi'
+                      ? 'bg-white text-[#0F172A] shadow-sm'
+                      : 'text-[#64748B] hover:text-[#0F172A]'
+                  }`}
+                >
+                  🇻🇳 VI
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUiLang('jp')}
+                  className={`rounded px-2 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                    uiLang === 'jp'
+                      ? 'bg-white text-[#0F172A] shadow-sm'
+                      : 'text-[#64748B] hover:text-[#0F172A]'
+                  }`}
+                >
+                  🇯🇵 JP
+                </button>
+              </div>
 
               <button
                 type="button"
                 onClick={() => setChatbotOpen(true)}
-                className="inline-flex items-center gap-1.5 rounded-md bg-[#22c55e] px-3 py-1.5 text-[11px] font-semibold text-[#0c0c0e] hover:opacity-90 whitespace-nowrap shrink-0 cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-md bg-[#16A34A] px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-[#15803D] whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <MessageSquareText className="h-3.5 w-3.5" aria-hidden="true" />
-                Trợ lý AI
+                {t.aiAssistant}
               </button>
             </div>
           </header>
 
           {/* MOBILE / TABLET TAB STRIP (< lg) */}
-          <div className="flex items-center gap-1 overflow-x-auto border-b border-[#27272a] bg-[#0c0c0e] px-4 py-2 lg:hidden">
+          <div className="flex items-center gap-1 overflow-x-auto border-b border-[#E2E8F0] bg-white px-4 py-2 lg:hidden">
             {(
               [
-                { id: 'all', label: `Ứng viên (${candidates.length})` },
-                { id: 'personal', label: `FB cá nhân (${personalCandidates.length})` },
-                { id: 'company', label: `Fanpage (${companyCandidates.length})` },
-                { id: 'school', label: `Trường Nhật ngữ (${schoolStudents.length})` },
-                { id: 'mendan', label: `Mendan/PV (${mendanPeopleSorted.length})` },
-                { id: 'proposed', label: `Đã tiến cử (${allProposedPeople.length})` },
-                { id: 'resignation', label: `Quản lý nghỉ việc (${resignations.length})` },
-                { id: 'pt', label: `Đối tác PT (${ptPartners.length})` },
-                { id: 'kyujin', label: `Tin tuyển dụng (${kyujinStats.totalCompanies}社)` },
-                { id: 'report', label: 'Báo cáo' },
+                { id: 'all', label: `${t.tabs.allMobile} (${candidates.length})` },
+                { id: 'personal', label: `${t.tabs.personal} (${personalCandidates.length})` },
+                { id: 'company', label: `${t.tabs.company} (${companyCandidates.length})` },
+                { id: 'school', label: `${t.tabs.schoolMobile} (${schoolStudents.length})` },
+                { id: 'mendan', label: `${t.tabs.mendan} (${mendanPeopleSorted.length})` },
+                { id: 'proposed', label: `${t.tabs.proposed} (${allProposedPeople.length})` },
+                { id: 'resignation', label: `${t.tabs.resignation} (${resignations.length})` },
+                { id: 'pt', label: `${t.tabs.pt} (${ptPartners.length})` },
+                { id: 'kyujin', label: `${t.tabs.kyujin} (${kyujinStats.totalCompanies})` },
+                { id: 'report', label: t.tabs.report },
               ] as Array<{ id: MainTabId; label: string }>
             ).map((tab) => (
               <button
@@ -4555,8 +5474,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 onClick={() => setActiveTab(tab.id)}
                 className={`rounded-md px-2.5 py-1 text-xs font-semibold whitespace-nowrap shrink-0 tabular-nums cursor-pointer ${
                   activeTab === tab.id
-                    ? 'bg-[#22c55e] text-[#0c0c0e]'
-                    : 'text-[#94949e] hover:bg-[#141417] hover:text-[#edeeef]'
+                    ? 'bg-[#16A34A] text-white'
+                    : 'text-[#64748B] hover:bg-[#F8FAFC] hover:text-[#0F172A]'
                 }`}
               >
                 {tab.label}
@@ -4565,17 +5484,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </div>
 
           {/* LEFT SIDEBAR (DESKTOP) */}
-          <aside className="hidden border-r border-[#27272a] bg-[#0c0c0e] py-4 lg:flex lg:flex-col lg:overflow-y-auto">
+          <aside className="hidden border-r border-[#E2E8F0] bg-white py-4 lg:flex lg:flex-col lg:overflow-y-auto">
             <div className="mb-6">
-              <div className="px-5 pb-2 font-mono text-[10px] uppercase tracking-widest text-[#94949e]">
-                Database
+              <div className="px-5 pb-2 font-mono text-[10px] font-semibold uppercase tracking-widest text-[#64748B]">
+                {t.sidebarDatabase}
               </div>
               {(
                 [
-                  { id: 'all', label: 'Tất cả ứng viên', count: `${candidates.length}` },
-                  { id: 'personal', label: 'FB cá nhân', count: `${personalCandidates.length}` },
-                  { id: 'company', label: 'Fanpage công ty', count: `${companyCandidates.length}` },
-                  { id: 'school', label: 'Trường Nhật ngữ / DHS', count: `${schoolStudents.length}` },
+                  { id: 'all', label: t.tabs.allDesktop, count: `${candidates.length}` },
+                  { id: 'personal', label: t.tabs.personal, count: `${personalCandidates.length}` },
+                  { id: 'company', label: t.tabs.company, count: `${companyCandidates.length}` },
+                  { id: 'school', label: t.tabs.school, count: `${schoolStudents.length}` },
                 ] as Array<{ id: MainTabId; label: string; count: string }>
               ).map((item) => (
                 <button
@@ -4584,8 +5503,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   onClick={() => setActiveTab(item.id)}
                   className={`flex w-full items-center justify-between px-5 py-2.5 text-left text-xs transition-colors cursor-pointer ${
                     activeTab === item.id
-                      ? 'border-r-2 border-[#22c55e] bg-[rgba(34,197,94,0.12)] font-semibold text-[#22c55e]'
-                      : 'text-[#94949e] hover:bg-[#141417] hover:text-[#edeeef]'
+                      ? 'border-r-2 border-[#16A34A] bg-emerald-50 font-semibold text-emerald-700'
+                      : 'text-[#64748B] hover:bg-[#F8FAFC] hover:text-[#0F172A]'
                   }`}
                 >
                   <span>{item.label}</span>
@@ -4595,24 +5514,24 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             </div>
 
             <div className="mb-6">
-              <div className="px-5 pb-2 font-mono text-[10px] uppercase tracking-widest text-[#94949e]">
-                Workflow
+              <div className="px-5 pb-2 font-mono text-[10px] font-semibold uppercase tracking-widest text-[#64748B]">
+                {t.sidebarWorkflow}
               </div>
               {(
                 [
-                  { id: 'mendan', label: 'Lịch Mendan / Phỏng vấn', count: `${mendanPeopleSorted.length}` },
-                  { id: 'proposed', label: 'Đã tiến cử', count: `${allProposedPeople.length}` },
+                  { id: 'mendan', label: t.tabs.mendan, count: `${mendanPeopleSorted.length}` },
+                  { id: 'proposed', label: t.tabs.proposed, count: `${allProposedPeople.length}` },
                   {
                     id: 'resignation',
-                    label: 'Quản lý nghỉ việc',
+                    label: t.tabs.resignation,
                     count:
                       resignationAlerts.length > 0
-                        ? `${resignationAlerts.length} gấp / ${resignations.length}`
+                        ? `${resignationAlerts.length} ${t.urgentShort} / ${resignations.length}`
                         : `${resignations.length}`,
                   },
-                  { id: 'pt', label: 'Đối tác PT', count: `${ptPartners.length}` },
-                  { id: 'kyujin', label: 'Tin tuyển dụng (Kyujin)', count: `${kyujinStats.totalCompanies}社` },
-                  { id: 'report', label: 'Báo cáo phân tích', count: `${kyujinStats.totalSlots}枠` },
+                  { id: 'pt', label: t.tabs.pt, count: `${ptPartners.length}` },
+                  { id: 'kyujin', label: t.tabs.kyujin, count: `${kyujinStats.totalCompanies}` },
+                  { id: 'report', label: t.tabs.reportDesktop, count: `${kyujinStats.totalSlots}` },
                 ] as Array<{ id: MainTabId; label: string; count: string }>
               ).map((item) => (
                 <button
@@ -4621,8 +5540,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   onClick={() => setActiveTab(item.id)}
                   className={`flex w-full items-center justify-between px-5 py-2.5 text-left text-xs transition-colors cursor-pointer ${
                     activeTab === item.id
-                      ? 'border-r-2 border-[#22c55e] bg-[rgba(34,197,94,0.12)] font-semibold text-[#22c55e]'
-                      : 'text-[#94949e] hover:bg-[#141417] hover:text-[#edeeef]'
+                      ? 'border-r-2 border-[#16A34A] bg-emerald-50 font-semibold text-emerald-700'
+                      : 'text-[#64748B] hover:bg-[#F8FAFC] hover:text-[#0F172A]'
                   }`}
                 >
                   <span>{item.label}</span>
@@ -4631,61 +5550,100 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               ))}
             </div>
 
-            <div className="mt-auto space-y-2 border-t border-[#27272a] p-4">
+            <div className="mt-auto space-y-2 border-t border-[#E2E8F0] p-4">
               {authUser ? (
                 <button
                   type="button"
                   onClick={handleSignOut}
                   title={authUser.email || ''}
-                  className="w-full rounded-md border border-[#27272a] bg-[#141417] px-3 py-2 text-[11px] font-semibold text-[#edeeef] hover:border-[#94949e] truncate cursor-pointer"
+                  className="w-full rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-[11px] font-semibold text-[#0F172A] hover:border-[#CBD5E1] truncate cursor-pointer"
                 >
-                  {authUser.email ? `${authUser.email.split('@')[0]} · Đăng xuất` : 'Đăng xuất'}
+                  {authUser.email ? `${authUser.email.split('@')[0]} · ${t.signOut}` : t.signOut}
                 </button>
               ) : (
                 <button
                   type="button"
                   disabled={authLoading}
                   onClick={handleSignInGoogle}
-                  className="w-full rounded-md border border-[#27272a] bg-[#141417] px-3 py-2 text-[11px] font-semibold text-[#edeeef] hover:border-[#22c55e] disabled:opacity-60 cursor-pointer"
+                  className="w-full rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-[11px] font-semibold text-[#0F172A] hover:border-[#16A34A] disabled:opacity-60 cursor-pointer"
                 >
-                  {authLoading ? 'Đang đăng nhập...' : 'Đăng nhập Google'}
+                  {authLoading ? t.signingIn : t.signInGoogle}
                 </button>
               )}
 
               <button
                 type="button"
                 onClick={() => setViewMode('home')}
-                className="w-full rounded-md border border-transparent px-3 py-1.5 text-[11px] font-medium text-[#94949e] hover:border-[#27272a] hover:text-[#edeeef] cursor-pointer"
+                className="w-full rounded-md border border-transparent px-3 py-1.5 text-[11px] font-medium text-[#64748B] hover:border-[#E2E8F0] hover:text-[#0F172A] cursor-pointer"
               >
-                Trang chủ
+                {t.homeLink}
               </button>
             </div>
           </aside>
 
           {/* CENTER MAIN PANE */}
-          <main className="min-w-0 bg-[#0c0c0e] p-5 lg:overflow-y-auto lg:border-r lg:border-[#27272a]">
+          <main className="min-w-0 bg-[#F8FAFC] p-5 lg:overflow-y-auto lg:border-r lg:border-[#E2E8F0]">
             {['all', 'personal', 'company', 'school', 'mendan', 'proposed'].includes(activeTab) && (
               <div className="space-y-4">
                 {/* Control Row + Filter Bar */}
-                <div className="space-y-3 rounded-lg border border-[#27272a] bg-[#141417] p-3.5">
+                <div className="space-y-3 rounded-lg border border-[#E2E8F0] bg-white p-3.5 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                   <div className="flex flex-wrap items-center gap-2">
                     <input
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Quick Search (氏名・FB名・国籍・希望分野・企業名)..."
-                      className="min-w-[220px] flex-1 rounded-md border border-[#27272a] bg-[#0c0c0e] px-3.5 py-2 text-xs text-[#edeeef] placeholder:text-[#94949e] focus:border-[#22c55e] focus:outline-none"
+                      placeholder={t.searchPlaceholder}
+                      className="min-w-[220px] flex-1 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2 text-xs text-[#0F172A] placeholder:text-[#94A3B8] focus:border-[#16A34A] focus:bg-white focus:outline-none"
                     />
 
                     <select
                       value={statusFilter}
                       onChange={(e) => setStatusFilter(e.target.value)}
-                      className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-2 text-xs font-semibold text-[#edeeef] focus:border-[#22c55e] focus:outline-none"
+                      className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs font-semibold text-[#0F172A] focus:border-[#16A34A] focus:outline-none"
                     >
-                      <option value="all" className="bg-[#141417]">すべての進捗</option>
+                      <option value="all">{t.allStatuses}</option>
                       {PROGRESS_STATUSES.map((st) => (
-                        <option key={st} value={st} className="bg-[#141417]">
+                        <option key={st} value={st}>
                           {st}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={industryFilter}
+                      onChange={(e) => setIndustryFilter(e.target.value)}
+                      className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs font-semibold text-[#0F172A] focus:border-[#16A34A] focus:outline-none max-w-[200px]"
+                    >
+                      <option value="all">{t.allIndustries}</option>
+                      {industryFilterOptions.map((ind) => (
+                        <option key={ind} value={ind}>
+                          {ind}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={nationalityFilter}
+                      onChange={(e) => setNationalityFilter(e.target.value)}
+                      className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs font-semibold text-[#0F172A] focus:border-[#16A34A] focus:outline-none max-w-[180px]"
+                    >
+                      <option value="all">{t.allNationalities}</option>
+                      {nationalityFilterOptions.map((nat) => (
+                        <option key={nat} value={nat}>
+                          {nat}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={proposedCompanyFilter}
+                      onChange={(e) => setProposedCompanyFilter(e.target.value)}
+                      className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs font-semibold text-[#0F172A] focus:border-[#16A34A] focus:outline-none max-w-[210px]"
+                    >
+                      <option value="all">{t.allProposedCompanies}</option>
+                      {proposedCompanyFilterOptions.map((comp) => (
+                        <option key={comp} value={comp}>
+                          {comp}
                         </option>
                       ))}
                     </select>
@@ -4694,15 +5652,42 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                       <select
                         value={proposedMonthFilter}
                         onChange={(e) => setProposedMonthFilter(e.target.value)}
-                        className="rounded-md border border-[#22c55e]/50 bg-[#0c0c0e] px-3 py-2 text-xs font-semibold text-[#22c55e]"
+                        className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700"
                       >
-                        <option value="all" className="bg-[#141417]">提案月（すべて）</option>
+                        <option value="all">{t.allProposedMonths}</option>
                         {proposedMonthOptions.map((m) => (
-                          <option key={m} value={m} className="bg-[#141417]">
+                          <option key={m} value={m}>
                             {m}
                           </option>
                         ))}
                       </select>
+                    )}
+
+                    {(searchQuery ||
+                      statusFilter !== 'all' ||
+                      industryFilter !== 'all' ||
+                      nationalityFilter !== 'all' ||
+                      proposedCompanyFilter !== 'all' ||
+                      proposedMonthFilter !== 'all' ||
+                      careFilter !== 'all' ||
+                      proposedStageFilter !== 'all') && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery('');
+                          setStatusFilter('all');
+                          setIndustryFilter('all');
+                          setNationalityFilter('all');
+                          setProposedCompanyFilter('all');
+                          setProposedMonthFilter('all');
+                          setCareFilter('all');
+                          setProposedStageFilter('all');
+                          setDeclineReasonQuery('');
+                        }}
+                        className="rounded-md border border-[#E2E8F0] bg-white px-2.5 py-2 text-xs font-semibold text-[#64748B] hover:bg-[#F8FAFC] hover:text-[#0F172A] whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        {t.resetFilters}
+                      </button>
                     )}
 
                     <button
@@ -4719,9 +5704,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         setFbChatRawText('');
                         setFbChatModalOpen(true);
                       }}
-                      className="rounded-md border border-[#27272a] bg-transparent px-3 py-2 text-xs font-semibold text-[#edeeef] hover:border-[#94949e] whitespace-nowrap shrink-0 cursor-pointer"
+                      className="rounded-md border border-[#E2E8F0] bg-white px-3 py-2 text-xs font-semibold text-[#0F172A] hover:border-[#CBD5E1] hover:bg-[#F8FAFC] whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      FBチャット登録
+                      {t.fbChatRegister}
                     </button>
 
                     <button
@@ -4767,87 +5752,373 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           },
                         })
                       }
-                      className="rounded-md bg-[#22c55e] px-3.5 py-2 text-xs font-semibold text-[#0c0c0e] hover:opacity-90 whitespace-nowrap shrink-0 cursor-pointer"
+                      className="rounded-md bg-[#16A34A] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#15803D] whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      + New Candidate
+                      {t.newCandidate}
                     </button>
                   </div>
 
-                  {/* Quick Care Filter Row */}
-                  <div className="flex flex-wrap items-center gap-1.5 border-t border-[#27272a] pt-2.5">
-                    {(
-                      [
-                        { id: 'all', label: 'すべて表示' },
-                        { id: 'recent7', label: '最近7日' },
-                        { id: 'scheduled', label: '面談予定あり' },
-                        { id: 'recentMendan', label: '直近面談順' },
-                        { id: 'urgent', label: '要至急フォロー' },
-                        { id: 'declined', label: `辞退者 (${declinedPeopleCount})` },
-                      ] as Array<{ id: CareFilterType; label: string }>
-                    ).map((pill) => (
-                      <button
-                        key={pill.id}
-                        type="button"
-                        onClick={() => setCareFilter(pill.id)}
-                        className={`rounded px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 tabular-nums cursor-pointer ${
-                          careFilter === pill.id
-                            ? pill.id === 'declined'
-                              ? 'bg-[#ef4444] text-white'
-                              : 'bg-[#22c55e] text-[#0c0c0e]'
-                            : 'border border-[#27272a] bg-[#0c0c0e] text-[#94949e] hover:text-[#edeeef]'
-                        }`}
-                      >
-                        {pill.label}
-                      </button>
-                    ))}
-
-                    {careFilter === 'declined' && (
-                      <input
-                        type="text"
-                        value={declineReasonQuery}
-                        onChange={(e) => setDeclineReasonQuery(e.target.value)}
-                        placeholder="辞退理由で絞り込み..."
-                        className="ml-1 w-60 rounded border border-[#ef4444]/50 bg-[#0c0c0e] px-2.5 py-1 text-xs text-[#edeeef] placeholder:text-[#94949e] focus:outline-none"
-                      />
-                    )}
-                  </div>
-
-                  {/* Proposed Tab Stage Sub-Filter Bar */}
-                  {activeTab === 'proposed' && (
-                    <div className="flex flex-wrap items-center gap-1.5 border-t border-[#27272a] pt-2.5">
-                      <span className="mr-1 font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                        Stage:
-                      </span>
-                      {[
-                        { id: 'all', label: `すべて (${proposedStageCounts.all})` },
-                        { id: '企業提案中', label: `企業提案中 (${proposedStageCounts['企業提案中']})` },
-                        { id: '1次面接予定', label: `1次面接 (${proposedStageCounts['1次面接予定']})` },
-                        { id: '2次面接予定', label: `2次面接 (${proposedStageCounts['2次面接予定']})` },
-                        { id: '内定', label: `内定 (${proposedStageCounts['内定']})` },
-                        { id: '辞退・終了', label: `辞退 (${proposedStageCounts['辞退・終了']})` },
-                      ].map((stPill) => (
+                  {/* Quick Care Filter Row + List/Card View Switcher */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#E2E8F0] pt-2.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {(
+                        [
+                          { id: 'all', label: t.careFilters.all },
+                          { id: 'recent7', label: t.careFilters.recent7 },
+                          { id: 'scheduled', label: t.careFilters.scheduled },
+                          { id: 'recentMendan', label: t.careFilters.recentMendan },
+                          { id: 'urgent', label: t.careFilters.urgent },
+                          { id: 'declined', label: `${t.careFilters.declined} (${declinedPeopleCount})` },
+                        ] as Array<{ id: CareFilterType; label: string }>
+                      ).map((pill) => (
                         <button
-                          key={stPill.id}
+                          key={pill.id}
                           type="button"
-                          onClick={() => setProposedStageFilter(stPill.id)}
+                          onClick={() => setCareFilter(pill.id)}
                           className={`rounded px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 tabular-nums cursor-pointer ${
-                            proposedStageFilter === stPill.id
-                              ? stPill.id === '辞退・終了'
-                                ? 'bg-[#ef4444] text-white'
-                                : 'bg-[#22c55e] text-[#0c0c0e]'
-                              : 'border border-[#27272a] bg-[#0c0c0e] text-[#94949e] hover:text-[#edeeef]'
+                            careFilter === pill.id
+                              ? pill.id === 'declined'
+                                ? 'bg-rose-600 text-white'
+                                : 'bg-[#16A34A] text-white'
+                              : 'border border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A]'
                           }`}
                         >
-                          {stPill.label}
+                          {pill.label}
                         </button>
                       ))}
+
+                      {careFilter === 'declined' && (
+                        <input
+                          type="text"
+                          value={declineReasonQuery}
+                          onChange={(e) => setDeclineReasonQuery(e.target.value)}
+                          placeholder={t.declineReasonPlaceholder}
+                          className="ml-1 w-60 rounded border border-rose-200 bg-rose-50/40 px-2.5 py-1 text-xs text-[#0F172A] placeholder:text-[#94A3B8] focus:outline-none"
+                        />
+                      )}
+                    </div>
+
+                    {/* Segmented List / Card View Switcher */}
+                    <div className="inline-flex items-center rounded-md border border-[#E2E8F0] bg-[#F8FAFC] p-0.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setCandidateViewMode('list')}
+                        className={`rounded px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                          candidateViewMode === 'list'
+                            ? 'bg-white text-[#0F172A] shadow-sm'
+                            : 'text-[#64748B] hover:text-[#0F172A]'
+                        }`}
+                      >
+                        {t.viewMode.list}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCandidateViewMode('card')}
+                        className={`rounded px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                          candidateViewMode === 'card'
+                            ? 'bg-white text-[#0F172A] shadow-sm'
+                            : 'text-[#64748B] hover:text-[#0F172A]'
+                        }`}
+                      >
+                        {t.viewMode.card}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Proposed Tab 3-Subtab Pipeline Bar */}
+                  {activeTab === 'proposed' && (
+                    <div className="space-y-2 border-t border-[#E2E8F0] pt-2.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="mr-1 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                          {t.stageLabel}
+                        </span>
+                        {(
+                          [
+                            {
+                              id: 'in_progress',
+                              label: `${t.proposedGroups.inProgress} (${proposedStageCounts.in_progress})`,
+                              activeClass: 'bg-sky-600 text-white',
+                            },
+                            {
+                              id: 'naitei',
+                              label: `${t.proposedGroups.naitei} (${proposedStageCounts.naitei})`,
+                              activeClass: 'bg-[#16A34A] text-white',
+                            },
+                            {
+                              id: 'jitai',
+                              label: `${t.proposedGroups.jitai} (${proposedStageCounts.jitai})`,
+                              activeClass: 'bg-rose-600 text-white',
+                            },
+                            {
+                              id: 'all',
+                              label: `${t.proposedGroups.all} (${proposedStageCounts.all})`,
+                              activeClass: 'bg-[#0F172A] text-white',
+                            },
+                          ] as Array<{
+                            id: ProposedGroupFilter;
+                            label: string;
+                            activeClass: string;
+                          }>
+                        ).map((stPill) => (
+                          <button
+                            key={stPill.id}
+                            type="button"
+                            onClick={() => {
+                              setProposedStageFilter(stPill.id);
+                              if (stPill.id !== 'jitai') setJitaiSubFilter('all');
+                            }}
+                            className={`rounded px-3 py-1.5 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 tabular-nums cursor-pointer ${
+                              proposedStageFilter === stPill.id
+                                ? stPill.activeClass
+                                : 'border border-[#E2E8F0] bg-[#F8FAFC] text-[#475569] hover:text-[#0F172A]'
+                            }`}
+                          >
+                            {stPill.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {proposedStageFilter === 'jitai' && (
+                        <div className="flex flex-wrap items-center gap-1.5 pl-1">
+                          {(
+                            [
+                              {
+                                id: 'all',
+                                label: `${t.jitaiSub.all} (${proposedStageCounts.jitai})`,
+                                tone: 'neutral',
+                              },
+                              {
+                                id: '内定辞退',
+                                label: `⚠️ ${t.jitaiSub.naiteiJitai} (${proposedStageCounts.jitaiBreakdown['内定辞退']})`,
+                                tone: 'orange',
+                              },
+                              {
+                                id: '選考中辞退',
+                                label: `${t.jitaiSub.midJitai} (${proposedStageCounts.jitaiBreakdown['選考中辞退']})`,
+                                tone: 'amber',
+                              },
+                              {
+                                id: '不合格',
+                                label: `${t.jitaiSub.fail} (${proposedStageCounts.jitaiBreakdown['不合格']})`,
+                                tone: 'rose',
+                              },
+                              ...(proposedStageCounts.jitaiBreakdown['辞退・終了'] > 0
+                                ? [
+                                    {
+                                      id: '辞退・終了' as JitaiSubFilter,
+                                      label: `${t.jitaiSub.legacyDecline} (${proposedStageCounts.jitaiBreakdown['辞退・終了']})`,
+                                      tone: 'neutral',
+                                    },
+                                  ]
+                                : []),
+                            ] as Array<{ id: JitaiSubFilter; label: string; tone: string }>
+                          ).map((sub) => (
+                            <button
+                              key={sub.id}
+                              type="button"
+                              onClick={() => setJitaiSubFilter(sub.id)}
+                              className={`rounded border px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 tabular-nums cursor-pointer ${
+                                jitaiSubFilter === sub.id
+                                  ? sub.tone === 'orange'
+                                    ? 'border-orange-500 bg-orange-600 text-white'
+                                    : sub.tone === 'rose'
+                                    ? 'border-rose-600 bg-rose-600 text-white'
+                                    : sub.tone === 'amber'
+                                    ? 'border-amber-600 bg-amber-600 text-white'
+                                    : 'border-[#0F172A] bg-[#0F172A] text-white'
+                                  : sub.tone === 'orange'
+                                  ? 'border-orange-300 bg-orange-50 text-orange-800 hover:bg-orange-100'
+                                  : 'border-[#E2E8F0] bg-white text-[#475569] hover:border-[#CBD5E1]'
+                              }`}
+                            >
+                              {sub.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
 
                 {filteredCandidates.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-[#27272a] bg-[#141417] p-10 text-center text-sm font-semibold text-[#94949e]">
-                    条件に一致する相談者データがありません。
+                  <div className="rounded-lg border border-dashed border-[#CBD5E1] bg-white p-10 text-center text-sm font-semibold text-[#64748B]">
+                    {t.noCandidateMatch}
+                  </div>
+                ) : candidateViewMode === 'list' ? (
+                  <div className="overflow-x-auto rounded-lg border border-[#E2E8F0] bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+                    <table className="w-full min-w-[820px] border-collapse text-left text-xs">
+                      <thead className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                        <tr>
+                          <th className="px-3.5 py-2.5">{t.listCols.nameNat}</th>
+                          <th className="px-3 py-2.5">{t.listCols.companyIndustry}</th>
+                          <th className="px-3 py-2.5">{t.listCols.status}</th>
+                          <th className="px-3 py-2.5">{t.listCols.nextDateVisa}</th>
+                          <th className="px-3.5 py-2.5">{t.listCols.latestNote}</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#E2E8F0]">
+                        {filteredCandidates.map((person) => {
+                          const isSchool = Boolean(person._isSchool || person.channel === 'school');
+                          const displayName = getCandidateDisplayName(person, uiLang);
+                          const proposedComp = getEffectiveProposedCompany(person);
+                          const naiteiOrProposed = person.naiteiCompany || proposedComp;
+                          const mendanInfo = extractNormalizedMendanInfo(person);
+                          const fbMessengerUrl = getSafeFacebookMessengerUrl(person);
+                          const st = person.progressStatus || '新規相談';
+                          const isNaiteiJitai = st === '内定辞退';
+                          const isNaitei = PROPOSED_NAITEI_STATUSES.includes(st);
+                          const isJitai = PROPOSED_JITAI_STATUSES.includes(st);
+                          const rawNote =
+                            extractDeclineReason(person) ||
+                            person.negotiationLog ||
+                            person.memo ||
+                            '';
+                          const firstNoteLine = rawNote
+                            .split('\n')
+                            .map((s) => s.trim())
+                            .find(Boolean) || '-';
+                          const nextDateDisplay =
+                            person.visaSubmissionDeadline
+                              ? `🛂 ${person.visaSubmissionDeadline}`
+                              : person.expectedJoinDate
+                              ? `🎉 ${person.expectedJoinDate}`
+                              : person.interviewDate ||
+                                mendanInfo.dateLabel ||
+                                person.lastContactDate ||
+                                '-';
+
+                          return (
+                            <tr
+                              key={person.id}
+                              className={`transition-colors hover:bg-[#F8FAFC] ${
+                                isNaiteiJitai ? 'bg-orange-50/30' : ''
+                              }`}
+                            >
+                              <td className="px-3.5 py-2.5 align-top">
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setDrawerCandidateId(person.id)}
+                                    className="font-semibold text-[#0F172A] hover:text-[#16A34A] hover:underline text-left cursor-pointer"
+                                  >
+                                    {displayName}
+                                  </button>
+                                  {fbMessengerUrl ? (
+                                    <a
+                                      href={fbMessengerUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      title={t.openMessengerBtn}
+                                      className="inline-flex items-center rounded border border-sky-200 bg-sky-50 p-1 text-sky-700 hover:bg-sky-100 shrink-0"
+                                    >
+                                      <MessageCircle className="h-3 w-3" aria-hidden="true" />
+                                    </a>
+                                  ) : person.fbSenderId ? (
+                                    <a
+                                      href="https://business.facebook.com/latest/inbox/all"
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      title={t.fbInboxBtn}
+                                      className="inline-flex items-center rounded border border-sky-200 bg-sky-50 p-1 text-sky-700 hover:bg-sky-100 shrink-0"
+                                    >
+                                      <MessageCircle className="h-3 w-3" aria-hidden="true" />
+                                    </a>
+                                  ) : null}
+                                </div>
+                                <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[#64748B]">
+                                  <span>{person.nationality || t.cardLabels.unset}</span>
+                                  {person.jlpt && person.jlpt !== '要確認' && (
+                                    <span className="rounded bg-emerald-50 px-1 py-0.2 font-mono text-[10px] font-semibold text-emerald-700">
+                                      {person.jlpt}
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+
+                              <td className="px-3 py-2.5 align-top">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="font-medium text-[#0F172A]">
+                                    {naiteiOrProposed || '-'}
+                                  </span>
+                                  {isNaiteiJitai && (
+                                    <span className="rounded border border-orange-300 bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-800 whitespace-nowrap">
+                                      ⚠️ 内定辞退
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="mt-0.5 text-[11px] text-[#64748B]">
+                                  {person.desiredIndustry || t.cardLabels.unset}
+                                  {person.desiredArea ? ` · ${person.desiredArea}` : ''}
+                                </div>
+                              </td>
+
+                              <td className="px-3 py-2.5 align-top">
+                                <select
+                                  value={st}
+                                  onChange={(e) =>
+                                    handleStatusTransitionRequest(person, isSchool, e.target.value)
+                                  }
+                                  className={`rounded border px-2 py-1 text-[11px] font-semibold focus:border-[#16A34A] focus:outline-none cursor-pointer ${
+                                    isNaiteiJitai
+                                      ? 'border-orange-300 bg-orange-50 text-orange-800'
+                                      : isNaitei
+                                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                      : isJitai
+                                      ? 'border-rose-200 bg-rose-50 text-rose-700'
+                                      : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#0F172A]'
+                                  }`}
+                                >
+                                  {PROGRESS_STATUSES.map((opt) => (
+                                    <option key={opt} value={opt}>
+                                      {opt}
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+
+                              <td className="px-3 py-2.5 align-top font-mono text-[11px] tabular-nums">
+                                <div className="font-medium text-[#0F172A]">{nextDateDisplay}</div>
+                                {person.visaExpiry && (
+                                  <div className="mt-0.5 text-[10px] text-rose-700">
+                                    Visa: {person.visaExpiry}
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="px-3.5 py-2.5 align-top">
+                                <div className="flex items-start justify-between gap-2">
+                                  <span
+                                    title={rawNote}
+                                    className="line-clamp-2 max-w-[240px] text-[11px] text-[#475569]"
+                                  >
+                                    {firstNoteLine}
+                                  </span>
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {person.savedRirekisho?.draft && (
+                                      <button
+                                        type="button"
+                                        onClick={() => openRirekishoModalForCandidate(person)}
+                                        title={t.editSavedRirekishoBtn}
+                                        className="rounded border border-emerald-300 bg-emerald-50 px-1.5 py-1 text-[10px] font-semibold text-emerald-800 hover:bg-emerald-100 whitespace-nowrap cursor-pointer"
+                                      >
+                                        ✅ CV
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => setDrawerCandidateId(person.id)}
+                                      className="rounded border border-[#E2E8F0] bg-white px-2 py-1 text-[11px] font-semibold text-[#0F172A] hover:border-[#16A34A] hover:text-[#16A34A] whitespace-nowrap shrink-0 cursor-pointer"
+                                    >
+                                      {t.listCols.detailBtn}
+                                    </button>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
                 ) : (
                   <div className="space-y-3">{filteredCandidates.map(renderCandidateCard)}</div>
@@ -4875,38 +6146,36 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   }
                 }}
               >
-                <div className="space-y-3 rounded-lg border border-[#27272a] bg-[#141417] p-4">
+                <div className="space-y-3 rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
                         disabled={isImportingKyujin}
                         onClick={() => kyujinFileInputRef.current?.click()}
-                        className="inline-flex items-center gap-1.5 rounded-md bg-[#22c55e] px-4 py-2 text-xs font-semibold text-[#0c0c0e] hover:opacity-90 disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer"
+                        className="inline-flex items-center gap-1.5 rounded-md bg-[#16A34A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#15803D] disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                        {isImportingKyujin
-                          ? 'Đang phân tích Kyujin...'
-                          : 'Nhập nhiều file (Excel / PDF / Word / CSV / Ảnh)'}
+                        {isImportingKyujin ? t.kyujin.analyzing : t.kyujin.importMultiBtn}
                       </button>
 
                       <button
                         type="button"
                         disabled={isImportingKyujin}
                         onClick={() => setKyujinRawModalOpen(true)}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-[#38bdf8]/50 bg-[#38bdf8]/10 px-3 py-2 text-xs font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 whitespace-nowrap shrink-0 cursor-pointer"
+                        className="inline-flex items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <ClipboardPaste className="h-3.5 w-3.5" aria-hidden="true" />
-                        Dán văn bản Kyujin / Baito
+                        {t.kyujin.pasteTextBtn}
                       </button>
 
                       {selectedSlotIds.length > 0 && (
                         <button
                           type="button"
                           onClick={handleDeleteSelectedSlots}
-                          className="rounded-md bg-[#ef4444] px-3 py-2 text-xs font-semibold text-white hover:opacity-90 whitespace-nowrap shrink-0 cursor-pointer"
+                          className="rounded-md bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-700 whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          Xóa đã chọn ({selectedSlotIds.length})
+                          {t.kyujin.deleteSelected(selectedSlotIds.length)}
                         </button>
                       )}
 
@@ -4914,9 +6183,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         <button
                           type="button"
                           onClick={handleDeleteAllKyujins}
-                          className="rounded-md border border-[#ef4444]/40 bg-transparent px-3 py-2 text-xs font-semibold text-[#ef4444] hover:bg-[#ef4444]/10 whitespace-nowrap shrink-0 cursor-pointer"
+                          className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          Xóa tất cả
+                          {t.kyujin.deleteAll}
                         </button>
                       )}
                     </div>
@@ -4925,34 +6194,38 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                       type="text"
                       value={kyujinSearch}
                       onChange={(e) => setKyujinSearch(e.target.value)}
-                      placeholder="Tìm công ty, khu vực, lĩnh vực, baito, nội dung..."
-                      className="w-72 rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1.5 text-xs text-[#edeeef] placeholder:text-[#94949e] focus:border-[#22c55e] focus:outline-none"
+                      placeholder={t.kyujin.searchPlaceholder}
+                      className="w-72 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5 text-xs text-[#0F172A] placeholder:text-[#94A3B8] focus:border-[#16A34A] focus:bg-white focus:outline-none"
                     />
                   </div>
 
                   {/* Screenshot Drag/Paste hint & progress bar */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-dashed border-[#27272a] bg-[#0c0c0e] px-3 py-2 text-[11px] text-[#94949e]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-dashed border-[#CBD5E1] bg-[#F8FAFC] px-3 py-2 text-[11px] text-[#64748B]">
                     <span className="inline-flex items-center gap-1.5">
-                      <ImageIcon className="h-3.5 w-3.5 text-[#38bdf8]" aria-hidden="true" />
-                      Mẹo: Nhấn <strong className="text-[#edeeef]">Ctrl+V</strong> để dán trực tiếp ảnh chụp màn hình tin tuyển dụng / Baito hoặc kéo thả nhiều file vào đây.
+                      <ImageIcon className="h-3.5 w-3.5 text-sky-600" aria-hidden="true" />
+                      {t.kyujin.pasteTip}
                     </span>
                     {kyujinImportProgress && (
                       <span
                         className={`font-mono font-semibold tabular-nums ${
                           /OCR|scan/i.test(kyujinImportProgress.label)
-                            ? 'text-[#38bdf8]'
-                            : 'text-[#22c55e]'
+                            ? 'text-sky-700'
+                            : 'text-emerald-700'
                         }`}
                       >
-                        Đang xử lý {kyujinImportProgress.current}/{kyujinImportProgress.total}: {kyujinImportProgress.label}
+                        {t.kyujin.processing(
+                          kyujinImportProgress.current,
+                          kyujinImportProgress.total,
+                          kyujinImportProgress.label
+                        )}
                       </span>
                     )}
                   </div>
 
                   {kyujinImportProgress && (
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#0c0c0e]">
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
                       <div
-                        className="h-full bg-[#22c55e] transition-all"
+                        className="h-full bg-[#16A34A] transition-all"
                         style={{
                           width: `${Math.round(
                             (kyujinImportProgress.current / Math.max(1, kyujinImportProgress.total)) * 100
@@ -4962,40 +6235,40 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     </div>
                   )}
 
-                  <div className="flex flex-wrap items-center gap-2 border-t border-[#27272a] pt-3">
-                    <div className="flex items-center gap-1 rounded-md border border-[#27272a] bg-[#0c0c0e] p-1">
+                  <div className="flex flex-wrap items-center gap-2 border-t border-[#E2E8F0] pt-3">
+                    <div className="flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] p-1">
                       <button
                         type="button"
                         onClick={() => setKyujinStatusFilter('all')}
                         className={`rounded px-2.5 py-1 text-xs font-semibold tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
                           kyujinStatusFilter === 'all'
-                            ? 'bg-[#22c55e] text-[#0c0c0e]'
-                            : 'text-[#94949e] hover:text-[#edeeef]'
+                            ? 'bg-[#16A34A] text-white'
+                            : 'text-[#64748B] hover:text-[#0F172A]'
                         }`}
                       >
-                        Tất cả ({kyujinStats.totalSlots})
+                        {t.kyujin.statusAll(kyujinStats.totalSlots)}
                       </button>
                       <button
                         type="button"
                         onClick={() => setKyujinStatusFilter('open')}
                         className={`rounded px-2.5 py-1 text-xs font-semibold tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
                           kyujinStatusFilter === 'open'
-                            ? 'bg-[#22c55e] text-[#0c0c0e]'
-                            : 'text-[#94949e] hover:text-[#edeeef]'
+                            ? 'bg-[#16A34A] text-white'
+                            : 'text-[#64748B] hover:text-[#0F172A]'
                         }`}
                       >
-                        Đang tuyển ({kyujinStats.openSlots})
+                        {t.kyujin.statusOpen(kyujinStats.openSlots)}
                       </button>
                       <button
                         type="button"
                         onClick={() => setKyujinStatusFilter('closed')}
                         className={`rounded px-2.5 py-1 text-xs font-semibold tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
                           kyujinStatusFilter === 'closed'
-                            ? 'bg-[#ef4444] text-white'
-                            : 'text-[#94949e] hover:text-[#edeeef]'
+                            ? 'bg-rose-600 text-white'
+                            : 'text-[#64748B] hover:text-[#0F172A]'
                         }`}
                       >
-                        Đã đóng ({kyujinStats.closedSlots})
+                        {t.kyujin.statusClosed(kyujinStats.closedSlots)}
                       </button>
                     </div>
 
@@ -5004,11 +6277,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                       onClick={() => setKyujinBonusOnly((prev) => !prev)}
                       className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
                         kyujinBonusOnly
-                          ? 'border-[#f59e0b] bg-[#f59e0b]/15 text-[#f59e0b]'
-                          : 'border-[#27272a] bg-[#0c0c0e] text-[#94949e] hover:text-[#edeeef]'
+                          ? 'border-amber-300 bg-amber-50 text-amber-800'
+                          : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A]'
                       }`}
                     >
-                      Có thưởng ({kyujinStats.bonusSlots})
+                      {t.kyujin.hasBonus(kyujinStats.bonusSlots)}
                     </button>
 
                     <button
@@ -5016,23 +6289,23 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                       onClick={() => setKyujinMissingSalaryOnly((prev) => !prev)}
                       className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
                         kyujinMissingSalaryOnly
-                          ? 'border-[#f59e0b] bg-[#f59e0b]/20 text-[#fbbf24]'
+                          ? 'border-amber-400 bg-amber-100 text-amber-900'
                           : kyujinStats.missingSalarySlots > 0
-                          ? 'border-[#f59e0b]/40 bg-[#f59e0b]/5 text-[#f59e0b] hover:bg-[#f59e0b]/15'
-                          : 'border-[#27272a] bg-[#0c0c0e] text-[#94949e] hover:text-[#edeeef]'
+                          ? 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                          : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A]'
                       }`}
                     >
-                      ⚠️ Lương: 要確認 ({kyujinStats.missingSalarySlots})
+                      {t.kyujin.missingSalary(kyujinStats.missingSalarySlots)}
                     </button>
 
                     <select
                       value={kyujinSectorFilter}
                       onChange={(e) => setKyujinSectorFilter(e.target.value)}
-                      className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1.5 text-xs font-semibold text-[#edeeef]"
+                      className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5 text-xs font-semibold text-[#0F172A]"
                     >
-                      <option value="all" className="bg-[#141417]">Lĩnh vực lớn (Tất cả)</option>
+                      <option value="all">{t.kyujin.allSectors}</option>
                       {SECTORS.map((sec) => (
-                        <option key={sec} value={sec} className="bg-[#141417]">
+                        <option key={sec} value={sec}>
                           {sec}
                         </option>
                       ))}
@@ -5041,11 +6314,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     <select
                       value={kyujinIndustryFilter}
                       onChange={(e) => setKyujinIndustryFilter(e.target.value)}
-                      className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1.5 text-xs font-semibold text-[#edeeef]"
+                      className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5 text-xs font-semibold text-[#0F172A]"
                     >
-                      <option value="all" className="bg-[#141417]">Ngành nghề (Tất cả)</option>
+                      <option value="all">{t.kyujin.allIndustries}</option>
                       {INDUSTRIES.map((ind) => (
-                        <option key={ind} value={ind} className="bg-[#141417]">
+                        <option key={ind} value={ind}>
                           {ind}
                         </option>
                       ))}
@@ -5054,13 +6327,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     <select
                       value={kyujinEmploymentTypeFilter}
                       onChange={(e) => setKyujinEmploymentTypeFilter(e.target.value)}
-                      className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1.5 text-xs font-semibold text-[#38bdf8]"
+                      className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5 text-xs font-semibold text-sky-700"
                     >
-                      <option value="all" className="bg-[#141417]">
-                        Hình thức tuyển dụng (Tất cả · {kyujinStats.baitoSlots} Baito)
+                      <option value="all">
+                        {t.kyujin.allEmploymentTypes(kyujinStats.baitoSlots)}
                       </option>
                       {EMPLOYMENT_TYPES.map((emp) => (
-                        <option key={emp} value={emp} className="bg-[#141417]">
+                        <option key={emp} value={emp}>
                           {emp}
                         </option>
                       ))}
@@ -5069,11 +6342,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     <select
                       value={kyujinFacilityFilter}
                       onChange={(e) => setKyujinFacilityFilter(e.target.value)}
-                      className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1.5 text-xs font-semibold text-[#edeeef]"
+                      className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5 text-xs font-semibold text-[#0F172A]"
                     >
-                      <option value="all" className="bg-[#141417]">Loại hình Kaigo (Tất cả)</option>
+                      <option value="all">{t.kyujin.allFacilities}</option>
                       {KAIGO_FACILITY_TYPES.map((ft) => (
-                        <option key={ft} value={ft} className="bg-[#141417]">
+                        <option key={ft} value={ft}>
                           {ft}
                         </option>
                       ))}
@@ -5082,37 +6355,37 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 </div>
 
                 {filteredKyujinCompanies.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-[#27272a] bg-[#141417] p-10 text-center text-sm font-semibold text-[#94949e]">
-                    Chưa có tin tuyển dụng khớp bộ lọc. Bạn có thể tải nhiều file Excel/PDF/Word/CSV/Ảnh, dán văn bản hoặc nhấn Ctrl+V ảnh chụp tin tuyển dụng.
+                  <div className="rounded-lg border border-dashed border-[#CBD5E1] bg-white p-10 text-center text-sm font-semibold text-[#64748B]">
+                    {t.kyujin.emptyKyujin}
                   </div>
                 ) : (
                   filteredKyujinCompanies.map((comp) => (
                     <div
                       key={comp.id}
-                      className="rounded-lg border border-[#27272a] bg-[#141417] p-4"
+                      className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]"
                     >
-                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-[#27272a] pb-2.5">
+                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-2.5">
                         <div className="flex flex-wrap items-center gap-2.5">
-                          <span className="text-base font-bold text-[#edeeef]">
+                          <span className="text-base font-bold text-[#0F172A]">
                             {comp.companyName}
                           </span>
-                          <span className="rounded bg-[#27272a] px-2 py-0.5 font-mono text-[10px] text-[#edeeef]">
+                          <span className="rounded bg-slate-100 border border-[#E2E8F0] px-2 py-0.5 font-mono text-[10px] font-medium text-[#475569]">
                             {comp.sector || detectSectorFromIndustryOrText(comp.industry)}
                           </span>
-                          <span className="font-mono text-xs font-semibold text-[#22c55e]">
+                          <span className="font-mono text-xs font-semibold text-emerald-700">
                             {comp.industry}
                           </span>
-                          <span className="font-mono text-xs text-[#94949e] tabular-nums">
-                            {comp.areaBreakdown.length} vị trí
+                          <span className="font-mono text-xs text-[#64748B] tabular-nums">
+                            {t.kyujin.positionsCount(comp.areaBreakdown.length)}
                           </span>
                         </div>
 
                         <button
                           type="button"
                           onClick={() => handleDeleteSingleCompany(comp.id, comp.companyName)}
-                          className="rounded border border-[#ef4444]/40 bg-transparent px-2.5 py-1 text-xs font-semibold text-[#ef4444] hover:bg-[#ef4444]/10 whitespace-nowrap shrink-0 cursor-pointer"
+                          className="rounded border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          Xóa công ty
+                          {t.kyujin.deleteCompany}
                         </button>
                       </div>
 
@@ -5127,10 +6400,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                               key={sl.slotId}
                               className={`rounded-md border p-3 transition-colors ${
                                 sl.recruitmentStatus === '募集終了'
-                                  ? 'border-[#ef4444]/30 bg-[#ef4444]/5 opacity-80'
+                                  ? 'border-rose-200 bg-rose-50/50 opacity-85'
                                   : isBaito
-                                  ? 'border-[#38bdf8]/40 bg-[#0c0c0e]'
-                                  : 'border-[#27272a] bg-[#0c0c0e]'
+                                  ? 'border-sky-200 bg-sky-50/30'
+                                  : 'border-[#E2E8F0] bg-[#F8FAFC]'
                               }`}
                             >
                               <div className="mb-2 flex items-start justify-between gap-2">
@@ -5139,30 +6412,30 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                     type="checkbox"
                                     checked={isChecked}
                                     onChange={() => toggleSelectSlot(sl.slotId)}
-                                    className="h-4 w-4 rounded border-[#27272a] bg-[#141417] accent-[#22c55e]"
+                                    className="h-4 w-4 rounded border-[#CBD5E1] bg-white accent-[#16A34A]"
                                   />
                                   <span
                                     className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
                                       isBaito
-                                        ? 'bg-[#38bdf8]/20 text-[#38bdf8]'
-                                        : 'bg-[#22c55e]/15 text-[#22c55e]'
+                                        ? 'bg-sky-100 text-sky-800'
+                                        : 'bg-emerald-100 text-emerald-800'
                                     }`}
                                   >
                                     {empType}
                                   </span>
-                                  <span className="font-mono text-xs font-bold text-[#edeeef]">
+                                  <span className="font-mono text-xs font-bold text-[#0F172A]">
                                     #{sl.jobCode || 'Slot'}
                                   </span>
-                                  <span className="text-xs font-semibold text-[#edeeef]/90">
+                                  <span className="text-xs font-semibold text-[#334155]">
                                     {formatPublicArea(sl.area) || sl.area || 'Nhật Bản'}
                                   </span>
                                   {sl.shiftTime && (
-                                    <span className="text-[11px] font-semibold text-sky-400">
+                                    <span className="text-[11px] font-semibold text-sky-700">
                                       · {sl.shiftTime}
                                     </span>
                                   )}
                                   {sl.facilityType && (
-                                    <span className="text-[11px] font-semibold text-purple-400">
+                                    <span className="text-[11px] font-semibold text-purple-700">
                                       · {sl.facilityType}
                                     </span>
                                   )}
@@ -5171,9 +6444,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                 <button
                                   type="button"
                                   onClick={() => setPreviewModal({ company: comp, slot: sl })}
-                                  className="rounded bg-[#22c55e] px-2.5 py-1 text-xs font-semibold text-[#0c0c0e] hover:opacity-90 whitespace-nowrap shrink-0 cursor-pointer"
+                                  className="rounded bg-[#16A34A] px-2.5 py-1 text-xs font-semibold text-white hover:bg-[#15803D] whitespace-nowrap shrink-0 cursor-pointer"
                                 >
-                                  Xuất ẩn danh
+                                  {t.kyujin.exportAnon}
                                 </button>
                               </div>
 
@@ -5188,7 +6461,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                   <div className="mb-2 flex flex-wrap items-center gap-2.5 text-xs">
                                     {isEditingThisSalary ? (
                                       <div className="flex items-center gap-1.5">
-                                        <span className="font-mono text-[11px] font-semibold text-[#94949e]">
+                                        <span className="font-mono text-[11px] font-semibold text-[#64748B]">
                                           {salaryMeta.labelPrefix}:
                                         </span>
                                         <input
@@ -5222,10 +6495,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                               editingKyujinSalary.value
                                             )
                                           }
-                                          className="w-48 rounded border border-[#22c55e] bg-[#141417] px-2 py-0.5 font-mono text-xs font-bold text-[#edeeef] outline-none ring-1 ring-[#22c55e]/40"
+                                          className="w-48 rounded border border-[#16A34A] bg-white px-2 py-0.5 font-mono text-xs font-bold text-[#0F172A] outline-none ring-1 ring-emerald-200"
                                         />
-                                        <span className="text-[10px] text-[#94949e]">
-                                          Enter để lưu
+                                        <span className="text-[10px] text-[#64748B]">
+                                          {t.kyujin.enterToSave}
                                         </span>
                                       </div>
                                     ) : (
@@ -5238,25 +6511,19 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                             salaryMeta.editInitialValue
                                           )
                                         }
-                                        title="Click để sửa nhanh mức lương trực tiếp (Enter hoặc click ra ngoài để lưu)"
                                         className={`group inline-flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 font-mono font-bold tabular-nums transition-colors ${
                                           salaryMeta.isMissing
-                                            ? 'border border-[#f59e0b]/40 bg-[#f59e0b]/10 text-[#f59e0b] hover:bg-[#f59e0b]/20'
+                                            ? 'border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100'
                                             : salaryMeta.isHourly
-                                            ? 'text-[#38bdf8] hover:bg-[#38bdf8]/15'
-                                            : 'text-[#22c55e] hover:bg-[#22c55e]/15'
+                                            ? 'text-sky-700 hover:bg-sky-50'
+                                            : 'text-emerald-700 hover:bg-emerald-50'
                                         }`}
                                       >
                                         <span>
                                           {salaryMeta.labelPrefix}: {salaryMeta.displayValue}
                                         </span>
                                         {sl.salaryManuallyEdited && (
-                                          <span
-                                            title="Đã chỉnh sửa thủ công (được bảo vệ khỏi ghi đè)"
-                                            className="text-[10px] opacity-80"
-                                          >
-                                            🔒
-                                          </span>
+                                          <span className="text-[10px] opacity-80">🔒</span>
                                         )}
                                         <span className="text-[10px] opacity-0 transition-opacity group-hover:opacity-80">
                                           ✎
@@ -5267,31 +6534,32 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                     {isBaito ? (
                                       <>
                                         {sl.commuteAllowance && (
-                                          <span className="text-[#94949e]">
-                                            Đi lại: {sl.commuteAllowance}
+                                          <span className="text-[#64748B]">
+                                            {uiLang === 'jp' ? '交通費' : 'Đi lại'}: {sl.commuteAllowance}
                                           </span>
                                         )}
                                         {sl.shiftsPerWeek && (
-                                          <span className="text-[#94949e]">
-                                            Ca: {sl.shiftsPerWeek}
+                                          <span className="text-[#64748B]">
+                                            {uiLang === 'jp' ? 'シフト' : 'Ca'}: {sl.shiftsPerWeek}
                                           </span>
                                         )}
                                       </>
                                     ) : (
                                       <>
                                         {sl.estimatedNetSalary && (
-                                          <span className="font-mono text-[11px] text-[#38bdf8]">
-                                            Thực nhận: {sl.estimatedNetSalary}
+                                          <span className="font-mono text-[11px] font-medium text-sky-700">
+                                            {uiLang === 'jp' ? '手取り' : 'Thực nhận'}: {sl.estimatedNetSalary}
                                           </span>
                                         )}
                                         {sl.nightShiftAllowance && (
-                                          <span className="text-[11px] text-[#94949e]">
-                                            Ca đêm: {sl.nightShiftAllowance}
+                                          <span className="text-[11px] text-[#64748B]">
+                                            {uiLang === 'jp' ? '夜勤手当' : 'Ca đêm'}: {sl.nightShiftAllowance}
                                           </span>
                                         )}
                                         {sl.bonus === '賞与あり' && (
-                                          <span className="font-semibold text-[#f59e0b]">
-                                            Thưởng{sl.bonusDetail ? ` (${sl.bonusDetail})` : ''}
+                                          <span className="font-semibold text-amber-700">
+                                            {uiLang === 'jp' ? '賞与' : 'Thưởng'}
+                                            {sl.bonusDetail ? ` (${sl.bonusDetail})` : ''}
                                           </span>
                                         )}
                                       </>
@@ -5305,17 +6573,57 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                   <span
                                     className={`rounded px-1.5 py-0.5 font-semibold ${
                                       /未経験/.test(sl.experienceRequirement)
-                                        ? 'bg-[#22c55e]/15 text-[#22c55e]'
-                                        : 'bg-[#f59e0b]/15 text-[#f59e0b]'
+                                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                        : 'bg-amber-50 text-amber-800 border border-amber-300'
                                     }`}
                                   >
                                     {sl.experienceRequirement}
                                   </span>
                                   {sl.experienceDetail && (
-                                    <span className="text-[#94949e]">{sl.experienceDetail}</span>
+                                    <span className="text-[#64748B]">{sl.experienceDetail}</span>
                                   )}
                                 </div>
                               )}
+
+                              <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[10px]">
+                                {(sl.requiredConditions || []).map((reqTag) => (
+                                  <span
+                                    key={reqTag}
+                                    className="rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700"
+                                  >
+                                    ✓ {reqTag}
+                                  </span>
+                                ))}
+                                {(sl.ngConditions || []).map((ngTag) => (
+                                  <span
+                                    key={ngTag}
+                                    className="rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 font-semibold text-rose-700"
+                                  >
+                                    🚫 {ngTag}
+                                  </span>
+                                ))}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setKyujinConditionModal({
+                                      companyId: comp.id,
+                                      slotId: sl.slotId,
+                                      companyName: comp.companyName,
+                                      excludedNationalitiesText: (
+                                        sl.excludedNationalities || []
+                                      ).join(', '),
+                                      excludedGenders: sl.excludedGenders || [],
+                                      requiresInJapan: Boolean(sl.requiresInJapan),
+                                      requiresTokutei: Boolean(sl.requiresTokutei),
+                                      extraRequiredText: (sl.requiredConditions || []).join(', '),
+                                      extraNgText: (sl.ngConditions || []).join(', '),
+                                    })
+                                  }
+                                  className="rounded border border-[#E2E8F0] bg-white px-1.5 py-0.5 font-semibold text-[#64748B] hover:border-[#16A34A] hover:text-[#16A34A] cursor-pointer"
+                                >
+                                  ✎ {t.kyujinConds.editNgBtn}
+                                </button>
+                              </div>
 
                               <div className="mb-2 flex flex-wrap items-center gap-1.5">
                                 <select
@@ -5330,12 +6638,12 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                   }
                                   className={`rounded border px-2 py-1 text-[11px] font-semibold ${
                                     sl.recruitmentStatus === '募集終了'
-                                      ? 'border-[#ef4444]/40 bg-[#ef4444]/10 text-[#ef4444]'
-                                      : 'border-[#22c55e]/40 bg-[#22c55e]/10 text-[#22c55e]'
+                                      ? 'border-rose-200 bg-rose-50 text-rose-700'
+                                      : 'border-emerald-200 bg-emerald-50 text-emerald-700'
                                   }`}
                                 >
-                                  <option value="募集中" className="bg-[#141417] text-[#edeeef]">Đang tuyển</option>
-                                  <option value="募集終了" className="bg-[#141417] text-[#edeeef]">Đã đóng</option>
+                                  <option value="募集中">{t.kyujin.recruitingOpt}</option>
+                                  <option value="募集終了">{t.kyujin.closedOpt}</option>
                                 </select>
 
                                 <select
@@ -5348,10 +6656,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                       e.target.value
                                     )
                                   }
-                                  className="rounded border border-[#27272a] bg-[#141417] px-2 py-1 text-[11px] font-semibold text-[#38bdf8]"
+                                  className="rounded border border-[#E2E8F0] bg-white px-2 py-1 text-[11px] font-semibold text-sky-700"
                                 >
                                   {EMPLOYMENT_TYPES.map((emp) => (
-                                    <option key={emp} value={emp} className="bg-[#141417]">
+                                    <option key={emp} value={emp}>
                                       {emp}
                                     </option>
                                   ))}
@@ -5367,15 +6675,14 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                       e.target.value
                                     )
                                   }
-                                  title="Đổi ngành nghề"
-                                  className="rounded border border-[#27272a] bg-[#141417] px-2 py-1 text-[11px] font-semibold text-[#edeeef]"
+                                  className="rounded border border-[#E2E8F0] bg-white px-2 py-1 text-[11px] font-semibold text-[#0F172A]"
                                 >
                                   {INDUSTRIES.map((ind) => (
-                                    <option key={ind} value={ind} className="bg-[#141417]">
+                                    <option key={ind} value={ind}>
                                       {ind}
                                     </option>
                                   ))}
-                                  <option value="特定技能" className="bg-[#141417]">特定技能</option>
+                                  <option value="特定技能">特定技能</option>
                                 </select>
 
                                 <select
@@ -5388,10 +6695,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                       e.target.value
                                     )
                                   }
-                                  className="rounded border border-[#27272a] bg-[#141417] px-2 py-1 text-[11px] font-semibold text-[#edeeef]"
+                                  className="rounded border border-[#E2E8F0] bg-white px-2 py-1 text-[11px] font-semibold text-[#0F172A]"
                                 >
                                   {JLPT_LEVELS.map((lvl) => (
-                                    <option key={lvl} value={lvl} className="bg-[#141417]">
+                                    <option key={lvl} value={lvl}>
                                       JLPT: {lvl}
                                     </option>
                                   ))}
@@ -5407,18 +6714,28 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                                       e.target.value
                                     )
                                   }
-                                  className="rounded border border-[#27272a] bg-[#141417] px-2 py-1 text-[11px] font-semibold text-[#edeeef]"
+                                  className="rounded border border-[#E2E8F0] bg-white px-2 py-1 text-[11px] font-semibold text-[#0F172A]"
                                 >
-                                  <option value="🏠 自社寮あり" className="bg-[#141417]">🏠 KTX công ty</option>
-                                  <option value="🏠 借上げ宿舎あり" className="bg-[#141417]">🏠 Nhà thuê hỗ trợ</option>
-                                  <option value="🏠 寮・社宅あり" className="bg-[#141417]">🏠 Có KTX/Nhà ở</option>
-                                  <option value="❌ 提供無" className="bg-[#141417]">❌ Tự túc nhà</option>
-                                  <option value="⚠️ 要確認" className="bg-[#141417]">⚠️ Nhà: Cần xác nhận</option>
+                                  <option value="🏠 自社寮あり">
+                                    {uiLang === 'jp' ? '🏠 自社寮あり' : '🏠 KTX công ty'}
+                                  </option>
+                                  <option value="🏠 借上げ宿舎あり">
+                                    {uiLang === 'jp' ? '🏠 借上げ宿舎あり' : '🏠 Nhà thuê hỗ trợ'}
+                                  </option>
+                                  <option value="🏠 寮・社宅あり">
+                                    {uiLang === 'jp' ? '🏠 寮・社宅あり' : '🏠 Có KTX/Nhà ở'}
+                                  </option>
+                                  <option value="❌ 提供無">
+                                    {uiLang === 'jp' ? '❌ 提供無' : '❌ Tự túc nhà'}
+                                  </option>
+                                  <option value="⚠️ 要確認">
+                                    {uiLang === 'jp' ? '⚠️ 住居要確認' : '⚠️ Nhà: Cần xác nhận'}
+                                  </option>
                                 </select>
                               </div>
 
                               {sl.jobDescription && (
-                                <p className="text-xs leading-relaxed text-[#94949e]">
+                                <p className="text-xs leading-relaxed text-[#475569]">
                                   {sl.jobDescription}
                                 </p>
                               )}
@@ -5436,6 +6753,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             {activeTab === 'resignation' && (
               <ResignationTab
                 records={resignations}
+                lang={uiLang}
                 onSaveRecord={handleSaveResignation}
                 onDeleteRecord={handleDeleteResignation}
                 onStatusChange={handleResignationStatusChange}
@@ -5455,14 +6773,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             {/* PT PARTNERSHIP TAB */}
             {activeTab === 'pt' && (
               <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#27272a] bg-[#141417] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                   <div>
-                    <h2 className="text-base font-bold text-[#edeeef]">
-                      PT提携・連携管理（パートナー機関・紹介連携）
-                    </h2>
-                    <p className="text-xs text-[#94949e]">
-                      提携PTの連絡先・報酬条件・関連相談者や求人の連携状況を一元管理します。
-                    </p>
+                    <h2 className="text-base font-bold text-[#0F172A]">{t.pt.title}</h2>
+                    <p className="text-xs text-[#64748B]">{t.pt.subtitle}</p>
                   </div>
                   <button
                     type="button"
@@ -5482,9 +6796,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         },
                       })
                     }
-                    className="rounded-md bg-[#22c55e] px-3.5 py-2 text-xs font-semibold text-[#0c0c0e] hover:opacity-90 whitespace-nowrap shrink-0 cursor-pointer"
+                    className="rounded-md bg-[#16A34A] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#15803D] whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    ＋ 新規PT提携先を追加
+                    {t.pt.addBtn}
                   </button>
                 </div>
 
@@ -5496,71 +6810,78 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     return (
                       <div
                         key={pt.id}
-                        className="rounded-lg border border-[#27272a] bg-[#141417] p-4"
+                        className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]"
                       >
                         <div className="mb-2 flex items-start justify-between gap-2">
                           <div>
                             <div className="flex items-center gap-2">
-                              <span className="text-base font-bold text-[#edeeef]">
+                              <span className="text-base font-bold text-[#0F172A]">
                                 {pt.partnerName}
                               </span>
-                              <span className="text-[#27272a]" aria-hidden="true">
+                              <span className="text-[#CBD5E1]" aria-hidden="true">
                                 ·
                               </span>
-                              <span className="font-mono text-xs font-semibold text-[#22c55e]">
+                              <span className="font-mono text-xs font-semibold text-emerald-700">
                                 {pt.status}
                               </span>
                             </div>
-                            <p className="mt-1 text-xs text-[#94949e]">
-                              担当: {pt.contactPerson || '未設定'} / TEL: {pt.phone || '-'} / Email:{' '}
-                              {pt.email || '-'}
+                            <p className="mt-1 text-xs text-[#64748B]">
+                              {t.pt.contactLabel} {pt.contactPerson || t.cardLabels.unset} / TEL:{' '}
+                              {pt.phone || '-'} / Email: {pt.email || '-'}
                             </p>
                           </div>
                           <div className="flex gap-1.5">
                             <button
                               type="button"
                               onClick={() => setPtModal({ isNew: false, data: { ...pt } })}
-                              className="rounded border border-[#27272a] px-2.5 py-1 text-xs font-semibold text-[#94949e] hover:border-[#94949e] hover:text-[#edeeef] whitespace-nowrap shrink-0 cursor-pointer"
+                              className="rounded border border-[#E2E8F0] bg-white px-2.5 py-1 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC] hover:text-[#0F172A] whitespace-nowrap shrink-0 cursor-pointer"
                             >
-                              編集
+                              {t.editBtn}
                             </button>
                             <button
                               type="button"
                               onClick={() =>
                                 setConfirmDialog({
-                                  title: 'PT提携先の削除',
-                                  message: `「${pt.partnerName}」を削除しますか？`,
+                                  title: uiLang === 'jp' ? 'PT提携先の削除' : 'Xóa đối tác PT',
+                                  message:
+                                    uiLang === 'jp'
+                                      ? `「${pt.partnerName}」を削除しますか？`
+                                      : `Bạn có chắc muốn xóa đối tác "${pt.partnerName}"?`,
                                   onConfirm: () => {
                                     setPtPartners((prev) => prev.filter((x) => x.id !== pt.id));
                                     setConfirmDialog(null);
-                                    showToast('🗑️ PT提携先を削除しました');
+                                    showToast(
+                                      uiLang === 'jp'
+                                        ? '🗑️ PT提携先を削除しました'
+                                        : '🗑️ Đã xóa đối tác PT'
+                                    );
                                   },
                                 })
                               }
-                              className="rounded border border-[#ef4444]/40 px-2.5 py-1 text-xs font-semibold text-[#ef4444] hover:bg-[#ef4444]/10 whitespace-nowrap shrink-0 cursor-pointer"
+                              className="rounded border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap shrink-0 cursor-pointer"
                             >
-                              削除
+                              {t.deleteBtn}
                             </button>
                           </div>
                         </div>
 
-                        <div className="space-y-1.5 border-t border-[#27272a] pt-2.5 text-xs text-[#94949e]">
+                        <div className="space-y-1.5 border-t border-[#E2E8F0] pt-2.5 text-xs text-[#64748B]">
                           <div>
-                            <span className="font-semibold text-[#edeeef]">得意分野: </span>
-                            {pt.specialty || '全分野対応'}
+                            <span className="font-semibold text-[#0F172A]">{t.pt.specialtyLabel} </span>
+                            {pt.specialty || (uiLang === 'jp' ? '全分野対応' : 'Tất cả ngành')}
                           </div>
                           <div>
-                            <span className="font-semibold text-[#edeeef]">契約・シェア条件: </span>
-                            {pt.commissionTerms || '別途協議'}
+                            <span className="font-semibold text-[#0F172A]">{t.pt.termsLabel} </span>
+                            {pt.commissionTerms || (uiLang === 'jp' ? '別途協議' : 'Thỏa thuận riêng')}
                           </div>
-                          {pt.memo && <div className="text-[#94949e]">{pt.memo}</div>}
+                          {pt.memo && <div className="text-[#64748B]">{pt.memo}</div>}
                         </div>
 
-                        <div className="mt-2.5 font-mono text-xs font-semibold text-[#22c55e] tabular-nums">
-                          連携中の相談者: {relatedPeople.length} 名
+                        <div className="mt-2.5 font-mono text-xs font-semibold text-emerald-700 tabular-nums">
+                          {t.pt.linkedCandidates(relatedPeople.length)}
                           {relatedPeople.length > 0 && (
-                            <span className="ml-1 font-sans font-normal text-[#94949e]">
-                              （{relatedPeople.map((r) => r.name).join('、')}）
+                            <span className="ml-1 font-sans font-normal text-[#64748B]">
+                              （{relatedPeople.map((r) => getCandidateDisplayName(r, uiLang)).join('、')}）
                             </span>
                           )}
                         </div>
@@ -5577,22 +6898,22 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 const totalPeopleCount = allPeopleCombined.length || 1;
                 const channelBreakdown = [
                   {
-                    label: 'FB個人',
+                    label: t.tabs.personal,
                     count: personalCandidates.length,
                     pct: Math.round((personalCandidates.length / totalPeopleCount) * 100),
-                    barClass: 'bg-[#22c55e]',
+                    barClass: 'bg-[#16A34A]',
                   },
                   {
-                    label: 'FB会社公式',
+                    label: t.tabs.company,
                     count: companyCandidates.length,
                     pct: Math.round((companyCandidates.length / totalPeopleCount) * 100),
-                    barClass: 'bg-sky-400',
+                    barClass: 'bg-sky-500',
                   },
                   {
-                    label: '日本語学校・留学生',
+                    label: t.tabs.school,
                     count: schoolStudents.length,
                     pct: Math.round((schoolStudents.length / totalPeopleCount) * 100),
-                    barClass: 'bg-purple-400',
+                    barClass: 'bg-purple-500',
                   },
                 ];
 
@@ -5611,7 +6932,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
                 const industryCountsMap: Record<string, number> = {};
                 allPeopleCombined.forEach((p) => {
-                  const ind = String(p.desiredIndustry || '未設定').trim() || '未設定';
+                  const ind = String(p.desiredIndustry || t.cardLabels.unset).trim() || t.cardLabels.unset;
                   industryCountsMap[ind] = (industryCountsMap[ind] || 0) + 1;
                 });
                 const industryChartRows = Object.entries(industryCountsMap)
@@ -5642,7 +6963,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
                 const nationalityCountsMap: Record<string, number> = {};
                 allPeopleCombined.forEach((p) => {
-                  const nat = String(p.nationality || '未設定').trim() || '未設定';
+                  const nat = String(p.nationality || t.cardLabels.unset).trim() || t.cardLabels.unset;
                   nationalityCountsMap[nat] = (nationalityCountsMap[nat] || 0) + 1;
                 });
                 const nationalityChartRows = Object.entries(nationalityCountsMap)
@@ -5678,69 +6999,71 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 return (
                   <div className="space-y-4">
                     <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                      <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
-                        <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                          登録人材総数
+                      <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+                        <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                          {t.report.totalTalent}
                         </div>
-                        <div className="mt-1 font-mono text-2xl font-bold text-[#edeeef] tabular-nums">
-                          {allPeopleCombined.length} 名
+                        <div className="mt-1 font-mono text-2xl font-bold text-[#0F172A] tabular-nums">
+                          {allPeopleCombined.length} {t.report.peopleUnit}
                         </div>
-                        <div className="mt-1 text-[11px] text-[#94949e] tabular-nums">
-                          一般相談 {candidates.length}名 · 留学生 {schoolStudents.length}名
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
-                        <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                          企業提案済み・選考中
-                        </div>
-                        <div className="mt-1 font-mono text-2xl font-bold text-[#22c55e] tabular-nums">
-                          {allProposedPeople.length} 名
-                        </div>
-                        <div className="mt-1 text-[11px] text-[#94949e] tabular-nums">
-                          面談実績あり {mendanPeopleSorted.length}名
+                        <div className="mt-1 text-[11px] text-[#64748B] tabular-nums">
+                          FB {candidates.length} · DHS {schoolStudents.length}
                         </div>
                       </div>
-                      <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
-                        <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                          保有求人枠（募集中）
+                      <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+                        <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                          {t.report.proposedCount}
                         </div>
-                        <div className="mt-1 font-mono text-2xl font-bold text-[#f59e0b] tabular-nums">
-                          {kyujinStats.openSlots} 枠
+                        <div className="mt-1 font-mono text-2xl font-bold text-emerald-700 tabular-nums">
+                          {allProposedPeople.length} {t.report.peopleUnit}
                         </div>
-                        <div className="mt-1 text-[11px] text-[#94949e] tabular-nums">
-                          全 {kyujinStats.totalCompanies} 社 · 賞与あり {kyujinStats.bonusSlots}枠
+                        <div className="mt-1 text-[11px] text-[#64748B] tabular-nums">
+                          Mendan {mendanPeopleSorted.length} {t.report.peopleUnit}
                         </div>
                       </div>
-                      <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
-                        <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                          提携PT機関数
+                      <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+                        <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                          {t.report.openSlots}
                         </div>
-                        <div className="mt-1 font-mono text-2xl font-bold text-[#edeeef] tabular-nums">
-                          {ptPartners.length} 社
+                        <div className="mt-1 font-mono text-2xl font-bold text-amber-700 tabular-nums">
+                          {kyujinStats.openSlots} {t.report.slotsUnit}
                         </div>
-                        <div className="mt-1 text-[11px] text-[#94949e]">継続連携・案件共有中</div>
+                        <div className="mt-1 text-[11px] text-[#64748B] tabular-nums">
+                          {kyujinStats.totalCompanies} {t.report.companiesUnit} · {t.report.bonusLabel} {kyujinStats.bonusSlots}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
+                        <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                          {t.report.ptCount}
+                        </div>
+                        <div className="mt-1 font-mono text-2xl font-bold text-[#0F172A] tabular-nums">
+                          {ptPartners.length} {t.report.companiesUnit}
+                        </div>
+                        <div className="mt-1 text-[11px] text-[#64748B]">
+                          {uiLang === 'jp' ? '継続連携・案件共有中' : 'Đang hợp tác & chia sẻ đơn'}
+                        </div>
                       </div>
                     </div>
 
                     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                      <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
+                      <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                         <div className="mb-3 flex items-center justify-between">
-                          <h3 className="text-sm font-bold text-[#edeeef]">
-                            チャネル別・国籍別 登録人材構成（計 {allPeopleCombined.length} 名）
+                          <h3 className="text-sm font-bold text-[#0F172A]">
+                            {t.report.channelDist(allPeopleCombined.length)}
                           </h3>
-                          <span className="font-mono text-[10px] uppercase tracking-wider text-[#22c55e]">
+                          <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
                             Summary
                           </span>
                         </div>
 
-                        <div className="mb-3 flex h-3 w-full overflow-hidden rounded-full bg-[#0c0c0e]">
+                        <div className="mb-3 flex h-3 w-full overflow-hidden rounded-full bg-slate-100">
                           {channelBreakdown.map((ch) =>
                             ch.count > 0 ? (
                               <div
                                 key={ch.label}
                                 style={{ width: `${Math.max(4, ch.pct)}%` }}
                                 className={`${ch.barClass} transition-all`}
-                                title={`${ch.label}: ${ch.count}名 (${ch.pct}%)`}
+                                title={`${ch.label}: ${ch.count} (${ch.pct}%)`}
                               />
                             ) : null
                           )}
@@ -5750,12 +7073,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           {channelBreakdown.map((ch) => (
                             <div key={ch.label} className="space-y-1">
                               <div className="flex items-center justify-between text-xs">
-                                <span className="font-semibold text-[#edeeef]">{ch.label}</span>
-                                <span className="font-mono font-bold text-[#edeeef] tabular-nums">
-                                  {ch.count} 名 <span className="text-[#94949e]">({ch.pct}%)</span>
+                                <span className="font-semibold text-[#0F172A]">{ch.label}</span>
+                                <span className="font-mono font-bold text-[#0F172A] tabular-nums">
+                                  {ch.count} {t.report.peopleUnit}{' '}
+                                  <span className="text-[#64748B]">({ch.pct}%)</span>
                                 </span>
                               </div>
-                              <div className="h-2 w-full overflow-hidden rounded-full bg-[#0c0c0e]">
+                              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
                                 <div
                                   style={{ width: `${ch.pct}%` }}
                                   className={`h-full rounded-full ${ch.barClass}`}
@@ -5765,19 +7089,19 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           ))}
                         </div>
 
-                        <div className="mt-4 border-t border-[#27272a] pt-3">
-                          <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                            国籍別内訳
+                        <div className="mt-4 border-t border-[#E2E8F0] pt-3">
+                          <div className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                            {t.report.nationalityBreakdown}
                           </div>
                           <div className="flex flex-wrap gap-2 text-xs">
                             {nationalityChartRows.map((item) => (
                               <div
                                 key={item.nat}
-                                className="flex items-center gap-1.5 rounded border border-[#27272a] bg-[#0c0c0e] px-2.5 py-1"
+                                className="flex items-center gap-1.5 rounded border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1"
                               >
-                                <span className="font-semibold text-[#edeeef]">{item.nat}</span>
-                                <span className="font-mono font-bold text-[#22c55e] tabular-nums">
-                                  {item.count}名 ({item.pct}%)
+                                <span className="font-semibold text-[#0F172A]">{item.nat}</span>
+                                <span className="font-mono font-bold text-emerald-700 tabular-nums">
+                                  {item.count} ({item.pct}%)
                                 </span>
                               </div>
                             ))}
@@ -5785,35 +7109,34 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         </div>
                       </div>
 
-                      <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
+                      <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                         <div className="mb-3 flex items-center justify-between">
-                          <h3 className="text-sm font-bold text-[#edeeef]">
-                            進捗ステータス別 選考パイプライン
+                          <h3 className="text-sm font-bold text-[#0F172A]">
+                            {t.report.statusPipeline}
                           </h3>
-                          <span className="font-mono text-[10px] text-[#94949e]">人数・構成比</span>
                         </div>
                         <div className="space-y-2">
                           {statusChartRows.map((row) => (
                             <div key={row.status} className="space-y-1">
                               <div className="flex items-center justify-between text-xs">
-                                <span className="font-semibold text-[#edeeef]">{row.status}</span>
-                                <span className="font-mono font-bold text-[#22c55e] tabular-nums">
-                                  {row.count} 名 ({row.pct}%)
+                                <span className="font-semibold text-[#0F172A]">{row.status}</span>
+                                <span className="font-mono font-bold text-emerald-700 tabular-nums">
+                                  {row.count} {t.report.peopleUnit} ({row.pct}%)
                                 </span>
                               </div>
-                              <div className="h-2 w-full overflow-hidden rounded-full bg-[#0c0c0e]">
+                              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
                                 <div
                                   style={{ width: `${Math.max(3, row.pct)}%` }}
                                   className={`h-full rounded-full ${
                                     row.status.includes('内定') || row.status.includes('入社')
-                                      ? 'bg-[#22c55e]'
+                                      ? 'bg-[#16A34A]'
                                       : row.status.includes('面接') || row.status.includes('提案')
-                                      ? 'bg-sky-400'
+                                      ? 'bg-sky-500'
                                       : row.status.includes('面談')
-                                      ? 'bg-teal-400'
+                                      ? 'bg-teal-500'
                                       : row.status.includes('保留') || row.status.includes('辞退')
-                                      ? 'bg-[#ef4444]'
-                                      : 'bg-[#94949e]'
+                                      ? 'bg-rose-500'
+                                      : 'bg-slate-400'
                                   }`}
                                 />
                               </div>
@@ -5824,24 +7147,24 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     </div>
 
                     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                      <div className="space-y-4 rounded-lg border border-[#27272a] bg-[#141417] p-4">
+                      <div className="space-y-4 rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                         <div>
-                          <h3 className="mb-2.5 text-sm font-bold text-[#edeeef]">
-                            希望分野別 人材分布
+                          <h3 className="mb-2.5 text-sm font-bold text-[#0F172A]">
+                            {t.report.industryDist}
                           </h3>
                           <div className="space-y-2">
                             {industryChartRows.map((row) => (
                               <div key={row.industry} className="space-y-1">
                                 <div className="flex items-center justify-between text-xs">
-                                  <span className="font-semibold text-[#edeeef]">{row.industry}</span>
-                                  <span className="font-mono font-bold text-[#22c55e] tabular-nums">
-                                    {row.count} 名 ({row.pct}%)
+                                  <span className="font-semibold text-[#0F172A]">{row.industry}</span>
+                                  <span className="font-mono font-bold text-emerald-700 tabular-nums">
+                                    {row.count} {t.report.peopleUnit} ({row.pct}%)
                                   </span>
                                 </div>
-                                <div className="h-2 w-full overflow-hidden rounded-full bg-[#0c0c0e]">
+                                <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
                                   <div
                                     style={{ width: `${Math.max(3, row.pct)}%` }}
-                                    className="h-full rounded-full bg-[#22c55e]"
+                                    className="h-full rounded-full bg-[#16A34A]"
                                   />
                                 </div>
                               </div>
@@ -5849,23 +7172,23 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           </div>
                         </div>
 
-                        <div className="border-t border-[#27272a] pt-3">
-                          <h3 className="mb-2.5 text-sm font-bold text-[#edeeef]">
-                            日本語レベル（JLPT）別 人材分布
+                        <div className="border-t border-[#E2E8F0] pt-3">
+                          <h3 className="mb-2.5 text-sm font-bold text-[#0F172A]">
+                            {t.report.jlptDist}
                           </h3>
                           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                             {jlptChartRows.map((row) => (
                               <div
                                 key={row.level}
-                                className="rounded border border-[#27272a] bg-[#0c0c0e] p-2.5 text-center"
+                                className="rounded border border-[#E2E8F0] bg-[#F8FAFC] p-2.5 text-center"
                               >
-                                <div className="font-mono text-xs font-bold text-[#22c55e]">
+                                <div className="font-mono text-xs font-bold text-emerald-700">
                                   {row.level}
                                 </div>
-                                <div className="mt-0.5 font-mono text-lg font-bold text-[#edeeef] tabular-nums">
-                                  {row.count}名
+                                <div className="mt-0.5 font-mono text-lg font-bold text-[#0F172A] tabular-nums">
+                                  {row.count}
                                 </div>
-                                <div className="font-mono text-[10px] font-semibold text-[#94949e] tabular-nums">
+                                <div className="font-mono text-[10px] font-semibold text-[#64748B] tabular-nums">
                                   {row.pct}%
                                 </div>
                               </div>
@@ -5874,49 +7197,56 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         </div>
                       </div>
 
-                      <div className="space-y-4 rounded-lg border border-[#27272a] bg-[#141417] p-4">
+                      <div className="space-y-4 rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                         <div className="flex items-center justify-between">
-                          <h3 className="text-sm font-bold text-[#edeeef]">
-                            求人票ステータス・賞与・住宅サポート分析
+                          <h3 className="text-sm font-bold text-[#0F172A]">
+                            {t.report.kyujinStatsTitle}
                           </h3>
-                          <span className="font-mono text-[11px] font-semibold text-[#94949e] tabular-nums">
-                            全 {kyujinStats.totalCompanies}社 / {kyujinStats.totalSlots}枠
+                          <span className="font-mono text-[11px] font-semibold text-[#64748B] tabular-nums">
+                            {kyujinStats.totalCompanies} {t.report.companiesUnit} /{' '}
+                            {kyujinStats.totalSlots} {t.report.slotsUnit}
                           </span>
                         </div>
 
                         <div className="grid grid-cols-3 gap-2 text-center">
-                          <div className="rounded border border-[#22c55e]/30 bg-[#22c55e]/10 p-2.5">
-                            <div className="text-[11px] font-semibold text-[#22c55e]">募集中</div>
-                            <div className="mt-0.5 font-mono text-lg font-bold text-[#edeeef] tabular-nums">
-                              {kyujinStats.openSlots} 枠
+                          <div className="rounded border border-emerald-200 bg-emerald-50 p-2.5">
+                            <div className="text-[11px] font-semibold text-emerald-700">
+                              {t.report.openLabel}
                             </div>
-                            <div className="font-mono text-[10px] text-[#22c55e] tabular-nums">
+                            <div className="mt-0.5 font-mono text-lg font-bold text-[#0F172A] tabular-nums">
+                              {kyujinStats.openSlots}
+                            </div>
+                            <div className="font-mono text-[10px] text-emerald-700 tabular-nums">
                               {Math.round((kyujinStats.openSlots / totalSlotsSafe) * 100)}%
                             </div>
                           </div>
-                          <div className="rounded border border-[#f59e0b]/30 bg-[#f59e0b]/10 p-2.5">
-                            <div className="text-[11px] font-semibold text-[#f59e0b]">賞与あり</div>
-                            <div className="mt-0.5 font-mono text-lg font-bold text-[#edeeef] tabular-nums">
-                              {kyujinStats.bonusSlots} 枠
+                          <div className="rounded border border-amber-300 bg-amber-50 p-2.5">
+                            <div className="text-[11px] font-semibold text-amber-800">
+                              {t.report.bonusLabel}
                             </div>
-                            <div className="font-mono text-[10px] text-[#f59e0b] tabular-nums">
+                            <div className="mt-0.5 font-mono text-lg font-bold text-[#0F172A] tabular-nums">
+                              {kyujinStats.bonusSlots}
+                            </div>
+                            <div className="font-mono text-[10px] text-amber-800 tabular-nums">
                               {Math.round((kyujinStats.bonusSlots / totalSlotsSafe) * 100)}%
                             </div>
                           </div>
-                          <div className="rounded border border-sky-400/30 bg-sky-400/10 p-2.5">
-                            <div className="text-[11px] font-semibold text-sky-400">寮・社宅あり</div>
-                            <div className="mt-0.5 font-mono text-lg font-bold text-[#edeeef] tabular-nums">
-                              {housingAvailableSlots} 枠
+                          <div className="rounded border border-sky-200 bg-sky-50 p-2.5">
+                            <div className="text-[11px] font-semibold text-sky-700">
+                              {t.report.housingLabel}
                             </div>
-                            <div className="font-mono text-[10px] text-sky-400 tabular-nums">
+                            <div className="mt-0.5 font-mono text-lg font-bold text-[#0F172A] tabular-nums">
+                              {housingAvailableSlots}
+                            </div>
+                            <div className="font-mono text-[10px] text-sky-700 tabular-nums">
                               {Math.round((housingAvailableSlots / totalSlotsSafe) * 100)}%
                             </div>
                           </div>
                         </div>
 
                         <div>
-                          <div className="mb-2 text-xs font-bold text-[#94949e]">
-                            分野別 求人枠数（募集中 / 賞与あり内訳）
+                          <div className="mb-2 text-xs font-bold text-[#64748B]">
+                            {t.report.kyujinByIndTitle}
                           </div>
                           <div className="space-y-2.5">
                             {kyujinIndustryChartRows.map((row) => {
@@ -5924,15 +7254,16 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                               return (
                                 <div key={row.industry} className="space-y-1">
                                   <div className="flex flex-wrap items-center justify-between gap-1 text-xs">
-                                    <span className="font-semibold text-[#edeeef]">{row.industry}</span>
-                                    <span className="font-mono font-bold text-[#edeeef] tabular-nums">
-                                      計 {row.total}枠（募集 {row.open} / 賞与 {row.bonus}）
+                                    <span className="font-semibold text-[#0F172A]">{row.industry}</span>
+                                    <span className="font-mono font-bold text-[#0F172A] tabular-nums">
+                                      {row.total} ({t.report.openLabel} {row.open} / {t.report.bonusLabel}{' '}
+                                      {row.bonus})
                                     </span>
                                   </div>
-                                  <div className="h-2 w-full overflow-hidden rounded-full bg-[#0c0c0e]">
+                                  <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
                                     <div
                                       style={{ width: `${Math.max(4, pct)}%` }}
-                                      className="h-full rounded-full bg-[#f59e0b]"
+                                      className="h-full rounded-full bg-amber-500"
                                     />
                                   </div>
                                 </div>
@@ -5944,21 +7275,24 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     </div>
 
                     {/* Facebook Messenger Webhook Panel */}
-                    <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
+                    <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-2">
-                          <ShieldCheck className="h-4 w-4 text-[#22c55e]" aria-hidden="true" />
-                          <h3 className="text-sm font-bold text-[#edeeef]">
+                          <ShieldCheck className="h-4 w-4 text-emerald-700" aria-hidden="true" />
+                          <h3 className="text-sm font-bold text-[#0F172A]">
                             Facebook Messenger Webhook (Meta Developers)
                           </h3>
                         </div>
-                        <span className="rounded border border-[#22c55e]/40 bg-[#22c55e]/20 px-2 py-0.5 font-mono text-[10px] font-bold text-[#22c55e]">
-                          Sẵn sàng
+                        <span className="rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-700">
+                          {t.readyBadge}
                         </span>
                       </div>
 
-                      <p className="mt-1.5 text-xs text-[#94949e]">
-                        Tin nhắn mới từ ứng viên qua Fanpage sẽ được bóc tách tự động bằng Gemini AI và lưu vào mục <strong className="text-[#edeeef]">FB会社公式</strong>.
+                      <p className="mt-1.5 text-xs text-[#64748B]">
+                        {uiLang === 'jp'
+                          ? 'Fanpageからの新規メッセージは自動解析され「FB会社公式」に保存されます。'
+                          : 'Tin nhắn mới từ ứng viên qua Fanpage sẽ được bóc tách tự động và lưu vào mục '}
+                        {uiLang === 'vi' && <strong className="text-[#0F172A]">Fanpage cty</strong>}
                       </p>
 
                       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -5967,93 +7301,89 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           readOnly
                           value={liveMessengerWebhookUrl}
                           aria-label="Webhook URL"
-                          className="min-w-[260px] flex-1 rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-2 font-mono text-xs text-[#edeeef]"
+                          className="min-w-[260px] flex-1 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 font-mono text-xs text-[#0F172A]"
                         />
                         <button
                           type="button"
                           onClick={handleCopyWebhookUrl}
-                          className="inline-flex items-center gap-1.5 rounded-md bg-[#22c55e] px-4 py-2 text-xs font-semibold text-[#0c0c0e] hover:opacity-90 whitespace-nowrap shrink-0 cursor-pointer"
+                          className="inline-flex items-center gap-1.5 rounded-md bg-[#16A34A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#15803D] whitespace-nowrap shrink-0 cursor-pointer"
                         >
                           <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                          Sao chép Webhook URL
+                          {t.copyUrl}
                         </button>
                         <button
                           type="button"
                           onClick={openMessengerLinkModal}
-                          className="inline-flex items-center gap-1.5 rounded-md border border-[#38bdf8]/50 bg-[#38bdf8]/10 px-3 py-2 text-xs font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 whitespace-nowrap shrink-0 cursor-pointer"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap shrink-0 cursor-pointer"
                         >
                           <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
-                          Liên kết Messenger FB
+                          {t.linkMessenger}
                         </button>
                         <button
                           type="button"
                           disabled={isRefreshingSql}
                           onClick={() => void refreshCrmFromSql(false)}
-                          className="inline-flex items-center gap-1.5 rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-2 text-xs font-semibold text-[#edeeef] hover:border-[#94949e] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-[#E2E8F0] bg-white px-3 py-2 text-xs font-semibold text-[#0F172A] hover:bg-[#F8FAFC] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
                         >
                           <RefreshCw
                             className={`h-3.5 w-3.5 ${isRefreshingSql ? 'animate-spin' : ''}`}
                             aria-hidden="true"
                           />
-                          Đồng bộ Messenger
+                          {uiLang === 'jp' ? 'Messenger同期' : 'Đồng bộ Messenger'}
                         </button>
                       </div>
 
-                      <div className="mt-3 flex flex-wrap gap-3 font-mono text-[10px] text-[#94949e]">
+                      <div className="mt-3 flex flex-wrap gap-3 font-mono text-[10px] text-[#64748B]">
                         <span>
                           Verify Token:{' '}
                           <strong
                             className={
-                              webhookStatus?.hasVerifyToken ? 'text-[#22c55e]' : 'text-[#38bdf8]'
+                              webhookStatus?.hasVerifyToken ? 'text-emerald-700' : 'text-sky-700'
                             }
                           >
-                            {webhookStatus?.hasVerifyToken ? 'Đã đặt' : 'Tùy chọn (Mở)'}
+                            {webhookStatus?.hasVerifyToken ? 'Configured' : 'Optional'}
                           </strong>
                         </span>
                         <span>·</span>
                         <span>
-                          App Secret (HMAC):{' '}
+                          App Secret:{' '}
                           <strong
                             className={
-                              webhookStatus?.hasAppSecret ? 'text-[#22c55e]' : 'text-[#38bdf8]'
+                              webhookStatus?.hasAppSecret ? 'text-emerald-700' : 'text-sky-700'
                             }
                           >
-                            {webhookStatus?.hasAppSecret ? 'Đã bảo vệ' : 'Tùy chọn (Mở)'}
+                            {webhookStatus?.hasAppSecret ? 'HMAC Protected' : 'Optional'}
                           </strong>
                         </span>
                         <span>·</span>
                         <span>
-                          Tài khoản:{' '}
-                          <strong className="text-[#22c55e]">
-                            {authUser?.email || 'Đã đăng nhập'}
+                          Account:{' '}
+                          <strong className="text-emerald-700">
+                            {authUser?.email || 'Active'}
                           </strong>
                         </span>
                       </div>
                     </div>
 
-                    <div className="rounded-lg border border-[#27272a] bg-[#141417] p-4">
+                    <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <h3 className="text-sm font-bold text-[#edeeef]">
-                          Google Apps Script (GAS) 連携設定
-                        </h3>
+                        <h3 className="text-sm font-bold text-[#0F172A]">{t.report.gasTitle}</h3>
                         <button
                           type="button"
                           onClick={async () => {
                             const ok = await copyTextSafely(GAS_CALENDAR_APP_SNIPPET);
-                            showToast(
-                              ok
-                                ? '📋 Đã sao chép đoạn mã GAS CalendarApp!'
-                                : '⚠️ Không thể sao chép tự động'
-                            );
+                            showToast(ok ? `📋 ${t.report.copyGasCode}` : t.toasts.copyFailed);
                           }}
-                          className="inline-flex items-center gap-1 rounded border border-[#38bdf8]/40 bg-[#38bdf8]/10 px-2.5 py-1 text-[11px] font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 cursor-pointer"
+                          className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 cursor-pointer"
                         >
                           <Copy className="h-3 w-3" aria-hidden="true" />
-                          Sao chép mã GAS CalendarApp
+                          {t.report.copyGasCode}
                         </button>
                       </div>
-                      <p className="mt-1 text-xs text-[#94949e]">
-                        誤上書き防止のため初期状態は「GAS上書き保護中」になっています。同期が必要な場合のみヘッダーの保護ボタンを解除して送信してください（nút Đồng bộ Lịch Google ở tab Nghỉ việc sẽ ưu tiên dùng URL này để gọi CalendarApp không cần OAuth).
+                      <p className="mt-1 text-xs text-[#64748B]">
+                        {uiLang === 'jp'
+                          ? '誤上書き防止のため初期状態は保護中です。同期が必要な場合のみヘッダーの保護ボタンを解除して送信してください。'
+                          : 'Mặc định hệ thống khóa ghi đè GAS để bảo toàn dữ liệu. Chỉ mở khóa trên thanh tiêu đề khi cần đẩy đồng bộ.'}
                       </p>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <input
@@ -6061,15 +7391,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           value={gasWebAppUrl}
                           onChange={(e) => setGasWebAppUrl(e.target.value)}
                           placeholder="https://script.google.com/macros/s/..."
-                          className="min-w-[280px] flex-1 rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-2 text-xs text-[#edeeef] placeholder:text-[#94949e] focus:border-[#22c55e] focus:outline-none"
+                          className="min-w-[280px] flex-1 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs text-[#0F172A] placeholder:text-[#94A3B8] focus:border-[#16A34A] focus:bg-white focus:outline-none"
                         />
                         <button
                           type="button"
                           disabled={gasWriteLocked || isSyncingGas}
                           onClick={handleSyncToGas}
-                          className="rounded-md bg-[#22c55e] px-4 py-2 text-xs font-semibold text-[#0c0c0e] disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
+                          className="rounded-md bg-[#16A34A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#15803D] disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          {isSyncingGas ? '送信中...' : 'GASへ同期送信'}
+                          {isSyncingGas ? t.report.sending : t.report.syncToGas}
                         </button>
                       </div>
                     </div>
@@ -6079,51 +7409,54 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           </main>
 
           {/* RIGHT SYSTEM ALERTS PANE */}
-          <aside className="border-t border-[#27272a] bg-[#141417] p-5 lg:overflow-y-auto lg:border-t-0">
-            <div className="mb-4 font-mono text-[10px] uppercase tracking-widest text-[#94949e]">
-              System Alerts
+          <aside className="border-t border-[#E2E8F0] bg-white p-5 lg:overflow-y-auto lg:border-t-0">
+            <div className="mb-4 font-mono text-[10px] font-semibold uppercase tracking-widest text-[#64748B]">
+              {t.systemAlerts}
             </div>
 
             {/* Messenger Webhook Quick Status Card */}
-            <div className="mb-4 rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3.5">
+            <div className="mb-4 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3.5">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                  Messenger Webhook
+                <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                  {t.messengerWebhook}
                 </span>
-                <span className="rounded bg-[#22c55e]/20 px-1.5 py-0.5 font-mono text-[10px] font-bold text-[#22c55e]">
-                  Sẵn sàng
+                <span className="rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 font-mono text-[10px] font-bold text-emerald-700">
+                  {t.readyBadge}
                 </span>
               </div>
-              <div className="mt-2 truncate font-mono text-[10px] text-[#94949e]" title={liveMessengerWebhookUrl}>
+              <div
+                className="mt-2 truncate font-mono text-[10px] text-[#64748B]"
+                title={liveMessengerWebhookUrl}
+              >
                 {liveMessengerWebhookUrl}
               </div>
               <div className="mt-2.5 flex flex-col gap-1.5">
                 <button
                   type="button"
                   onClick={openMessengerLinkModal}
-                  className="inline-flex w-full items-center justify-center gap-1.5 rounded bg-[#38bdf8] px-2.5 py-1.5 text-[11px] font-semibold text-[#0c0c0e] hover:opacity-90 whitespace-nowrap cursor-pointer"
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded bg-sky-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-sky-700 whitespace-nowrap cursor-pointer"
                 >
                   <Link2 className="h-3 w-3" aria-hidden="true" />
-                  Liên kết Messenger FB
+                  {t.linkMessenger}
                 </button>
                 <div className="flex gap-1.5">
                   <button
                     type="button"
                     onClick={handleCopyWebhookUrl}
-                    className="inline-flex flex-1 items-center justify-center gap-1 rounded border border-[#27272a] bg-[#141417] px-2.5 py-1 text-[10px] font-semibold text-[#edeeef] hover:border-[#22c55e] whitespace-nowrap cursor-pointer"
+                    className="inline-flex flex-1 items-center justify-center gap-1 rounded border border-[#E2E8F0] bg-white px-2.5 py-1 text-[10px] font-semibold text-[#0F172A] hover:border-emerald-300 whitespace-nowrap cursor-pointer"
                   >
                     <Copy className="h-3 w-3" aria-hidden="true" />
-                    Sao chép URL
+                    {t.copyUrl}
                   </button>
                   {fbPageLink && (
                     <a
                       href={fbPageLink}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 rounded border border-[#27272a] bg-[#141417] px-2.5 py-1 text-[10px] font-semibold text-[#38bdf8] hover:border-[#38bdf8] whitespace-nowrap"
+                      className="inline-flex items-center gap-1 rounded border border-[#E2E8F0] bg-white px-2.5 py-1 text-[10px] font-semibold text-sky-700 hover:border-sky-300 whitespace-nowrap"
                     >
                       <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                      Mở Page
+                      {t.openPage}
                     </a>
                   )}
                 </div>
@@ -6133,24 +7466,22 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             {/* Alert Card 1: Upcoming PV / Mendan + Google Calendar Sync */}
             <div className="mb-4 space-y-3">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                  Next PV / Mendan
+                <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                  {t.nextPvMendan}
                 </span>
                 <button
                   type="button"
                   disabled={isBulkSyncingCalendar}
                   onClick={requestBulkSyncUpcomingCalendar}
-                  className="inline-flex items-center gap-1 rounded border border-[#22c55e]/50 bg-[#22c55e]/10 px-2 py-1 text-[10px] font-semibold text-[#22c55e] hover:bg-[#22c55e]/20 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
                   title={
                     hasCalendarToken
-                      ? 'Đẩy toàn bộ lịch Mendan & Phỏng vấn lên Google Calendar'
-                      : 'Kết nối & đồng bộ toàn bộ lịch sắp tới lên Google Calendar'
+                      ? t.syncAllUpcoming
+                      : t.syncAllUpcoming
                   }
                 >
                   <Calendar className="h-3 w-3" aria-hidden="true" />
-                  {isBulkSyncingCalendar
-                    ? 'Đang đồng bộ...'
-                    : 'Đồng bộ toàn bộ lịch sắp tới'}
+                  {isBulkSyncingCalendar ? t.syncingCalendarBtn : t.syncAllUpcoming}
                 </button>
               </div>
 
@@ -6161,23 +7492,23 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   return (
                     <div
                       key={`mendan_${person.id}`}
-                      className="rounded-lg border border-[#27272a] border-l-[3px] border-l-[#22c55e] bg-[#0c0c0e] p-3.5"
+                      className="rounded-lg border border-emerald-200 bg-white p-3.5 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                     >
                       <div className="mb-1.5 flex items-center justify-between gap-2">
-                        <span className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                          Next PV / Mendan
+                        <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+                          {t.nextPvMendan}
                         </span>
                         {hasSyncedCal && (
-                          <span className="rounded bg-[#22c55e]/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-[#22c55e]">
-                            Calendar OK
+                          <span className="rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 font-mono text-[9px] font-bold text-emerald-700">
+                            {t.calendarOk}
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-2 text-xs font-semibold text-[#edeeef]">
-                        <span className="inline-block h-2 w-2 rounded-full bg-[#22c55e]" />
-                        <span className="truncate">{person.name}</span>
+                      <div className="flex items-center gap-2 text-xs font-semibold text-[#0F172A]">
+                        <span className="inline-block h-2 w-2 rounded-full bg-[#16A34A]" />
+                        <span className="truncate">{getCandidateDisplayName(person, uiLang)}</span>
                       </div>
-                      <div className="mt-1 font-mono text-[11px] text-[#94949e] tabular-nums">
+                      <div className="mt-1 font-mono text-[11px] text-[#64748B] tabular-nums">
                         {person.interviewDate || mendan.dateLabel || person.progressStatus}
                       </div>
                       <div className="mt-3 flex flex-wrap gap-1.5">
@@ -6186,36 +7517,36 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           onClick={() =>
                             setReplyModal({ person, scenario: 'remind_interview' })
                           }
-                          className="flex-1 rounded bg-[#22c55e] px-2.5 py-1.5 text-[11px] font-semibold text-[#0c0c0e] hover:opacity-90 whitespace-nowrap cursor-pointer"
+                          className="flex-1 rounded bg-[#16A34A] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#15803D] whitespace-nowrap cursor-pointer"
                         >
-                          Nhắn lịch
+                          {t.remindScheduleBtn}
                         </button>
                         <button
                           type="button"
                           onClick={() => handleMarkContactedToday(person, isSchool)}
-                          className="flex-1 rounded border border-[#27272a] bg-transparent px-2.5 py-1.5 text-[11px] font-semibold text-[#94949e] hover:border-[#94949e] hover:text-[#edeeef] whitespace-nowrap cursor-pointer"
+                          className="flex-1 rounded border border-[#E2E8F0] bg-[#F8FAFC] px-2.5 py-1.5 text-[11px] font-semibold text-[#475569] hover:border-[#CBD5E1] hover:text-[#0F172A] whitespace-nowrap cursor-pointer"
                         >
-                          連絡済
+                          {t.contactedShort}
                         </button>
                       </div>
 
-                      <div className="mt-2 flex items-center gap-1.5 border-t border-dashed border-[#27272a] pt-2">
+                      <div className="mt-2 flex items-center gap-1.5 border-t border-dashed border-[#E2E8F0] pt-2">
                         <button
                           type="button"
                           disabled={syncingCalendarId === person.id}
                           onClick={() => requestSyncCandidateCalendar(person)}
                           className={`inline-flex flex-1 items-center justify-center gap-1 rounded border px-2 py-1 text-[10px] font-semibold transition-colors whitespace-nowrap cursor-pointer disabled:opacity-50 ${
                             hasSyncedCal
-                              ? 'border-[#22c55e]/40 bg-[#22c55e]/10 text-[#22c55e]'
-                              : 'border-[#27272a] bg-[#141417] text-[#edeeef] hover:border-[#22c55e]'
+                              ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                              : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#0F172A] hover:border-emerald-300'
                           }`}
                         >
                           <Calendar className="h-3 w-3" aria-hidden="true" />
                           {syncingCalendarId === person.id
-                            ? 'Đang đồng bộ...'
+                            ? t.syncingCalendarBtn
                             : hasSyncedCal
-                            ? 'Cập nhật Google Calendar'
-                            : 'Đồng bộ Google Calendar'}
+                            ? t.updateCalendarBtn
+                            : t.syncCalendarBtn}
                         </button>
                         {hasSyncedCal &&
                           isValidGoogleCalendarUrl(person.googleCalendarEventLink) && (
@@ -6223,11 +7554,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                               href={person.googleCalendarEventLink}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-flex items-center gap-1 rounded border border-[#27272a] bg-[#141417] px-2 py-1 text-[10px] font-semibold text-[#94949e] hover:border-[#22c55e] hover:text-[#22c55e] whitespace-nowrap"
-                              title="Mở sự kiện trên Google Calendar"
+                              className="inline-flex items-center gap-1 rounded border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-1 text-[10px] font-semibold text-[#64748B] hover:border-emerald-300 hover:text-emerald-700 whitespace-nowrap"
+                              title={t.openCalendarBtn}
                             >
                               <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                              Mở
+                              {t.openShort}
                             </a>
                           )}
                       </div>
@@ -6235,22 +7566,20 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   );
                 })
               ) : (
-                <div className="rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3.5">
-                  <div className="font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                    Next PV / Mendan
+                <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3.5">
+                  <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                    {t.nextPvMendan}
                   </div>
-                  <p className="mt-1.5 text-xs text-[#94949e]">
-                    直近の面談・面接予定はありません。
-                  </p>
+                  <p className="mt-1.5 text-xs text-[#64748B]">{t.noUpcomingMendan}</p>
                 </div>
               )}
             </div>
 
             {/* Alert Card 2: Critical Follow-Up */}
             {urgentFollowUpList.length > 0 && (
-              <div className="mb-4 rounded-lg border border-[#27272a] border-l-[3px] border-l-[#ef4444] bg-[rgba(239,68,68,0.06)] p-3.5">
-                <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-[#ef4444]">
-                  Critical Follow-up ({urgentFollowUpList.length})
+              <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50/70 p-3.5">
+                <div className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-wider text-rose-700">
+                  {t.criticalFollowup} ({urgentFollowUpList.length})
                 </div>
                 <div className="space-y-2 text-xs">
                   {urgentFollowUpList.slice(0, 4).map(({ person, reason }) => (
@@ -6263,10 +7592,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         onClick={() =>
                           setReplyModal({ person, scenario: 'followup_silent' })
                         }
-                        className="truncate text-left font-medium text-[#edeeef] hover:text-[#ef4444] cursor-pointer"
+                        className="truncate text-left font-medium text-[#0F172A] hover:text-rose-700 cursor-pointer"
                       >
-                        <strong>{person.name}</strong>{' '}
-                        <span className="text-[#94949e]">({reason})</span>
+                        <strong>{getCandidateDisplayName(person, uiLang)}</strong>{' '}
+                        <span className="text-[#64748B]">({reason})</span>
                       </button>
                     </div>
                   ))}
@@ -6277,30 +7606,28 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     setActiveTab('all');
                     setCareFilter((prev) => (prev === 'urgent' ? 'all' : 'urgent'));
                   }}
-                  className="mt-3 text-[11px] font-semibold text-[#ef4444] underline cursor-pointer"
+                  className="mt-3 text-[11px] font-semibold text-rose-700 underline cursor-pointer"
                 >
                   {careFilter === 'urgent'
-                    ? '絞り込みを解除 →'
-                    : `全${urgentFollowUpList.length}名を表示 →`}
+                    ? t.clearFilterArrow
+                    : t.showAllUrgentArrow(urgentFollowUpList.length)}
                 </button>
               </div>
             )}
 
             {/* Daily Focus Checklist */}
-            <div className="mb-4 rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3.5">
+            <div className="mb-4 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3.5">
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="font-mono text-[10px] uppercase tracking-wider text-[#22c55e]">
-                  Việc cần làm hôm nay (Daily Focus)
+                <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+                  {t.dailyFocusTitle}
                 </span>
-                <span className="font-mono text-[10px] text-[#94949e] tabular-nums">
+                <span className="font-mono text-[10px] text-[#64748B] tabular-nums">
                   {dailyFocusItems.filter((i) => dailyFocusCompleted[i.id]).length}/
                   {dailyFocusItems.length}
                 </span>
               </div>
               {dailyFocusItems.length === 0 ? (
-                <p className="text-xs text-[#94949e]">
-                  Tuyệt vời! Hiện không có việc quá hạn hay gấp trong hôm nay.
-                </p>
+                <p className="text-xs text-[#64748B]">{t.dailyFocusEmpty}</p>
               ) : (
                 <div className="max-h-60 space-y-1.5 overflow-y-auto pr-1">
                   {dailyFocusItems.map((item) => {
@@ -6310,39 +7637,50 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         key={item.id}
                         className={`flex items-start gap-2 rounded border px-2.5 py-2 text-xs transition-colors ${
                           checked
-                            ? 'border-[#27272a] bg-[#141417]/50 opacity-55'
+                            ? 'border-[#E2E8F0] bg-white/60 opacity-60'
                             : item.urgency === 'critical'
-                            ? 'border-[#ef4444]/40 bg-[#ef4444]/5'
-                            : 'border-[#27272a] bg-[#141417]'
+                            ? 'border-rose-200 bg-rose-50/70'
+                            : 'border-[#E2E8F0] bg-white'
                         }`}
                       >
                         <button
                           type="button"
                           onClick={() => toggleDailyFocusItem(item.id)}
-                          aria-label={`Đánh dấu hoàn thành ${item.title}`}
-                          className="mt-0.5 shrink-0 text-[#22c55e] cursor-pointer"
+                          aria-label={item.title}
+                          className="mt-0.5 shrink-0 text-[#16A34A] cursor-pointer"
                         >
                           {checked ? (
                             <CheckSquare className="h-4 w-4" aria-hidden="true" />
                           ) : (
-                            <Square className="h-4 w-4 text-[#94949e]" aria-hidden="true" />
+                            <Square className="h-4 w-4 text-[#94A3B8]" aria-hidden="true" />
                           )}
                         </button>
                         <button
                           type="button"
-                          onClick={() => setActiveTab(item.targetTab)}
+                          onClick={() => {
+                            setActiveTab(item.targetTab);
+                            if (item.category === 'visa_submission') {
+                              setProposedStageFilter('naitei');
+                            }
+                            if (
+                              item.entityId &&
+                              item.category !== 'resignation'
+                            ) {
+                              setDrawerCandidateId(item.entityId);
+                            }
+                          }}
                           className="min-w-0 flex-1 text-left cursor-pointer"
                         >
                           <div
                             className={`font-semibold ${
                               checked
-                                ? 'line-through text-[#94949e]'
-                                : 'text-[#edeeef] hover:text-[#22c55e]'
+                                ? 'line-through text-[#94A3B8]'
+                                : 'text-[#0F172A] hover:text-emerald-700'
                             }`}
                           >
                             {item.title}
                           </div>
-                          <div className="truncate text-[10px] text-[#94949e]">
+                          <div className="truncate text-[10px] text-[#64748B]">
                             {item.subtitle}
                           </div>
                         </button>
@@ -6357,15 +7695,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             {resignationAlerts.length > 0 && (
               <div className="mb-4 space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-[10px] uppercase tracking-wider text-[#f59e0b]">
-                    Hạn giấy tờ nghỉ việc ({resignationAlerts.length})
+                  <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-amber-800">
+                    {t.tabs.resignation} ({resignationAlerts.length})
                   </span>
                   <button
                     type="button"
                     onClick={() => setActiveTab('resignation')}
-                    className="text-[10px] font-semibold text-[#38bdf8] hover:underline cursor-pointer"
+                    className="text-[10px] font-semibold text-sky-700 hover:underline cursor-pointer"
                   >
-                    Xem tất cả &rarr;
+                    {uiLang === 'jp' ? 'すべて表示 →' : 'Xem tất cả →'}
                   </button>
                 </div>
                 {resignationAlerts.slice(0, 3).map(({ record, assessment }) => {
@@ -6374,48 +7712,54 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   return (
                     <div
                       key={`resig_alert_${record.id}`}
-                      className={`rounded-lg border border-[#27272a] border-l-[3px] bg-[#0c0c0e] p-3 text-xs ${
-                        isCrit ? 'border-l-[#ef4444]' : 'border-l-[#f59e0b]'
+                      className={`rounded-lg border p-3 text-xs ${
+                        isCrit
+                          ? 'border-rose-200 bg-rose-50/60'
+                          : 'border-amber-200 bg-amber-50/60'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-semibold text-[#edeeef] truncate">
-                          {record.fullName}
+                        <span className="font-semibold text-[#0F172A] truncate">
+                          {getResignationDisplayName(record, uiLang)}
                         </span>
                         <span
                           className={`rounded px-1.5 py-0.5 font-mono text-[9px] font-bold ${
                             isCrit
-                              ? 'bg-[#ef4444]/20 text-[#ef4444]'
-                              : 'bg-[#f59e0b]/20 text-[#f59e0b]'
+                              ? 'bg-rose-100 text-rose-700'
+                              : 'bg-amber-100 text-amber-800'
                           }`}
                         >
                           {assessment.label}
                         </span>
                       </div>
-                      <div className="mt-1 text-[11px] text-[#94949e] truncate">
-                        Cty cũ: {record.previousCompany}
+                      <div className="mt-1 text-[11px] text-[#64748B] truncate">
+                        {record.previousCompany}
                       </div>
                       <div className="mt-2.5 flex flex-wrap gap-1.5">
                         <button
                           type="button"
                           onClick={() => setResignationReminderModal(record)}
-                          className="flex-1 rounded border border-[#f59e0b]/50 bg-[#f59e0b]/10 px-2 py-1 text-[10px] font-semibold text-[#f59e0b] hover:bg-[#f59e0b]/20 whitespace-nowrap cursor-pointer"
+                          className="flex-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800 hover:bg-amber-100 whitespace-nowrap cursor-pointer"
                         >
-                          Tạo tin nhắn nhắc
+                          {uiLang === 'jp' ? 'リマインド文' : 'Tạo tin nhắn nhắc'}
                         </button>
                         <button
                           type="button"
                           onClick={() => void handleSyncResignationCalendarSingle(record)}
-                          className="rounded border border-[#22c55e]/50 bg-[#22c55e]/10 px-2 py-1 text-[10px] font-semibold text-[#22c55e] hover:bg-[#22c55e]/20 whitespace-nowrap cursor-pointer"
-                          title="Đồng bộ lên Google Calendar"
+                          className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-100 whitespace-nowrap cursor-pointer"
+                          title={t.syncCalendarBtn}
                         >
                           <Calendar className="h-3 w-3" aria-hidden="true" />
                         </button>
                         <button
                           type="button"
                           onClick={() => handleConvertResignationToCandidate(record)}
-                          className="rounded border border-[#38bdf8]/50 bg-[#38bdf8]/10 px-2 py-1 text-[10px] font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 whitespace-nowrap cursor-pointer"
-                          title="Chuyển sang Ứng viên tìm việc mới"
+                          className="rounded border border-sky-200 bg-sky-50 px-2 py-1 text-[10px] font-semibold text-sky-700 hover:bg-sky-100 whitespace-nowrap cursor-pointer"
+                          title={
+                            uiLang === 'jp'
+                              ? '求職者一覧へ転記'
+                              : 'Chuyển sang Ứng viên tìm việc mới'
+                          }
                         >
                           <UserPlus className="h-3 w-3" aria-hidden="true" />
                         </button>
@@ -6432,23 +7776,24 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 {incompleteProfileAlerts.slice(0, 2).map(({ person, missing }) => (
                   <div
                     key={`inc_${person.id}`}
-                    className="rounded-lg border border-dashed border-[#f59e0b]/70 bg-[#0c0c0e] p-3.5"
+                    className="rounded-lg border border-dashed border-amber-300 bg-amber-50/50 p-3.5"
                   >
-                    <div className="mb-1.5 font-mono text-[10px] uppercase tracking-wider text-[#f59e0b]">
-                      Incomplete Profile
+                    <div className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-amber-800">
+                      {uiLang === 'jp' ? '情報不足プロフィール' : 'Hồ sơ thiếu thông tin'}
                     </div>
-                    <div className="text-xs font-semibold text-[#edeeef]">
-                      {person.name}
+                    <div className="text-xs font-semibold text-[#0F172A]">
+                      {getCandidateDisplayName(person, uiLang)}
                     </div>
-                    <div className="mt-1 font-mono text-[10px] text-[#94949e]">
-                      Need: {missing.map((m) => m.vi).join(', ')}
+                    <div className="mt-1 font-mono text-[10px] text-[#64748B]">
+                      {uiLang === 'jp' ? '不足: ' : 'Thiếu: '}
+                      {missing.map((m) => (uiLang === 'jp' ? m.ja : m.vi)).join(', ')}
                     </div>
                     <button
                       type="button"
                       onClick={() => setReplyModal({ person, scenario: 'missing_info_request' })}
-                      className="mt-3 w-full rounded border border-[#f59e0b] px-2.5 py-1.5 text-[11px] font-semibold text-[#f59e0b] hover:bg-[#f59e0b]/15 cursor-pointer"
+                      className="mt-3 w-full rounded border border-amber-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
                     >
-                      Xin thông tin thiếu
+                      {t.cardLabels.askMissingBtn}
                     </button>
                   </div>
                 ))}
@@ -6460,9 +7805,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 1: EDIT / CREATE CANDIDATE */}
       {editingPerson && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
           <div
-            className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-xl bg-white p-5 text-xs text-slate-900 shadow-2xl"
+            className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-xs text-[#0F172A] shadow-2xl"
             onPaste={(e) => {
               const img = extractFirstImageFromClipboard(e.clipboardData);
               if (img) {
@@ -6471,30 +7816,37 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               }
             }}
           >
-            <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-2.5">
-              <h3 className="text-base font-bold text-slate-900">
+            <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+              <h3 className="text-base font-bold text-[#0F172A]">
                 {editingPerson.isNew
-                  ? '＋ 新規相談者登録'
-                  : `プロフィール編集：${editingPerson.data.name || editingPerson.data.fbName || ''}`}
+                  ? uiLang === 'jp'
+                    ? '＋ 新規相談者登録'
+                    : '+ Thêm ứng viên mới'
+                  : `${uiLang === 'jp' ? 'プロフィール編集' : 'Chỉnh sửa hồ sơ'}：${getCandidateDisplayName(
+                      editingPerson.data,
+                      uiLang
+                    )}`}
               </h3>
               <button
                 type="button"
                 onClick={() => setEditingPerson(null)}
-                className="rounded-lg bg-slate-100 px-3 py-1 font-semibold text-slate-700"
+                className="rounded-lg bg-slate-100 px-3 py-1 font-semibold text-slate-700 hover:bg-slate-200 cursor-pointer"
               >
-                閉じる
+                {t.close}
               </button>
             </div>
 
             <div className="mb-4 rounded-lg border border-sky-200 bg-sky-50/70 p-3">
               <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                 <span className="font-bold text-sky-950">
-                  Dán đoạn chat / ghi chú dài hoặc Ctrl+V ảnh chụp Messenger / Thẻ ngoại kiều (Bảo toàn 100% nội dung)
+                  {uiLang === 'jp'
+                    ? 'チャット・メモ貼り付け または スクリーンショット（Ctrl+V）で自動解析'
+                    : 'Dán đoạn chat / ghi chú dài hoặc Ctrl+V ảnh chụp Messenger / Thẻ ngoại kiều'}
                 </span>
                 <div className="flex flex-wrap items-center gap-1.5">
                   <label className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-sky-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-sky-800 hover:bg-sky-50">
                     <ImageIcon className="h-3.5 w-3.5" aria-hidden="true" />
-                    Tải ảnh chụp
+                    {uiLang === 'jp' ? '画像をアップロード' : 'Tải ảnh chụp'}
                     <input
                       type="file"
                       accept="image/*"
@@ -6510,10 +7862,16 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     type="button"
                     disabled={isExtractingCandidateAi}
                     onClick={() => void handleApplyChatToEditingPerson()}
-                    className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 disabled:opacity-60"
+                    className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 disabled:opacity-60 cursor-pointer"
                   >
                     <Sparkles className="h-3 w-3" aria-hidden="true" />
-                    {isExtractingCandidateAi ? 'Đang bóc tách...' : 'AI bóc tách nguyên văn'}
+                    {isExtractingCandidateAi
+                      ? uiLang === 'jp'
+                        ? '解析中...'
+                        : 'Đang bóc tách...'
+                      : uiLang === 'jp'
+                      ? 'AI自動抽出（原文保持）'
+                      : 'AI bóc tách nguyên văn'}
                   </button>
                 </div>
               </div>
@@ -6521,17 +7879,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 <div className="mb-2 flex items-center gap-3 rounded-lg border border-sky-200 bg-white p-2">
                   <img
                     src={currentImageBase64.dataUrl}
-                    alt={currentImageBase64.fileName || 'Ảnh chụp màn hình'}
+                    alt={currentImageBase64.fileName || (uiLang === 'jp' ? 'スクリーンショット' : 'Ảnh chụp màn hình')}
                     className="h-20 w-28 shrink-0 rounded border border-slate-200 object-cover"
                   />
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-semibold text-slate-800">
-                      📷 {currentImageBase64.fileName || 'Ảnh chụp từ Clipboard'}
+                      📷 {currentImageBase64.fileName || (uiLang === 'jp' ? 'クリップボード画像' : 'Ảnh chụp từ Clipboard')}
                     </div>
                     <div className="mt-0.5 text-[11px] text-slate-500">
-                      Đã tối ưu kích thước (
-                      {Math.max(1, Math.round((currentImageBase64.base64Data.length * 0.75) / 1024))}{' '}
-                      KB) • Bấm &quot;AI bóc tách nguyên văn&quot; để phân tích lại nếu cần
+                      {uiLang === 'jp'
+                        ? `最適化済み（${Math.max(1, Math.round((currentImageBase64.base64Data.length * 0.75) / 1024))} KB）• 必要に応じて「AI自動抽出」で再解析できます`
+                        : `Đã tối ưu kích thước (${Math.max(1, Math.round((currentImageBase64.base64Data.length * 0.75) / 1024))} KB) • Bấm "AI bóc tách nguyên văn" để phân tích lại nếu cần`}
                     </div>
                   </div>
                   <button
@@ -6540,11 +7898,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                       setCurrentImageBase64(null);
                       setCandidateExtractBanner(null);
                     }}
-                    className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100"
-                    title="Xóa ảnh đính kèm"
+                    className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                    title={uiLang === 'jp' ? '画像を削除' : 'Xóa ảnh đính kèm'}
                   >
                     <X className="h-3 w-3" aria-hidden="true" />
-                    Xóa ảnh
+                    {uiLang === 'jp' ? '画像削除' : 'Xóa ảnh'}
                   </button>
                 </div>
               )}
@@ -6552,7 +7910,11 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 rows={3}
                 value={editChatSnippet}
                 onChange={(e) => setEditChatSnippet(e.target.value)}
-                placeholder="Dán đoạn chat Messenger, ghi chú đàm phán lương/điều kiện hoặc nhấn Ctrl+V ảnh chụp màn hình vào đây..."
+                placeholder={
+                  uiLang === 'jp'
+                    ? 'Messengerの会話内容、給与・条件交渉メモを貼り付けるか、Ctrl+Vでスクリーンショットを貼り付けてください...'
+                    : 'Dán đoạn chat Messenger, ghi chú đàm phán lương/điều kiện hoặc nhấn Ctrl+V ảnh chụp màn hình vào đây...'
+                }
                 className="w-full rounded-lg border border-sky-200 bg-white p-2 text-xs"
               />
               {candidateExtractBanner && (
@@ -6570,17 +7932,21 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               )}
               {!editingPerson.data.name && editingPerson.data.fbName && (
                 <div className="mt-1.5 rounded border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-900">
-                  ⚠️ Đoạn chat mới ghi nhận Tên Facebook ({editingPerson.data.fbName}), chưa thấy họ tên khai sinh. Có thể bấm Lưu để dùng tạm tên FB hoặc nhập họ tên thật bên dưới.
+                  {uiLang === 'jp'
+                    ? `⚠️ 会話からはFacebook名（${editingPerson.data.fbName}）のみ取得され、本名が未確認です。そのまま保存するか、下欄に本名を入力できます。`
+                    : `⚠️ Đoạn chat mới ghi nhận Tên Facebook (${editingPerson.data.fbName}), chưa thấy họ tên khai sinh. Có thể bấm Lưu để dùng tạm tên FB hoặc nhập họ tên thật bên dưới.`}
                 </div>
               )}
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div>
-                <label className="mb-1 block font-semibold">氏名 / Họ tên khai sinh</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '氏名（本名）' : 'Họ tên khai sinh'}
+                </label>
                 <input
                   type="text"
-                  placeholder="Để trống nếu mới có tên FB"
+                  placeholder={uiLang === 'jp' ? 'FB名のみの場合は空欄可' : 'Để trống nếu mới có tên FB'}
                   value={editingPerson.data.name || ''}
                   onChange={(e) =>
                     setEditingPerson({
@@ -6592,7 +7958,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">FBアカウント名 / Tên nick FB</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? 'FBアカウント名' : 'Tên nick Facebook'}
+                </label>
                 <input
                   type="text"
                   value={editingPerson.data.fbName || ''}
@@ -6606,10 +7974,12 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">Link Facebook / Messenger</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? 'Facebook / Messenger リンク' : 'Link Facebook / Messenger'}
+                </label>
                 <input
                   type="url"
-                  placeholder="https://m.me/... hoặc https://facebook.com/..."
+                  placeholder="https://m.me/... / https://facebook.com/..."
                   value={editingPerson.data.fbProfileUrl || ''}
                   onChange={(e) =>
                     setEditingPerson({
@@ -6621,13 +7991,24 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div className="sm:col-span-3">
-                <label className="mb-1 block font-semibold">流入チャネル / Nguồn kênh CRM (Chuyển đổi mượt)</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '流入チャネル（CRMルート切替）' : 'Nguồn kênh CRM (Chuyển đổi mượt)'}
+                </label>
                 <div className="flex flex-wrap gap-2">
                   {(
                     [
-                      { id: 'personal', label: 'FB個人 (Facebook cá nhân)' },
-                      { id: 'company', label: 'FB会社公式 (Fanpage công ty)' },
-                      { id: 'school', label: '日本語学校・留学生 (Trường Nhật ngữ)' },
+                      {
+                        id: 'personal',
+                        label: uiLang === 'jp' ? 'FB個人' : 'Facebook cá nhân',
+                      },
+                      {
+                        id: 'company',
+                        label: uiLang === 'jp' ? 'FB会社公式' : 'Fanpage công ty',
+                      },
+                      {
+                        id: 'school',
+                        label: uiLang === 'jp' ? '日本語学校・留学生' : 'Trường Nhật ngữ / Du học sinh',
+                      },
                     ] as Array<{ id: ChannelType; label: string }>
                   ).map((ch) => (
                     <button
@@ -6640,7 +8021,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                           data: { ...editingPerson.data, channel: ch.id },
                         })
                       }
-                      className={`rounded-lg border px-3 py-1.5 text-[11px] font-semibold transition-colors ${
+                      className={`rounded-lg border px-3 py-1.5 text-[11px] font-semibold transition-colors cursor-pointer ${
                         (editingPerson.data.channel || 'personal') === ch.id
                           ? 'border-indigo-500 bg-indigo-50 text-indigo-900'
                           : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
@@ -6653,7 +8034,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
 
               <div>
-                <label className="mb-1 block font-semibold">国籍</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '国籍' : 'Quốc tịch'}
+                </label>
                 <input
                   type="text"
                   value={editingPerson.data.nationality || ''}
@@ -6667,11 +8050,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">年齢 / 生年月日</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '年齢 / 生年月日' : 'Tuổi / Ngày sinh'}
+                </label>
                 <div className="flex gap-1.5">
                   <input
                     type="text"
-                    placeholder="年齢"
+                    placeholder={uiLang === 'jp' ? '年齢' : 'Tuổi'}
                     value={editingPerson.data.age || ''}
                     onChange={(e) =>
                       setEditingPerson({
@@ -6696,7 +8081,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 </div>
               </div>
               <div>
-                <label className="mb-1 block font-semibold">日本語レベル</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '日本語レベル' : 'Trình độ tiếng Nhật'}
+                </label>
                 <select
                   value={editingPerson.data.jlpt || '要確認'}
                   onChange={(e) =>
@@ -6716,7 +8103,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
 
               <div>
-                <label className="mb-1 block font-semibold">希望分野</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '希望分野' : 'Ngành nghề mong muốn'}
+                </label>
                 <input
                   type="text"
                   value={editingPerson.data.desiredIndustry || ''}
@@ -6730,7 +8119,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">希望勤務エリア</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '希望勤務エリア' : 'Khu vực mong muốn'}
+                </label>
                 <input
                   type="text"
                   value={editingPerson.data.desiredArea || ''}
@@ -6744,7 +8135,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">進捗ステータス</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '進捗ステータス' : 'Trạng thái tiến độ'}
+                </label>
                 <select
                   value={editingPerson.data.progressStatus || '新規相談'}
                   onChange={(e) =>
@@ -6764,11 +8157,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
 
               <div>
-                <label className="mb-1 block font-semibold">在留資格 / 在留期限</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '在留資格 / 在留期限' : 'Tư cách lưu trú / Hạn visa'}
+                </label>
                 <div className="flex gap-1.5">
                   <input
                     type="text"
-                    placeholder="在留資格"
+                    placeholder={uiLang === 'jp' ? '在留資格' : 'Loại visa'}
                     value={editingPerson.data.visaStatus || ''}
                     onChange={(e) =>
                       setEditingPerson({
@@ -6780,7 +8175,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   />
                   <input
                     type="text"
-                    placeholder="期限 YYYY-MM-DD"
+                    placeholder={uiLang === 'jp' ? '期限 YYYY-MM-DD' : 'Hạn YYYY-MM-DD'}
                     value={editingPerson.data.visaExpiry || ''}
                     onChange={(e) =>
                       setEditingPerson({
@@ -6793,7 +8188,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 </div>
               </div>
               <div>
-                <label className="mb-1 block font-semibold">合格済み試験・資格</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '合格済み試験・資格' : 'Kỳ thi / Chứng chỉ đã đỗ'}
+                </label>
                 <input
                   type="text"
                   value={editingPerson.data.passedExam || ''}
@@ -6807,7 +8204,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">提案先企業</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '提案先企業' : 'Công ty đang đề xuất'}
+                </label>
                 <input
                   type="text"
                   value={editingPerson.data.proposedCompany || ''}
@@ -6823,7 +8222,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
               <div>
                 <label className="mb-1 block font-semibold">
-                  面談日 / Mendan (YYYY-MM-DD HH:mm)
+                  {uiLang === 'jp' ? '面談日時 (YYYY-MM-DD HH:mm)' : 'Lịch Mendan (YYYY-MM-DD HH:mm)'}
                 </label>
                 <input
                   type="text"
@@ -6840,7 +8239,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
               <div>
                 <label className="mb-1 block font-semibold">
-                  企業面接日時 / Phỏng vấn cty (YYYY-MM-DD HH:mm)
+                  {uiLang === 'jp'
+                    ? '企業面接日時 (YYYY-MM-DD HH:mm)'
+                    : 'Lịch phỏng vấn công ty (YYYY-MM-DD HH:mm)'}
                 </label>
                 <input
                   type="text"
@@ -6856,7 +8257,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">電話番号 / LINE</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '電話番号 / LINE' : 'Số điện thoại / LINE'}
+                </label>
                 <input
                   type="text"
                   value={editingPerson.data.phone || ''}
@@ -6870,7 +8273,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">入社可能時期</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '入社可能時期' : 'Thời điểm nhận việc'}
+                </label>
                 <input
                   type="text"
                   value={editingPerson.data.startDate || ''}
@@ -6888,11 +8293,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <label className="mb-1 block font-semibold">
-                  Kinh nghiệm &amp; Bằng cấp chi tiết (日本での職歴・経験)
+                  {uiLang === 'jp'
+                    ? '日本での職歴・経験・資格詳細'
+                    : 'Kinh nghiệm & Bằng cấp chi tiết tại Nhật'}
                 </label>
                 <input
                   type="text"
-                  placeholder="VD: Đang là Kaigo năm cuối, 3 năm viện có phí..."
+                  placeholder={
+                    uiLang === 'jp'
+                      ? '例：有料老人ホーム介護職3年経験、特定技能介護試験合格...'
+                      : 'VD: Đang là Kaigo năm cuối, 3 năm viện có phí...'
+                  }
                   value={editingPerson.data.japanExperience || ''}
                   onChange={(e) =>
                     setEditingPerson({
@@ -6905,11 +8316,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
               <div>
                 <label className="mb-1 block font-semibold">
-                  Lương kỳ vọng / Mốc đàm phán (給与希望)
+                  {uiLang === 'jp' ? '給与希望・交渉ライン' : 'Lương kỳ vọng / Mốc đàm phán'}
                 </label>
                 <input
                   type="text"
-                  placeholder="VD: Kỳ vọng thực nhận ~16 man sau trừ nhà 3 man"
+                  placeholder={
+                    uiLang === 'jp'
+                      ? '例：家賃3万円控除後 手取り16万円以上希望'
+                      : 'VD: Kỳ vọng thực nhận ~16 man sau trừ nhà 3 man'
+                  }
                   value={editingPerson.data.salaryExpectation || ''}
                   onChange={(e) =>
                     setEditingPerson({
@@ -6924,11 +8339,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
             <div className="mt-3">
               <label className="mb-1 block font-semibold">
-                Nhu cầu &amp; Mục tiêu chuyển đổi (転職・在留資格変更の目的)
+                {uiLang === 'jp'
+                  ? '転職・在留資格変更の目的・希望条件'
+                  : 'Nhu cầu & Mục tiêu chuyển đổi việc / visa'}
               </label>
               <input
                 type="text"
-                placeholder="VD: Tìm công ty mới phỏng vấn chuyển đổi visa Tokutei ngành Kaigo"
+                placeholder={
+                  uiLang === 'jp'
+                    ? '例：介護分野で特定技能への在留資格変更希望'
+                    : 'VD: Tìm công ty mới phỏng vấn chuyển đổi visa Tokutei ngành Kaigo'
+                }
                 value={editingPerson.data.conversionGoal || ''}
                 onChange={(e) =>
                   setEditingPerson({
@@ -6940,9 +8361,83 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               />
             </div>
 
+            <div className="mt-3 grid grid-cols-1 gap-3 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block font-semibold">
+                  {t.naiteiModal.companyLabel}
+                </label>
+                <input
+                  type="text"
+                  placeholder={t.naiteiModal.companyPlaceholder}
+                  value={editingPerson.data.naiteiCompany || ''}
+                  onChange={(e) =>
+                    setEditingPerson({
+                      ...editingPerson,
+                      data: { ...editingPerson.data, naiteiCompany: e.target.value },
+                    })
+                  }
+                  className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block font-semibold">
+                  {t.naiteiModal.joinDateLabel}
+                </label>
+                <input
+                  type="date"
+                  value={editingPerson.data.expectedJoinDate || ''}
+                  onChange={(e) =>
+                    setEditingPerson({
+                      ...editingPerson,
+                      data: { ...editingPerson.data, expectedJoinDate: e.target.value },
+                    })
+                  }
+                  className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 tabular-nums"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block font-semibold">
+                  {t.naiteiModal.visaDeadlineLabel}
+                </label>
+                <input
+                  type="date"
+                  value={editingPerson.data.visaSubmissionDeadline || ''}
+                  onChange={(e) =>
+                    setEditingPerson({
+                      ...editingPerson,
+                      data: {
+                        ...editingPerson.data,
+                        visaSubmissionDeadline: e.target.value,
+                      },
+                    })
+                  }
+                  className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 tabular-nums"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block font-semibold">
+                  {t.jitaiModal.reasonLabel}
+                </label>
+                <input
+                  type="text"
+                  placeholder={t.jitaiModal.placeholder}
+                  value={editingPerson.data.declineReason || ''}
+                  onChange={(e) =>
+                    setEditingPerson({
+                      ...editingPerson,
+                      data: { ...editingPerson.data, declineReason: e.target.value },
+                    })
+                  }
+                  className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5"
+                />
+              </div>
+            </div>
+
             <div className="mt-3">
               <label className="mb-1 block font-semibold">
-                Nhật ký &amp; Tình trạng trao đổi nguyên văn (Không cắt bớt)
+                {uiLang === 'jp'
+                  ? '相談・条件交渉ログ（原文のまま保持）'
+                  : 'Nhật ký & Tình trạng trao đổi nguyên văn (Không cắt bớt)'}
               </label>
               <textarea
                 rows={4}
@@ -6953,13 +8448,19 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     data: { ...editingPerson.data, negotiationLog: e.target.value },
                   })
                 }
-                placeholder="Lưu nguyên văn các mốc đàm phán lương/điều kiện, đơn đang hỏi, phản hồi của ứng viên..."
+                placeholder={
+                  uiLang === 'jp'
+                    ? '給与や条件の交渉経緯、応募中の求人、本人の返信内容などをそのまま記録...'
+                    : 'Lưu nguyên văn các mốc đàm phán lương/điều kiện, đơn đang hỏi, phản hồi của ứng viên...'
+                }
                 className="w-full rounded-lg border border-slate-300 p-2.5"
               />
             </div>
 
             <div className="mt-3">
-              <label className="mb-1 block font-semibold">Ghi chú bổ sung (面談記録・対応メモ)</label>
+              <label className="mb-1 block font-semibold">
+                {uiLang === 'jp' ? '補足メモ（面談記録・対応履歴）' : 'Ghi chú bổ sung (Lịch sử tư vấn)'}
+              </label>
               <textarea
                 rows={3}
                 value={editingPerson.data.memo || ''}
@@ -6977,16 +8478,16 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               <button
                 type="button"
                 onClick={() => setEditingPerson(null)}
-                className="rounded-lg border border-slate-300 px-4 py-2 font-semibold text-slate-700"
+                className="rounded-lg border border-slate-300 px-4 py-2 font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
               >
-                キャンセル
+                {t.cancel}
               </button>
               <button
                 type="button"
                 onClick={handleSaveEditingPerson}
-                className="rounded-lg bg-indigo-600 px-5 py-2 font-semibold text-white hover:bg-indigo-700"
+                className="rounded-lg bg-[#16A34A] px-5 py-2 font-semibold text-white hover:bg-[#15803D] cursor-pointer"
               >
-                保存する
+                {t.save}
               </button>
             </div>
           </div>
@@ -6995,9 +8496,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 2: FB CHAT AUTO-REGISTER / UPDATE */}
       {fbChatModalOpen && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
           <div
-            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-5 text-xs text-slate-900 shadow-2xl"
+            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-xs text-[#0F172A] shadow-2xl"
             onPaste={(e) => {
               const img = extractFirstImageFromClipboard(e.clipboardData);
               if (img) {
@@ -7006,16 +8507,18 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               }
             }}
           >
-            <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-2.5">
-              <h3 className="text-base font-bold text-slate-900">
-                FBチャットから自動登録・既存相談者の状況更新
+            <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+              <h3 className="text-base font-bold text-[#0F172A]">
+                {uiLang === 'jp'
+                  ? 'FBチャットから自動登録・既存相談者の状況更新'
+                  : 'Đăng ký tự động từ chat FB / Cập nhật hồ sơ có sẵn'}
               </h3>
               <button
                 type="button"
                 onClick={() => setFbChatModalOpen(false)}
-                className="rounded-lg bg-slate-100 px-3 py-1 font-semibold text-slate-700"
+                className="rounded-lg bg-slate-100 px-3 py-1 font-semibold text-slate-700 hover:bg-slate-200 cursor-pointer"
               >
-                閉じる
+                {t.close}
               </button>
             </div>
 
@@ -7023,30 +8526,32 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               <button
                 type="button"
                 onClick={() => setFbChatMode('new')}
-                className={`rounded-lg px-3 py-2 font-semibold ${
+                className={`rounded-lg px-3 py-2 font-semibold cursor-pointer ${
                   fbChatMode === 'new'
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-slate-100 text-slate-700'
+                    ? 'bg-[#16A34A] text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                 }`}
               >
-                ＋ 新規相談者として登録
+                {uiLang === 'jp' ? '＋ 新規相談者として登録' : '+ Đăng ký ứng viên mới'}
               </button>
               <button
                 type="button"
                 onClick={() => setFbChatMode('update')}
-                className={`rounded-lg px-3 py-2 font-semibold ${
+                className={`rounded-lg px-3 py-2 font-semibold cursor-pointer ${
                   fbChatMode === 'update'
-                    ? 'bg-emerald-600 text-white'
-                    : 'bg-slate-100 text-slate-700'
+                    ? 'bg-sky-600 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                 }`}
               >
-                既存相談者の状況を更新
+                {uiLang === 'jp' ? '既存相談者の状況を更新' : 'Cập nhật ứng viên hiện có'}
               </button>
             </div>
 
             {fbChatMode === 'update' && (
               <div className="mb-3">
-                <label className="mb-1 block font-semibold">更新対象の相談者を選択</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '更新対象の相談者を選択' : 'Chọn ứng viên cần cập nhật'}
+                </label>
                 <select
                   value={fbChatTargetId}
                   onChange={(e) => {
@@ -7065,12 +8570,18 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   }}
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-semibold"
                 >
-                  <option value="">-- 相談者を選択してください --</option>
-                  {allPeopleCombined.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} {p.fbName && p.fbName !== p.name ? `(${p.fbName})` : ''} - {p.progressStatus}
-                    </option>
-                  ))}
+                  <option value="">
+                    {uiLang === 'jp' ? '-- 相談者を選択してください --' : '-- Chọn ứng viên --'}
+                  </option>
+                  {allPeopleCombined.map((p) => {
+                    const disp = getCandidateDisplayName(p, uiLang);
+                    return (
+                      <option key={p.id} value={p.id}>
+                        {disp} {p.fbName && p.fbName !== disp ? `(${p.fbName})` : ''} -{' '}
+                        {p.progressStatus}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             )}
@@ -7078,25 +8589,29 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             <div className="mb-3">
               <label className="mb-1 block font-semibold">
                 {fbChatMode === 'new'
-                  ? '登録先チャネル / Chọn kênh nguồn'
-                  : 'チャネル設定 / Kênh lưu trữ (có thể chuyển đổi kênh ngay)'}
+                  ? uiLang === 'jp'
+                    ? '登録先チャネル'
+                    : 'Chọn kênh nguồn lưu hồ sơ'
+                  : uiLang === 'jp'
+                  ? 'チャネル設定'
+                  : 'Kênh lưu trữ'}
               </label>
               <div className="flex flex-wrap gap-2">
                 {(
                   [
-                    { id: 'personal', label: 'FB個人' },
-                    { id: 'company', label: 'FB会社公式' },
-                    { id: 'school', label: '日本語学校・留学生' },
+                    { id: 'personal', label: t.channelPersonal },
+                    { id: 'company', label: t.channelCompany },
+                    { id: 'school', label: t.tabs.school },
                   ] as Array<{ id: ChannelType; label: string }>
                 ).map((ch) => (
                   <button
                     key={ch.id}
                     type="button"
                     onClick={() => setFbChatChannel(ch.id)}
-                    className={`rounded-lg border px-3 py-1.5 font-semibold ${
+                    className={`rounded-lg border px-3 py-1.5 font-semibold cursor-pointer ${
                       fbChatChannel === ch.id
-                        ? 'border-indigo-500 bg-indigo-50 text-indigo-900'
-                        : 'border-slate-200 bg-white text-slate-700'
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                     }`}
                   >
                     {ch.label}
@@ -7108,11 +8623,13 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             <div>
               <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                 <label className="font-semibold">
-                  Dán đoạn chat Messenger, ghi chú hoặc Ctrl+V ảnh chụp màn hình (Chat / Thẻ ngoại kiều)
+                  {uiLang === 'jp'
+                    ? 'Messenger履歴・メモ貼り付け または スクリーンショット（Ctrl+V）'
+                    : 'Dán đoạn chat Messenger, ghi chú hoặc Ctrl+V ảnh chụp màn hình'}
                 </label>
                 <label className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-sky-300 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-800 hover:bg-sky-100">
                   <ImageIcon className="h-3.5 w-3.5" aria-hidden="true" />
-                  Chọn ảnh chụp màn hình
+                  {uiLang === 'jp' ? '画像を選択' : 'Chọn ảnh chụp màn hình'}
                   <input
                     type="file"
                     accept="image/*"
@@ -7130,7 +8647,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 value={fbChatRawText}
                 onChange={(e) => setFbChatRawText(e.target.value)}
                 placeholder={
-                  'VD:\nLê Thị Bích Phương (FB: Thị Bích Phương Lê)\nĐang là Kaigo năm cuối ở Tochigi, muốn chuyển sang Saitama hoặc Gunma. Hạn thẻ ngoại kiều 09/04/2027, JLPT N3...'
+                  uiLang === 'jp'
+                    ? '例：\nLê Thị Bích Phương (FB: Thị Bích Phương Lê)\n栃木で介護3年目、埼玉または群馬へ転職希望。在留期限 2027/04/09、JLPT N3...'
+                    : 'VD:\nLê Thị Bích Phương (FB: Thị Bích Phương Lê)\nĐang là Kaigo năm cuối ở Tochigi, muốn chuyển sang Saitama hoặc Gunma. Hạn thẻ ngoại kiều 09/04/2027, JLPT N3...'
                 }
                 className="w-full rounded-lg border border-slate-300 p-3 text-xs"
               />
@@ -7140,18 +8659,22 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               <button
                 type="button"
                 onClick={() => setFbChatModalOpen(false)}
-                className="rounded-lg border border-slate-300 px-4 py-2 font-semibold text-slate-700"
+                className="rounded-lg border border-slate-300 px-4 py-2 font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
               >
-                Đóng
+                {t.close}
               </button>
               <button
                 type="button"
                 disabled={isExtractingFbChatAi}
                 onClick={() => void handleSubmitFbChatModal()}
-                className="rounded-lg bg-sky-600 px-5 py-2 font-semibold text-white hover:bg-sky-700 disabled:opacity-60"
+                className="rounded-lg bg-[#16A34A] px-5 py-2 font-semibold text-white hover:bg-[#15803D] disabled:opacity-60 cursor-pointer"
               >
                 {isExtractingFbChatAi
-                  ? 'Đang phân tích & bảo toàn dữ liệu...'
+                  ? uiLang === 'jp'
+                    ? '解析・保存中...'
+                    : 'Đang phân tích & lưu dữ liệu...'
+                  : uiLang === 'jp'
+                  ? 'AI抽出＆原文保存'
                   : 'AI bóc tách & Lưu nguyên văn'}
               </button>
             </div>
@@ -7161,70 +8684,162 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 3: 2-COLUMN COMPANY STANDARD RIREKISHO */}
       {rirekishoModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
-          <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-xl bg-white p-5 text-xs text-slate-900 shadow-2xl">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
+          <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-xs text-slate-900 shadow-2xl">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
               <div>
-                <h3 className="text-base font-bold text-slate-900">
-                  履歴書作成（企業提出用2カラム標準様式）：{rirekishoModal.person?.name}
-                </h3>
-                <p className="text-[11px] text-slate-500">
-                  既存の履歴書ファイル読込・チャット自動作成・直接編集・HTML/PDF出力に対応
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-base font-bold text-slate-900">
+                    {uiLang === 'jp'
+                      ? '履歴書作成（企業提出用2カラム標準様式）'
+                      : 'Tạo Rirekisho (Mẫu chuẩn 2 cột nộp công ty)'}
+                    ：{getCandidateDisplayName(rirekishoModal.person, uiLang)}
+                  </h3>
+                  {rirekishoModal.lastSavedAt && (
+                    <span className="rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-mono text-[10px] font-semibold text-emerald-700 tabular-nums">
+                      ✅ {t.rirekisho.autoSavedLabel}{' '}
+                      {new Date(rirekishoModal.lastSavedAt).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-0.5 text-[11px] text-slate-500">
+                  {uiLang === 'jp'
+                    ? '編集内容は自動保存され、次回はそのままPDF・Excel出力できます'
+                    : 'Mọi chỉnh sửa được tự động lưu trực tiếp vào hồ sơ ứng viên để xuất PDF / Excel bất cứ lúc nào'}
                 </p>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleSaveRirekishoManual}
+                  className="rounded-lg bg-[#16A34A] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#15803D] cursor-pointer whitespace-nowrap"
+                >
+                  💾 {t.rirekisho.saveBtn}
+                </button>
                 <button
                   type="button"
                   disabled={isParsingRirekisho}
                   onClick={() => rirekishoFileInputRef.current?.click()}
-                  className="rounded-lg bg-amber-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-60"
+                  className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60 cursor-pointer whitespace-nowrap"
                 >
-                  {isParsingRirekisho ? '読込・解析中...' : '既存履歴書ファイル読込'}
+                  {isParsingRirekisho
+                    ? uiLang === 'jp'
+                      ? '読込・解析中...'
+                      : 'Đang đọc...'
+                    : rirekishoModal.hasSavedVersion
+                    ? t.rirekisho.overwriteUploadBtn
+                    : uiLang === 'jp'
+                    ? '既存履歴書ファイル読込'
+                    : 'Tải file Rirekisho có sẵn'}
                 </button>
                 <button
                   type="button"
-                  onClick={handleDownloadRirekishoFile}
-                  className="rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
+                  onClick={handleExportRirekishoExcel}
+                  className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 cursor-pointer whitespace-nowrap"
                 >
-                  履歴書をダウンロード
+                  📊 {t.rirekisho.exportExcelBtn}
                 </button>
                 <button
                   type="button"
                   onClick={handlePrintRirekishoSafely}
-                  className="rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700"
+                  className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 cursor-pointer whitespace-nowrap"
                 >
-                  印刷 / PDF保存
+                  🖨️ {t.rirekisho.printPdfBtn}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setRirekishoModal(null)}
-                  className="rounded-lg bg-slate-100 px-3 py-1.5 font-semibold text-slate-700"
+                  onClick={handleDownloadRirekishoFile}
+                  className="rounded-lg border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-semibold text-[#0F172A] hover:bg-[#F8FAFC] cursor-pointer whitespace-nowrap"
                 >
-                  閉じる
+                  📥 {t.rirekisho.exportHtmlBtn}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCloseRirekishoModal}
+                  className="rounded-lg bg-slate-100 px-3 py-1.5 font-semibold text-slate-700 hover:bg-slate-200 cursor-pointer"
+                >
+                  {t.close}
                 </button>
               </div>
             </div>
 
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50/80 p-3">
-              <div>
-                <div className="font-bold text-amber-950">
-                  応募者が作成した既存の履歴書ファイルから自動入力
+            {rirekishoModal.hasSavedVersion && (
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50/70 px-3.5 py-2.5">
+                <div className="space-y-0.5">
+                  <div className="font-bold text-emerald-900">
+                    ✅ {t.rirekisho.savedBannerTitle}
+                  </div>
+                  <div className="text-[11px] text-emerald-800">
+                    {t.rirekisho.savedBannerSub}
+                    {rirekishoModal.sourceFileName && (
+                      <span className="ml-2 font-mono">
+                        · {t.rirekisho.sourceFileTag} {rirekishoModal.sourceFileName}
+                      </span>
+                    )}
+                    {rirekishoModal.exportedFileName && (
+                      <span className="ml-2 font-mono">
+                        · {t.rirekisho.lastExportTag} {rirekishoModal.exportedFileName}
+                      </span>
+                    )}
+                  </div>
                 </div>
-                <div className="mt-0.5 text-[11px] text-amber-900">
-                  対応形式：PDF・画像（JPG/PNG）・Excel（.xlsx / .xls）・Word（.docx）・CSV・Text
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isParsingRirekisho}
+                    onClick={() => rirekishoFileInputRef.current?.click()}
+                    className="rounded-md border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-50 cursor-pointer"
+                  >
+                    {t.rirekisho.overwriteUploadBtn}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setRirekishoModal((prev) =>
+                        prev ? { ...prev, showUploadTools: !prev.showUploadTools } : prev
+                      )
+                    }
+                    className="rounded-md border border-[#E2E8F0] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#475569] hover:bg-[#F8FAFC] cursor-pointer"
+                  >
+                    {t.rirekisho.toggleChatFillBtn}
+                  </button>
                 </div>
               </div>
-              <button
-                type="button"
-                disabled={isParsingRirekisho}
-                onClick={() => rirekishoFileInputRef.current?.click()}
-                className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-60"
-              >
-                {isParsingRirekisho
-                  ? 'ファイル解析中...'
-                  : 'ファイルを選択して自動反映（PDF / Excel / Word / 画像）'}
-              </button>
-            </div>
+            )}
+
+            {(!rirekishoModal.hasSavedVersion || rirekishoModal.showUploadTools) && (
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50/80 p-3">
+                <div>
+                  <div className="font-bold text-amber-950">
+                    {uiLang === 'jp'
+                      ? '応募者が作成した既存の履歴書ファイルから自動入力'
+                      : 'Tự động điền từ file Rirekisho có sẵn của ứng viên'}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-amber-900">
+                    {uiLang === 'jp'
+                      ? '対応形式：PDF・画像（JPG/PNG）・Excel（.xlsx / .xls）・Word（.docx）・CSV・Text'
+                      : 'Định dạng hỗ trợ: PDF · Ảnh (JPG/PNG) · Excel (.xlsx / .xls) · Word (.docx) · CSV · Text'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isParsingRirekisho}
+                  onClick={() => rirekishoFileInputRef.current?.click()}
+                  className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-60 cursor-pointer"
+                >
+                  {isParsingRirekisho
+                    ? uiLang === 'jp'
+                      ? 'ファイル解析中...'
+                      : 'Đang phân tích file...'
+                    : uiLang === 'jp'
+                    ? 'ファイルを選択して自動反映（PDF / Excel / Word / 画像）'
+                    : 'Chọn file để điền tự động (PDF / Excel / Word / Ảnh)'}
+                </button>
+              </div>
+            )}
 
             {rirekishoStatusBanner && (
               <div
@@ -7240,28 +8855,42 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
             )}
 
-            <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50/60 p-3">
-              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                <span className="font-bold text-indigo-950">
-                  応募者のチャット・ヒアリングメモから自動入力
-                </span>
-                <button
-                  type="button"
-                  disabled={isParsingRirekisho}
-                  onClick={handleGenerateRirekishoFromChat}
-                  className="rounded-md bg-indigo-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
-                >
-                  {isParsingRirekisho ? 'AI解析中...' : 'チャットから履歴書を自動作成'}
-                </button>
+            {(!rirekishoModal.hasSavedVersion || rirekishoModal.showUploadTools) && (
+              <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50/60 p-3">
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-indigo-950">
+                    {uiLang === 'jp'
+                      ? '応募者のチャット・ヒアリングメモから自動入力'
+                      : 'Tự động điền từ đoạn chat / ghi chú phỏng vấn ứng viên'}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={isParsingRirekisho}
+                    onClick={handleGenerateRirekishoFromChat}
+                    className="rounded-md bg-indigo-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-60 cursor-pointer"
+                  >
+                    {isParsingRirekisho
+                      ? uiLang === 'jp'
+                        ? 'AI解析中...'
+                        : 'AI đang phân tích...'
+                      : uiLang === 'jp'
+                      ? 'チャットから履歴書を自動作成'
+                      : 'Tạo tự động từ chat'}
+                  </button>
+                </div>
+                <textarea
+                  rows={2}
+                  value={rirekishoChatInput}
+                  onChange={(e) => setRirekishoChatInput(e.target.value)}
+                  placeholder={
+                    uiLang === 'jp'
+                      ? '応募者とのFBメッセンジャーやり取りや面談メモを貼り付けてボタンを押すと、生年月日・国籍・在留期限・学歴職歴・資格・志望動機などを2カラム様式へ自動入力します...'
+                      : 'Dán đoạn chat Messenger hoặc ghi chú phỏng vấn với ứng viên để AI tự điền ngày sinh, quốc tịch, hạn visa, học vấn, kinh nghiệm, chứng chỉ vào mẫu 2 cột...'
+                  }
+                  className="w-full rounded-lg border border-indigo-200 bg-white p-2 text-xs"
+                />
               </div>
-              <textarea
-                rows={2}
-                value={rirekishoChatInput}
-                onChange={(e) => setRirekishoChatInput(e.target.value)}
-                placeholder="応募者とのFBメッセンジャーやり取りや面談メモを貼り付けてボタンを押すと、生年月日・国籍・在留期限・学歴職歴・資格・志望動機などを2カラム様式へ自動入力します..."
-                className="w-full rounded-lg border border-indigo-200 bg-white p-2 text-xs"
-              />
-            </div>
+            )}
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div className="space-y-3 rounded-lg border-2 border-slate-800 p-3.5">
@@ -7280,80 +8909,130 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   />
                 </div>
 
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                  <div className="grid flex-1 grid-cols-12 gap-2 border border-slate-400 p-2">
+                    <div className="col-span-3 font-semibold text-slate-600">フリガナ</div>
+                    <div className="col-span-9">
+                      <input
+                        type="text"
+                        value={rirekishoModal.draft.furigana}
+                        onChange={(e) =>
+                          setRirekishoModal({
+                            ...rirekishoModal,
+                            draft: { ...rirekishoModal.draft, furigana: e.target.value },
+                          })
+                        }
+                        className="w-full border-b border-slate-300 px-1"
+                      />
+                    </div>
+                    <div className="col-span-3 font-semibold text-slate-600">氏名</div>
+                    <div className="col-span-9">
+                      <input
+                        type="text"
+                        value={rirekishoModal.draft.fullName}
+                        onChange={(e) =>
+                          setRirekishoModal({
+                            ...rirekishoModal,
+                            draft: { ...rirekishoModal.draft, fullName: e.target.value },
+                          })
+                        }
+                        className="w-full border-b border-slate-300 px-1 text-sm font-bold"
+                      />
+                    </div>
+                    <div className="col-span-3 font-semibold text-slate-600">生年月日</div>
+                    <div className="col-span-9 flex flex-wrap items-center gap-1.5">
+                      <input
+                        type="text"
+                        value={rirekishoModal.draft.birthDate}
+                        onChange={(e) => {
+                          const bd = e.target.value;
+                          const autoAge = calcJapaneseAgeFromBirthDate(bd);
+                          setRirekishoModal({
+                            ...rirekishoModal,
+                            draft: {
+                              ...rirekishoModal.draft,
+                              birthDate: bd,
+                              age: autoAge || rirekishoModal.draft.age,
+                            },
+                          });
+                        }}
+                        placeholder="2000-01-01"
+                        className="w-28 border-b border-slate-300 px-1"
+                      />
+                      <span>（満</span>
+                      <input
+                        type="text"
+                        value={rirekishoModal.draft.age}
+                        onChange={(e) =>
+                          setRirekishoModal({
+                            ...rirekishoModal,
+                            draft: { ...rirekishoModal.draft, age: e.target.value },
+                          })
+                        }
+                        className="w-8 border-b border-slate-300 text-center font-bold"
+                      />
+                      <span>歳）性別：</span>
+                      <input
+                        type="text"
+                        value={rirekishoModal.draft.gender}
+                        onChange={(e) =>
+                          setRirekishoModal({
+                            ...rirekishoModal,
+                            draft: { ...rirekishoModal.draft, gender: e.target.value },
+                          })
+                        }
+                        className="w-12 border-b border-slate-300 text-center"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Portrait Photo Box (証明写真 3x4) */}
+                  <div className="flex w-28 shrink-0 flex-col items-center justify-between gap-1.5 rounded border border-dashed border-slate-400 bg-slate-50 p-1.5">
+                    {rirekishoModal.draft.photoDataUrl ? (
+                      <img
+                        src={rirekishoModal.draft.photoDataUrl}
+                        alt={t.rirekisho.photoBoxTitle}
+                        className="h-28 w-22 rounded border border-slate-300 object-cover"
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => rirekishoPhotoInputRef.current?.click()}
+                        className="flex h-28 w-22 flex-col items-center justify-center rounded border border-slate-200 bg-white text-[10px] font-semibold text-slate-500 hover:border-emerald-400 hover:text-emerald-700 cursor-pointer"
+                      >
+                        <ImageIcon className="mb-1 h-4 w-4" aria-hidden="true" />
+                        <span>{t.rirekisho.photoBoxTitle}</span>
+                      </button>
+                    )}
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => rirekishoPhotoInputRef.current?.click()}
+                        className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+                      >
+                        {rirekishoModal.draft.photoDataUrl
+                          ? t.rirekisho.changePhotoBtn
+                          : t.rirekisho.uploadPhotoBtn}
+                      </button>
+                      {rirekishoModal.draft.photoDataUrl && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRirekishoModal({
+                              ...rirekishoModal,
+                              draft: { ...rirekishoModal.draft, photoDataUrl: '' },
+                            })
+                          }
+                          className="rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 hover:bg-rose-100 cursor-pointer"
+                        >
+                          {t.rirekisho.removePhotoBtn}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-12 gap-2 border border-slate-400 p-2">
-                  <div className="col-span-3 font-semibold text-slate-600">フリガナ</div>
-                  <div className="col-span-9">
-                    <input
-                      type="text"
-                      value={rirekishoModal.draft.furigana}
-                      onChange={(e) =>
-                        setRirekishoModal({
-                          ...rirekishoModal,
-                          draft: { ...rirekishoModal.draft, furigana: e.target.value },
-                        })
-                      }
-                      className="w-full border-b border-slate-300 px-1"
-                    />
-                  </div>
-                  <div className="col-span-3 font-semibold text-slate-600">氏名</div>
-                  <div className="col-span-9">
-                    <input
-                      type="text"
-                      value={rirekishoModal.draft.fullName}
-                      onChange={(e) =>
-                        setRirekishoModal({
-                          ...rirekishoModal,
-                          draft: { ...rirekishoModal.draft, fullName: e.target.value },
-                        })
-                      }
-                      className="w-full border-b border-slate-300 px-1 text-sm font-bold"
-                    />
-                  </div>
-                  <div className="col-span-3 font-semibold text-slate-600">生年月日</div>
-                  <div className="col-span-9 flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={rirekishoModal.draft.birthDate}
-                      onChange={(e) => {
-                        const bd = e.target.value;
-                        const autoAge = calcJapaneseAgeFromBirthDate(bd);
-                        setRirekishoModal({
-                          ...rirekishoModal,
-                          draft: {
-                            ...rirekishoModal.draft,
-                            birthDate: bd,
-                            age: autoAge || rirekishoModal.draft.age,
-                          },
-                        });
-                      }}
-                      placeholder="2000-01-01"
-                      className="w-32 border-b border-slate-300 px-1"
-                    />
-                    <span>（満</span>
-                    <input
-                      type="text"
-                      value={rirekishoModal.draft.age}
-                      onChange={(e) =>
-                        setRirekishoModal({
-                          ...rirekishoModal,
-                          draft: { ...rirekishoModal.draft, age: e.target.value },
-                        })
-                      }
-                      className="w-10 border-b border-slate-300 text-center font-bold"
-                    />
-                    <span>歳）性別：</span>
-                    <input
-                      type="text"
-                      value={rirekishoModal.draft.gender}
-                      onChange={(e) =>
-                        setRirekishoModal({
-                          ...rirekishoModal,
-                          draft: { ...rirekishoModal.draft, gender: e.target.value },
-                        })
-                      }
-                      className="w-14 border-b border-slate-300 text-center"
-                    />
-                  </div>
                   <div className="col-span-3 font-semibold text-slate-600">現住所 〒</div>
                   <div className="col-span-9 space-y-1">
                     <input
@@ -7879,39 +9558,73 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 4: SMART REPLY MESSAGE GENERATOR */}
       {replyModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
-          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-xl bg-white p-5 text-xs text-slate-900 shadow-2xl">
-            <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-2.5">
-              <h3 className="text-base font-bold text-slate-900">
-                返信文提案（VN / JP / EN）：{replyModal.person.name}
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-xs text-[#0F172A] shadow-2xl">
+            <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+              <h3 className="text-base font-bold text-[#0F172A]">
+                {uiLang === 'jp' ? '返信文提案（VN / JP / EN）' : 'Gợi ý trả lời (VN / JP / EN)'}：
+                {getCandidateDisplayName(replyModal.person, uiLang)}
               </h3>
               <button
                 type="button"
                 onClick={() => setReplyModal(null)}
-                className="rounded-lg bg-slate-100 px-3 py-1 font-semibold text-slate-700"
+                className="rounded-lg bg-slate-100 px-3 py-1 font-semibold text-slate-700 hover:bg-slate-200 cursor-pointer"
               >
-                閉じる
+                {t.close}
               </button>
             </div>
 
             <div className="mb-3 flex flex-wrap gap-1.5">
               {(
                 [
-                  { id: 'first_mendan', label: '1. Chào & Hẹn Mendan đầu' },
-                  { id: 'missing_info_request', label: '2. Xin thông tin thiếu' },
-                  { id: 'recommend_job', label: '3. Gửi 3 Job phù hợp nhất' },
-                  { id: 'remind_interview', label: '4. Nhắc lịch Mendan / PV' },
-                  { id: 'post_interview_followup', label: '5. Hỏi thăm sau phỏng vấn' },
-                  { id: 'followup_silent', label: '6. Chăm sóc lại / Chưa phản hồi' },
+                  {
+                    id: 'first_mendan',
+                    label:
+                      uiLang === 'jp'
+                        ? '1. 初回挨拶・面談調整'
+                        : '1. Chào & Hẹn Mendan đầu',
+                  },
+                  {
+                    id: 'missing_info_request',
+                    label: uiLang === 'jp' ? '2. 不足情報の確認' : '2. Xin thông tin thiếu',
+                  },
+                  {
+                    id: 'recommend_job',
+                    label:
+                      uiLang === 'jp'
+                        ? '3. 最適求人3件を提案'
+                        : '3. Gửi 3 Job phù hợp nhất',
+                  },
+                  {
+                    id: 'remind_interview',
+                    label:
+                      uiLang === 'jp'
+                        ? '4. 面談・面接リマインド'
+                        : '4. Nhắc lịch Mendan / PV',
+                  },
+                  {
+                    id: 'post_interview_followup',
+                    label:
+                      uiLang === 'jp'
+                        ? '5. 面接後フォロー'
+                        : '5. Hỏi thăm sau phỏng vấn',
+                  },
+                  {
+                    id: 'followup_silent',
+                    label:
+                      uiLang === 'jp'
+                        ? '6. 未返信フォロー'
+                        : '6. Chăm sóc lại / Chưa phản hồi',
+                  },
                 ] as Array<{ id: ReplyScenario; label: string }>
               ).map((sc) => (
                 <button
                   key={sc.id}
                   type="button"
                   onClick={() => setReplyModal({ ...replyModal, scenario: sc.id })}
-                  className={`rounded-lg px-3 py-1.5 font-semibold transition-colors ${
+                  className={`rounded-lg px-3 py-1.5 font-semibold transition-colors cursor-pointer ${
                     replyModal.scenario === sc.id
-                      ? 'bg-indigo-600 text-white'
+                      ? 'bg-[#16A34A] text-white'
                       : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                   }`}
                 >
@@ -7929,28 +9642,43 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               return (
                 <div className="space-y-3">
                   {[
-                    { lang: 'ベトナム語 (Tiếng Việt)', text: msgs.vi },
-                    { lang: '日本語 (Japanese)', text: msgs.jp },
-                    { lang: '英語 (English)', text: msgs.en },
+                    {
+                      lang: uiLang === 'jp' ? 'ベトナム語 (Tiếng Việt)' : 'Tiếng Việt',
+                      text: msgs.vi,
+                    },
+                    {
+                      lang: uiLang === 'jp' ? '日本語 (Japanese)' : 'Tiếng Nhật (日本語)',
+                      text: msgs.jp,
+                    },
+                    {
+                      lang: uiLang === 'jp' ? '英語 (English)' : 'Tiếng Anh (English)',
+                      text: msgs.en,
+                    },
                   ].map((item) => (
                     <div
                       key={item.lang}
-                      className="rounded-lg border border-slate-200 bg-slate-50/70 p-3"
+                      className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3"
                     >
                       <div className="mb-1.5 flex items-center justify-between">
-                        <span className="font-bold text-slate-900">{item.lang}</span>
+                        <span className="font-bold text-[#0F172A]">{item.lang}</span>
                         <button
                           type="button"
                           onClick={async () => {
                             const ok = await copyTextSafely(item.text);
-                            showToast(ok ? `📋 ${item.lang} をコピーしました` : '⚠️ コピー失敗');
+                            showToast(
+                              ok
+                                ? uiLang === 'jp'
+                                  ? `📋 ${item.lang} をコピーしました`
+                                  : `📋 Đã sao chép ${item.lang}`
+                                : t.toasts.copyFailed
+                            );
                           }}
-                          className="rounded-md bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white hover:bg-slate-700"
+                          className="rounded-md bg-[#0F172A] px-3 py-1 text-[11px] font-semibold text-white hover:bg-slate-700 cursor-pointer"
                         >
-                          コピー
+                          {t.copy}
                         </button>
                       </div>
-                      <pre className="whitespace-pre-wrap font-sans leading-relaxed text-slate-800">
+                      <pre className="whitespace-pre-wrap font-sans leading-relaxed text-[#334155]">
                         {item.text}
                       </pre>
                     </div>
@@ -7964,18 +9692,20 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 5: CANDIDATE-FACING KYUJIN PREVIEW */}
       {previewModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
-          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-5 text-slate-900 shadow-2xl">
-            <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-2.5">
-              <h3 className="text-base font-bold text-slate-900">
-                求職者用 紹介文プレビュー（企業名・詳細住所非公開）
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-[#0F172A] shadow-2xl">
+            <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+              <h3 className="text-base font-bold text-[#0F172A]">
+                {uiLang === 'jp'
+                  ? '求職者用 紹介文プレビュー（企業名・詳細住所非公開）'
+                  : 'Xem trước tin tuyển dụng ẩn danh (Ẩn tên công ty & địa chỉ chi tiết)'}
               </h3>
               <button
                 type="button"
                 onClick={() => setPreviewModal(null)}
-                className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700"
+                className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200 cursor-pointer"
               >
-                閉じる
+                {t.close}
               </button>
             </div>
 
@@ -7988,38 +9718,58 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 <div className="space-y-3 text-xs">
                   <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
                     <div className="mb-1.5 flex items-center justify-between">
-                      <span className="font-bold text-emerald-950">Bản tóm tắt Tiếng Việt (Ẩn danh)</span>
+                      <span className="font-bold text-emerald-900">
+                        {uiLang === 'jp'
+                          ? 'ベトナム語紹介文（匿名）'
+                          : 'Bản tóm tắt Tiếng Việt (Ẩn danh)'}
+                      </span>
                       <button
                         type="button"
                         onClick={async () => {
                           const ok = await copyTextSafely(viIntroText);
-                          showToast(ok ? '📋 Đã sao chép bản tóm tắt Tiếng Việt' : '⚠️ Sao chép thất bại');
+                          showToast(
+                            ok
+                              ? uiLang === 'jp'
+                                ? '📋 ベトナム語紹介文をコピーしました'
+                                : '📋 Đã sao chép bản tóm tắt Tiếng Việt'
+                              : t.toasts.copyFailed
+                          );
                         }}
-                        className="rounded-md bg-emerald-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700"
+                        className="rounded-md bg-[#16A34A] px-3 py-1 text-[11px] font-semibold text-white hover:bg-[#15803D] cursor-pointer"
                       >
-                        Sao chép Tiếng Việt
+                        {uiLang === 'jp' ? 'ベトナム語コピー' : 'Sao chép Tiếng Việt'}
                       </button>
                     </div>
-                    <pre className="whitespace-pre-wrap font-sans leading-relaxed text-slate-800">
+                    <pre className="whitespace-pre-wrap font-sans leading-relaxed text-[#334155]">
                       {viIntroText}
                     </pre>
                   </div>
 
-                  <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-3">
+                  <div className="rounded-lg border border-sky-200 bg-sky-50/50 p-3">
                     <div className="mb-1.5 flex items-center justify-between">
-                      <span className="font-bold text-indigo-950">Bản tóm tắt Tiếng Nhật (Ẩn danh)</span>
+                      <span className="font-bold text-sky-900">
+                        {uiLang === 'jp'
+                          ? '日本語紹介文（匿名）'
+                          : 'Bản tóm tắt Tiếng Nhật (Ẩn danh)'}
+                      </span>
                       <button
                         type="button"
                         onClick={async () => {
                           const ok = await copyTextSafely(jpIntroText);
-                          showToast(ok ? '📋 Đã sao chép bản tóm tắt Tiếng Nhật' : '⚠️ Sao chép thất bại');
+                          showToast(
+                            ok
+                              ? uiLang === 'jp'
+                                ? '📋 日本語紹介文をコピーしました'
+                                : '📋 Đã sao chép bản tóm tắt Tiếng Nhật'
+                              : t.toasts.copyFailed
+                          );
                         }}
-                        className="rounded-md bg-indigo-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700"
+                        className="rounded-md bg-sky-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 cursor-pointer"
                       >
-                        Sao chép Tiếng Nhật
+                        {uiLang === 'jp' ? '日本語コピー' : 'Sao chép Tiếng Nhật'}
                       </button>
                     </div>
-                    <pre className="whitespace-pre-wrap font-sans leading-relaxed text-slate-800">
+                    <pre className="whitespace-pre-wrap font-sans leading-relaxed text-[#334155]">
                       {jpIntroText}
                     </pre>
                   </div>
@@ -8032,23 +9782,31 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 6: PT PARTNER EDIT / CREATE */}
       {ptModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
-          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-5 text-xs text-slate-900 shadow-2xl">
-            <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-2">
-              <h3 className="text-base font-bold text-slate-900">
-                {ptModal.isNew ? '＋ 新規PT提携先登録' : 'PT提携先編集'}
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-xs text-[#0F172A] shadow-2xl">
+            <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2">
+              <h3 className="text-base font-bold text-[#0F172A]">
+                {ptModal.isNew
+                  ? uiLang === 'jp'
+                    ? '＋ 新規PT提携先登録'
+                    : '+ Thêm đối tác PT mới'
+                  : uiLang === 'jp'
+                  ? 'PT提携先編集'
+                  : 'Chỉnh sửa đối tác PT'}
               </h3>
               <button
                 type="button"
                 onClick={() => setPtModal(null)}
-                className="rounded-lg bg-slate-100 px-3 py-1 font-semibold"
+                className="rounded-lg bg-slate-100 px-3 py-1 font-semibold text-slate-700 hover:bg-slate-200 cursor-pointer"
               >
-                閉じる
+                {t.close}
               </button>
             </div>
             <div className="space-y-2.5">
               <div>
-                <label className="mb-1 block font-semibold">PT団体・企業名 *</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? 'PT団体・企業名 *' : 'Tên tổ chức / Công ty PT *'}
+                </label>
                 <input
                   type="text"
                   value={ptModal.data.partnerName}
@@ -8063,7 +9821,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="mb-1 block font-semibold">担当者名</label>
+                  <label className="mb-1 block font-semibold">
+                    {uiLang === 'jp' ? '担当者名' : 'Người phụ trách'}
+                  </label>
                   <input
                     type="text"
                     value={ptModal.data.contactPerson}
@@ -8077,7 +9837,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block font-semibold">提携ステータス</label>
+                  <label className="mb-1 block font-semibold">
+                    {uiLang === 'jp' ? '提携ステータス' : 'Trạng thái hợp tác'}
+                  </label>
                   <select
                     value={ptModal.data.status}
                     onChange={(e) =>
@@ -8096,7 +9858,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="mb-1 block font-semibold">電話番号</label>
+                  <label className="mb-1 block font-semibold">
+                    {uiLang === 'jp' ? '電話番号' : 'Số điện thoại'}
+                  </label>
                   <input
                     type="text"
                     value={ptModal.data.phone}
@@ -8110,7 +9874,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block font-semibold">メール</label>
+                  <label className="mb-1 block font-semibold">Email</label>
                   <input
                     type="text"
                     value={ptModal.data.email}
@@ -8125,7 +9889,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 </div>
               </div>
               <div>
-                <label className="mb-1 block font-semibold">得意分野</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '得意分野' : 'Ngành thế mạnh'}
+                </label>
                 <input
                   type="text"
                   value={ptModal.data.specialty}
@@ -8139,7 +9905,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">契約・紹介シェア条件</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '契約・紹介シェア条件' : 'Điều kiện hợp tác / Hoa hồng'}
+                </label>
                 <input
                   type="text"
                   value={ptModal.data.commissionTerms}
@@ -8153,7 +9921,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 />
               </div>
               <div>
-                <label className="mb-1 block font-semibold">備考メモ</label>
+                <label className="mb-1 block font-semibold">
+                  {uiLang === 'jp' ? '備考メモ' : 'Ghi chú'}
+                </label>
                 <textarea
                   rows={2}
                   value={ptModal.data.memo}
@@ -8171,15 +9941,19 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               <button
                 type="button"
                 onClick={() => setPtModal(null)}
-                className="rounded-lg border border-slate-300 px-4 py-2 font-semibold"
+                className="rounded-lg border border-slate-300 px-4 py-2 font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
               >
-                キャンセル
+                {t.cancel}
               </button>
               <button
                 type="button"
                 onClick={() => {
                   if (!ptModal.data.partnerName.trim()) {
-                    showToast('⚠️ PT団体名を入力してください');
+                    showToast(
+                      uiLang === 'jp'
+                        ? '⚠️ PT団体名を入力してください'
+                        : '⚠️ Vui lòng nhập tên đối tác PT'
+                    );
                     return;
                   }
                   if (ptModal.isNew) {
@@ -8190,11 +9964,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     );
                   }
                   setPtModal(null);
-                  showToast('✅ PT提携先を保存しました');
+                  showToast(
+                    uiLang === 'jp'
+                      ? '✅ PT提携先を保存しました'
+                      : '✅ Đã lưu thông tin đối tác PT'
+                  );
                 }}
-                className="rounded-lg bg-indigo-600 px-4 py-2 font-semibold text-white"
+                className="rounded-lg bg-[#16A34A] px-4 py-2 font-semibold text-white hover:bg-[#15803D] cursor-pointer"
               >
-                保存
+                {t.save}
               </button>
             </div>
           </div>
@@ -8203,10 +9981,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 7: CUSTOM CONFIRMATION DIALOG */}
       {confirmDialog && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-md rounded-xl border border-[#27272a] bg-[#141417] p-5 text-[#edeeef] shadow-2xl">
-            <h4 className="text-base font-bold text-[#edeeef]">{confirmDialog.title}</h4>
-            <p className="mt-2 whitespace-pre-line text-xs leading-relaxed text-[#94949e]">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
+          <div className="w-full max-w-md rounded-xl border border-[#E2E8F0] bg-white p-5 text-[#0F172A] shadow-2xl">
+            <h4 className="text-base font-bold text-[#0F172A]">{confirmDialog.title}</h4>
+            <p className="mt-2 whitespace-pre-line text-xs leading-relaxed text-[#64748B]">
               {confirmDialog.message}
             </p>
             <div className="mt-4 flex justify-end gap-2">
@@ -8216,20 +9994,21 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   confirmDialog.onCancel?.();
                   setConfirmDialog(null);
                 }}
-                className="rounded-md border border-[#27272a] px-4 py-2 text-xs font-semibold text-[#94949e] hover:text-[#edeeef] cursor-pointer"
+                className="rounded-md border border-[#E2E8F0] bg-white px-4 py-2 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC] hover:text-[#0F172A] cursor-pointer"
               >
-                {confirmDialog.cancelLabel || 'キャンセル'}
+                {confirmDialog.cancelLabel || t.cancel}
               </button>
               <button
                 type="button"
                 onClick={confirmDialog.onConfirm}
-                className={`rounded-md px-4 py-2 text-xs font-semibold cursor-pointer hover:opacity-90 ${
+                className={`rounded-md px-4 py-2 text-xs font-semibold cursor-pointer ${
                   confirmDialog.tone === 'accent'
-                    ? 'bg-[#22c55e] text-[#0c0c0e]'
-                    : 'bg-[#ef4444] text-white'
+                    ? 'bg-[#16A34A] text-white hover:bg-[#15803D]'
+                    : 'bg-rose-600 text-white hover:bg-rose-700'
                 }`}
               >
-                {confirmDialog.confirmLabel || '削除を実行する'}
+                {confirmDialog.confirmLabel ||
+                  (uiLang === 'jp' ? '削除を実行する' : 'Xác nhận xóa')}
               </button>
             </div>
           </div>
@@ -8238,71 +10017,65 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 8: FACEBOOK MESSENGER CONNECTION MODAL */}
       {messengerLinkModalOpen && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 p-4">
-          <div className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-xl border border-[#27272a] bg-[#141417] p-6 text-xs text-[#edeeef] shadow-2xl">
-            <div className="mb-4 flex items-center justify-between border-b border-[#27272a] pb-3">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
+          <div className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-6 text-xs text-[#0F172A] shadow-2xl">
+            <div className="mb-4 flex items-center justify-between border-b border-[#E2E8F0] pb-3">
               <div className="flex items-center gap-2.5">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#38bdf8]/40 bg-[#38bdf8]/15 text-[#38bdf8]">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-sky-200 bg-sky-50 text-sky-700">
                   <Link2 className="h-4 w-4" aria-hidden="true" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-[#edeeef]">
-                    Liên kết Facebook Messenger
-                  </h3>
-                  <p className="text-[11px] text-[#94949e]">
-                    Kết nối Fanpage &amp; Meta Messenger Webhook tự động nhận hồ sơ ứng viên
+                  <h3 className="text-base font-bold text-[#0F172A]">{t.linkMessenger}</h3>
+                  <p className="text-[11px] text-[#64748B]">
+                    {uiLang === 'jp'
+                      ? 'FanpageとMeta Messenger Webhookを連携して自動登録します'
+                      : 'Kết nối Fanpage & Meta Messenger Webhook tự động nhận hồ sơ ứng viên'}
                   </p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setMessengerLinkModalOpen(false)}
-                className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1.5 text-xs font-semibold text-[#94949e] hover:text-[#edeeef] cursor-pointer"
+                className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1.5 text-xs font-semibold text-[#475569] hover:text-[#0F172A] cursor-pointer"
               >
-                Đóng
+                {t.close}
               </button>
             </div>
 
             {/* Connection Status Grid */}
             <div className="mb-4 grid grid-cols-3 gap-2">
-              <div className="rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3">
-                <div className="font-mono text-[10px] uppercase text-[#94949e]">
-                  Webhook
-                </div>
-                <div className="mt-1 font-mono text-xs font-bold text-[#22c55e]">
-                  Sẵn sàng
+              <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3">
+                <div className="font-mono text-[10px] uppercase text-[#64748B]">Webhook</div>
+                <div className="mt-1 font-mono text-xs font-bold text-emerald-700">
+                  {t.readyBadge}
                 </div>
               </div>
-              <div className="rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3">
-                <div className="font-mono text-[10px] uppercase text-[#94949e]">
-                  Verify Token
-                </div>
+              <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3">
+                <div className="font-mono text-[10px] uppercase text-[#64748B]">Verify Token</div>
                 <div
                   className={`mt-1 font-mono text-xs font-bold ${
-                    webhookStatus?.hasVerifyToken ? 'text-[#22c55e]' : 'text-[#38bdf8]'
+                    webhookStatus?.hasVerifyToken ? 'text-emerald-700' : 'text-sky-700'
                   }`}
                 >
-                  {webhookStatus?.hasVerifyToken ? 'Đã kiểm tra' : 'Tùy chọn (Mở)'}
+                  {webhookStatus?.hasVerifyToken ? 'Configured' : 'Optional'}
                 </div>
               </div>
-              <div className="rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3">
-                <div className="font-mono text-[10px] uppercase text-[#94949e]">
-                  App Secret
-                </div>
+              <div className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3">
+                <div className="font-mono text-[10px] uppercase text-[#64748B]">App Secret</div>
                 <div
                   className={`mt-1 font-mono text-xs font-bold ${
-                    webhookStatus?.hasAppSecret ? 'text-[#22c55e]' : 'text-[#38bdf8]'
+                    webhookStatus?.hasAppSecret ? 'text-emerald-700' : 'text-sky-700'
                   }`}
                 >
-                  {webhookStatus?.hasAppSecret ? 'Đã bảo vệ HMAC' : 'Tùy chọn (Mở)'}
+                  {webhookStatus?.hasAppSecret ? 'HMAC Active' : 'Optional'}
                 </div>
               </div>
             </div>
 
             {/* Webhook Callback URL */}
-            <div className="mb-4 rounded-lg border border-[#27272a] bg-[#0c0c0e] p-4">
-              <label className="mb-1.5 block font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                Callback URL (Dán vào Meta Developers &rarr; Messenger &rarr; Webhooks)
+            <div className="mb-4 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-4">
+              <label className="mb-1.5 block font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                Callback URL (Meta Developers &rarr; Messenger &rarr; Webhooks)
               </label>
               <div className="flex flex-wrap gap-2">
                 <input
@@ -8310,35 +10083,42 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   readOnly
                   value={sharedMessengerWebhookUrl || liveMessengerWebhookUrl}
                   aria-label="Callback URL Messenger Webhook"
-                  className="min-w-[240px] flex-1 rounded-md border border-[#27272a] bg-[#141417] px-3 py-2 font-mono text-[11px] text-[#edeeef]"
+                  className="min-w-[240px] flex-1 rounded-md border border-[#E2E8F0] bg-white px-3 py-2 font-mono text-[11px] text-[#0F172A]"
                 />
                 <button
                   type="button"
                   onClick={() => {
                     const target = sharedMessengerWebhookUrl || liveMessengerWebhookUrl;
                     copyTextSafely(target);
-                    showToast(`Đã sao chép Callback URL: ${target}`);
+                    showToast(`📋 ${target}`);
                   }}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-[#22c55e] px-3.5 py-2 text-xs font-semibold text-[#0c0c0e] hover:opacity-90 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-[#16A34A] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#15803D] cursor-pointer"
                 >
                   <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                  Sao chép URL
+                  {t.copyUrl}
                 </button>
               </div>
               {sharedMessengerWebhookUrl && (
-                <div className="mt-2 rounded border border-[#f59e0b]/40 bg-[#f59e0b]/10 px-3 py-2 text-[11px] leading-relaxed text-[#edeeef]/90">
-                  <strong className="text-[#f59e0b]">Lưu ý quan trọng:</strong> Link <span className="font-mono text-[#edeeef]">ais-dev-...</span> chỉ dùng để bạn xem trước trong trình duyệt. Để Meta Developers gọi Webhook từ bên ngoài, hãy bấm <strong>Share / Publish</strong> ứng dụng và dán URL có đuôi <span className="font-mono text-[#22c55e]">/api/webhooks/messenger</span> ở trên.
+                <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900">
+                  <strong>{uiLang === 'jp' ? 'ご注意:' : 'Lưu ý quan trọng:'}</strong>{' '}
+                  {uiLang === 'jp'
+                    ? 'Meta Developersから呼び出すにはShare / PublishしたURL（/api/webhooks/messenger）をご利用ください。'
+                    : 'Để Meta Developers gọi Webhook từ bên ngoài, hãy dùng URL sau khi Share / Publish có đuôi /api/webhooks/messenger ở trên.'}
                 </div>
               )}
-              <p className="mt-2 text-[11px] leading-relaxed text-[#94949e]">
-                Bật 2 trường đăng ký webhook: <span className="font-mono text-[#edeeef]">messages</span> và <span className="font-mono text-[#edeeef]">messaging_postbacks</span>. Nếu muốn tăng cường bảo mật, bạn có thể đặt thêm <span className="font-mono text-[#edeeef]">FB_VERIFY_TOKEN</span> và <span className="font-mono text-[#edeeef]">FB_APP_SECRET</span> trong Settings &rarr; Secrets (không bắt buộc để nhận tin).
+              <p className="mt-2 text-[11px] leading-relaxed text-[#64748B]">
+                {uiLang === 'jp'
+                  ? 'Webhookイベント：messages、messaging_postbacks を有効にしてください。'
+                  : 'Bật 2 trường đăng ký webhook: messages và messaging_postbacks.'}
               </p>
             </div>
 
             {/* Fanpage Messenger Quick Link */}
-            <div className="mb-4 rounded-lg border border-[#27272a] bg-[#0c0c0e] p-4">
-              <label className="mb-1.5 block font-mono text-[10px] uppercase tracking-wider text-[#94949e]">
-                Liên kết Fanpage Messenger (m.me / Page ID / Facebook URL)
+            <div className="mb-2 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-4">
+              <label className="mb-1.5 block font-mono text-[10px] font-semibold uppercase tracking-wider text-[#64748B]">
+                {uiLang === 'jp'
+                  ? 'Fanpage Messengerリンク (m.me / Page ID)'
+                  : 'Liên kết Fanpage Messenger (m.me / Page ID / Facebook URL)'}
               </label>
               <div className="flex flex-wrap gap-2">
                 <input
@@ -8346,14 +10126,14 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   value={fbPageLinkDraft}
                   onChange={(e) => setFbPageLinkDraft(e.target.value)}
                   placeholder="VD: tokuteicareer hoặc https://m.me/tokuteicareer"
-                  className="min-w-[220px] flex-1 rounded-md border border-[#27272a] bg-[#141417] px-3 py-2 text-xs text-[#edeeef] placeholder:text-[#94949e] focus:border-[#38bdf8] focus:outline-none"
+                  className="min-w-[220px] flex-1 rounded-md border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] placeholder:text-[#94A3B8] focus:border-sky-500 focus:outline-none"
                 />
                 <button
                   type="button"
                   onClick={handleSaveFbPageLink}
-                  className="rounded-md bg-[#38bdf8] px-3.5 py-2 text-xs font-semibold text-[#0c0c0e] hover:opacity-90 cursor-pointer"
+                  className="rounded-md bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-sky-700 cursor-pointer"
                 >
-                  Lưu liên kết
+                  {t.save}
                 </button>
               </div>
 
@@ -8363,52 +10143,56 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     href={fbPageLink}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 rounded-md border border-[#38bdf8]/50 bg-[#38bdf8]/10 px-3 py-1.5 text-[11px] font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-3 py-1.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-100"
                   >
                     <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
-                    Mở Messenger Fanpage
+                    {t.openPage}
                   </a>
                 )}
                 <a
                   href="https://business.facebook.com/latest/inbox/all"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-md border border-[#27272a] bg-[#141417] px-3 py-1.5 text-[11px] font-semibold text-[#edeeef] hover:border-[#38bdf8]"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-[11px] font-semibold text-[#0F172A] hover:border-sky-300"
                 >
                   <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-                  Mở Meta Business Inbox
+                  Meta Business Inbox
                 </a>
                 <a
                   href="https://developers.facebook.com/apps/"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-md border border-[#27272a] bg-[#141417] px-3 py-1.5 text-[11px] font-semibold text-[#edeeef] hover:border-[#22c55e]"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-[11px] font-semibold text-[#0F172A] hover:border-emerald-300"
                 >
                   <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-                  Mở Meta Developers
+                  Meta Developers
                 </a>
                 <button
                   type="button"
                   disabled={isTestingWebhook}
                   onClick={() => void handleTestMessengerWebhook()}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-[#38bdf8]/50 bg-[#38bdf8]/10 px-3 py-1.5 text-[11px] font-semibold text-[#38bdf8] hover:bg-[#38bdf8]/20 disabled:opacity-50 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-3 py-1.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50 cursor-pointer"
                 >
                   <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
                   {isTestingWebhook
-                    ? 'Đang thử nghiệm...'
+                    ? uiLang === 'jp'
+                      ? 'テスト中...'
+                      : 'Đang thử nghiệm...'
+                    : uiLang === 'jp'
+                    ? '受信テスト'
                     : 'Thử nhận tin nhắn Messenger'}
                 </button>
                 <button
                   type="button"
                   disabled={isRefreshingSql}
                   onClick={() => void refreshCrmFromSql(false)}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-[#27272a] bg-[#141417] px-3 py-1.5 text-[11px] font-semibold text-[#22c55e] hover:border-[#22c55e] disabled:opacity-50 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-[11px] font-semibold text-emerald-700 hover:border-emerald-300 disabled:opacity-50 cursor-pointer"
                 >
                   <RefreshCw
                     className={`h-3.5 w-3.5 ${isRefreshingSql ? 'animate-spin' : ''}`}
                     aria-hidden="true"
                   />
-                  Đồng bộ tin nhắn mới
+                  {uiLang === 'jp' ? '新着メッセージを同期' : 'Đồng bộ tin nhắn mới'}
                 </button>
               </div>
             </div>
@@ -8418,25 +10202,27 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 9: KYUJIN RAW TEXT PASTE MODAL */}
       {kyujinRawModalOpen && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 p-4">
-          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#27272a] bg-[#141417] p-5 text-xs text-[#edeeef] shadow-2xl">
-            <div className="mb-3 flex items-center justify-between border-b border-[#27272a] pb-2.5">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-xs text-[#0F172A] shadow-2xl">
+            <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
               <div className="flex items-center gap-2">
-                <FileText className="h-4 w-4 text-[#22c55e]" aria-hidden="true" />
-                <h3 className="text-base font-bold text-[#edeeef]">
-                  Dán văn bản Phiếu tuyển dụng (Kyujin / Baito / Nhiều đơn cùng lúc)
+                <FileText className="h-4 w-4 text-[#16A34A]" aria-hidden="true" />
+                <h3 className="text-base font-bold text-[#0F172A]">
+                  {t.kyujin.pasteTextBtn}
                 </h3>
               </div>
               <button
                 type="button"
                 onClick={() => setKyujinRawModalOpen(false)}
-                className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1 text-xs font-semibold text-[#94949e] hover:text-[#edeeef] cursor-pointer"
+                className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1 text-xs font-semibold text-[#475569] hover:text-[#0F172A] cursor-pointer"
               >
-                Đóng
+                {t.close}
               </button>
             </div>
-            <p className="mb-2 text-[11px] text-[#94949e]">
-              Dán nội dung tuyển dụng (tiếng Nhật hoặc tiếng Việt, hỗ trợ nhiều đơn cách nhau bằng dòng trống hoặc ---). Hệ thống tự chia Lĩnh vực, Ngành nghề, Hình thức (Tokutei / Chính thức / Baito), lương giờ hoặc thực nhận và yêu cầu kinh nghiệm.
+            <p className="mb-2 text-[11px] text-[#64748B]">
+              {uiLang === 'jp'
+                ? '求人情報テキストを貼り付けてください（複数件は空行または---で区切り）。業種・雇用形態・給与・経験要件を自動抽出します。'
+                : 'Dán nội dung tuyển dụng (tiếng Nhật hoặc tiếng Việt, hỗ trợ nhiều đơn cách nhau bằng dòng trống hoặc ---). Hệ thống tự chia Lĩnh vực, Ngành nghề, Hình thức, lương và yêu cầu kinh nghiệm.'}
             </p>
             <textarea
               rows={9}
@@ -8445,23 +10231,27 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               placeholder={
                 'VD:\nCông ty ABC - Tuyển Baito Konbini tại Tokyo (Shinjuku)\n時給: 1,250円 / 交通費支給 / 週3〜5日OK / N3 / 未経験OK...'
               }
-              className="w-full rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3 text-xs text-[#edeeef] placeholder:text-[#94949e] focus:border-[#22c55e] focus:outline-none"
+              className="w-full rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3 text-xs text-[#0F172A] placeholder:text-[#94A3B8] focus:border-[#16A34A] focus:bg-white focus:outline-none"
             />
             <div className="mt-4 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setKyujinRawModalOpen(false)}
-                className="rounded-md border border-[#27272a] px-4 py-2 font-semibold text-[#94949e] hover:text-[#edeeef] cursor-pointer"
+                className="rounded-md border border-[#E2E8F0] px-4 py-2 font-semibold text-[#64748B] hover:text-[#0F172A] cursor-pointer"
               >
-                Hủy
+                {t.cancel}
               </button>
               <button
                 type="button"
                 disabled={isImportingKyujin}
                 onClick={() => void handleImportKyujinRawText()}
-                className="rounded-md bg-[#22c55e] px-4 py-2 font-semibold text-[#0c0c0e] hover:opacity-90 disabled:opacity-60 cursor-pointer"
+                className="rounded-md bg-[#16A34A] px-4 py-2 font-semibold text-white hover:bg-[#15803D] disabled:opacity-60 cursor-pointer"
               >
-                {isImportingKyujin ? 'Đang bóc tách...' : 'Bóc tách & Nhập Kyujin'}
+                {isImportingKyujin
+                  ? t.kyujin.analyzing
+                  : uiLang === 'jp'
+                  ? '抽出して求人登録'
+                  : 'Bóc tách & Nhập Kyujin'}
               </button>
             </div>
           </div>
@@ -8470,18 +10260,21 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 10: RESIGNATION PAPERWORK REMINDER MODAL (FROM RIGHT SIDEBAR) */}
       {resignationReminderModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 p-4">
-          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#27272a] bg-[#141417] p-5 text-xs text-[#edeeef] shadow-2xl">
-            <div className="mb-3 flex items-center justify-between border-b border-[#27272a] pb-2.5">
-              <h3 className="text-base font-bold text-[#edeeef]">
-                Nhắn nhắc nộp giấy tờ nghỉ việc: {resignationReminderModal.fullName}
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-xs text-[#0F172A] shadow-2xl">
+            <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
+              <h3 className="text-base font-bold text-[#0F172A]">
+                {uiLang === 'jp'
+                  ? '退職者書類提出リマインド文'
+                  : 'Nhắn nhắc nộp giấy tờ nghỉ việc'}
+                : {getResignationDisplayName(resignationReminderModal, uiLang)}
               </h3>
               <button
                 type="button"
                 onClick={() => setResignationReminderModal(null)}
-                className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1 text-xs font-semibold text-[#94949e] hover:text-[#edeeef] cursor-pointer"
+                className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1 text-xs font-semibold text-[#475569] hover:text-[#0F172A] cursor-pointer"
               >
-                Đóng
+                {t.close}
               </button>
             </div>
             {(() => {
@@ -8490,28 +10283,26 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                 <div className="space-y-3">
                   {[
                     { label: 'Tiếng Việt', text: msgs.vi },
-                    { label: 'Tiếng Nhật (日本語)', text: msgs.jp },
+                    { label: '日本語 (Tiếng Nhật)', text: msgs.jp },
                   ].map((item) => (
                     <div
                       key={item.label}
-                      className="rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3"
+                      className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3"
                     >
                       <div className="mb-1.5 flex items-center justify-between">
-                        <span className="font-semibold text-[#22c55e]">{item.label}</span>
+                        <span className="font-semibold text-emerald-700">{item.label}</span>
                         <button
                           type="button"
                           onClick={async () => {
                             const ok = await copyTextSafely(item.text);
-                            showToast(
-                              ok ? `📋 Đã sao chép tin nhắn (${item.label})` : '⚠️ Sao chép thất bại'
-                            );
+                            showToast(ok ? `📋 ${item.label}` : t.toasts.copyFailed);
                           }}
-                          className="rounded bg-[#22c55e] px-3 py-1 text-[11px] font-semibold text-[#0c0c0e] hover:opacity-90 cursor-pointer"
+                          className="rounded bg-[#16A34A] px-3 py-1 text-[11px] font-semibold text-white hover:bg-[#15803D] cursor-pointer"
                         >
-                          Sao chép
+                          {t.copy}
                         </button>
                       </div>
-                      <pre className="whitespace-pre-wrap font-sans leading-relaxed text-[#edeeef]/90">
+                      <pre className="whitespace-pre-wrap font-sans leading-relaxed text-[#334155]">
                         {item.text}
                       </pre>
                     </div>
@@ -8525,50 +10316,56 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {/* MODAL 11: 1-CLICK GOOGLE CALENDAR TEMPLATE LINK MODAL (ZERO OAUTH / 403) */}
       {resignationCalendarModal && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 p-4">
-          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#27272a] bg-[#141417] p-5 text-xs text-[#edeeef] shadow-2xl">
-            <div className="mb-3 flex items-center justify-between border-b border-[#27272a] pb-2.5">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px] p-4">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#E2E8F0] bg-white p-5 text-xs text-[#0F172A] shadow-2xl">
+            <div className="mb-3 flex items-center justify-between border-b border-[#E2E8F0] pb-2.5">
               <div className="flex items-center gap-2">
-                <Calendar className="h-4 w-4 text-[#38bdf8]" aria-hidden="true" />
-                <h3 className="text-base font-bold text-[#edeeef]">
+                <Calendar className="h-4 w-4 text-sky-600" aria-hidden="true" />
+                <h3 className="text-base font-bold text-[#0F172A]">
                   {resignationCalendarModal.mode === 'bulk'
-                    ? `Lưu ${resignationCalendarModal.items.length} hạn giấy tờ lên Google Calendar (1-click)`
-                    : 'Lưu hạn nộp giấy tờ lên Google Calendar (1-click)'}
+                    ? uiLang === 'jp'
+                      ? `${resignationCalendarModal.items.length}件の書類提出期限をGoogleカレンダーへ保存`
+                      : `Lưu ${resignationCalendarModal.items.length} hạn giấy tờ lên Google Calendar`
+                    : uiLang === 'jp'
+                    ? '書類提出期限をGoogleカレンダーへ保存'
+                    : 'Lưu hạn nộp giấy tờ lên Google Calendar'}
                 </h3>
               </div>
               <button
                 type="button"
                 onClick={() => setResignationCalendarModal(null)}
-                className="rounded-md border border-[#27272a] bg-[#0c0c0e] px-3 py-1 text-xs font-semibold text-[#94949e] hover:text-[#edeeef] cursor-pointer"
+                className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1 text-xs font-semibold text-[#475569] hover:text-[#0F172A] cursor-pointer"
               >
-                Đóng
+                {t.close}
               </button>
             </div>
 
-            <p className="mb-3 text-[11px] leading-relaxed text-[#94949e]">
-              Đã điền sẵn tiêu đề, ngày <strong className="text-[#edeeef]">Hạn nộp giấy tờ (trước ngày nghỉ việc 3 ngày)</strong> theo múi giờ <strong className="text-[#edeeef]">Asia/Tokyo</strong> và hướng dẫn nhắc nhở trước <strong className="text-[#22c55e]">1 ngày &amp; 2 giờ</strong>. Bấm nút bên dưới để lưu trực tiếp vào Google Calendar mà không bị lỗi OAuth/403.
+            <p className="mb-3 text-[11px] leading-relaxed text-[#64748B]">
+              {uiLang === 'jp'
+                ? 'タイトルと退職日3日前の提出期限（Asia/Tokyo）が入力済みです。下のボタンから直接Googleカレンダーへ登録できます。'
+                : 'Đã điền sẵn tiêu đề và ngày Hạn nộp giấy tờ (trước ngày nghỉ việc 3 ngày) theo múi giờ Asia/Tokyo. Bấm nút bên dưới để lưu trực tiếp vào Google Calendar.'}
             </p>
 
             <div className="space-y-2.5">
               {resignationCalendarModal.items.map(({ record, draft, templateUrl }) => (
                 <div
                   key={record.id}
-                  className="flex flex-col gap-2 rounded-lg border border-[#27272a] bg-[#0c0c0e] p-3 sm:flex-row sm:items-center sm:justify-between"
+                  className="flex flex-col gap-2 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-3 sm:flex-row sm:items-center sm:justify-between"
                 >
                   <div className="min-w-0 space-y-0.5">
-                    <div className="font-semibold text-[#edeeef]">{draft.eventTitle}</div>
-                    <div className="text-[11px] text-[#f59e0b]">
-                      Ngày hẹn trên lịch: {draft.dateIso} (09:00–10:00 JST) · Công ty cũ: {record.previousCompany}
+                    <div className="font-semibold text-[#0F172A]">{draft.eventTitle}</div>
+                    <div className="text-[11px] text-amber-800">
+                      {draft.dateIso} (09:00–10:00 JST) · {record.previousCompany}
                     </div>
                   </div>
                   <a
                     href={templateUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md bg-[#22c55e] px-3.5 py-2 text-[11px] font-semibold text-[#0c0c0e] hover:opacity-90 whitespace-nowrap"
+                    className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md bg-[#16A34A] px-3.5 py-2 text-[11px] font-semibold text-white hover:bg-[#15803D] whitespace-nowrap"
                   >
                     <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-                    Lưu lên Google Calendar
+                    {t.syncCalendarBtn}
                   </a>
                 </div>
               ))}
@@ -8580,19 +10377,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       {/* Prominent Corner Reminder Toast Banner for Urgent Resignation Deadlines (<= 3 days / overdue) */}
       {urgentResignationAlerts.length > 0 &&
         dismissedUrgentBannerSig !== urgentResignationSignature && (
-          <div className="fixed bottom-20 right-5 z-40 w-[calc(100vw-2.5rem)] max-w-sm rounded-xl border border-rose-500/60 bg-[#181115]/95 p-3.5 text-xs text-zinc-100 shadow-2xl backdrop-blur">
+          <div className="fixed bottom-20 right-5 z-40 w-[calc(100vw-2.5rem)] max-w-sm rounded-xl border border-rose-200 bg-white p-3.5 text-xs text-[#0F172A] shadow-xl">
             <div className="mb-2 flex items-start justify-between gap-2">
-              <div className="flex items-center gap-1.5 font-bold text-rose-300">
-                <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" aria-hidden="true" />
-                <span>
-                  Nhắc hạn giấy tờ nghỉ việc ({urgentResignationAlerts.length} hồ sơ)
-                </span>
+              <div className="flex items-center gap-1.5 font-bold text-rose-700">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600" aria-hidden="true" />
+                <span>{t.cornerResigTitle(urgentResignationAlerts.length)}</span>
               </div>
               <button
                 type="button"
-                aria-label="Đóng thông báo nhắc hạn"
+                aria-label={t.close}
                 onClick={() => setDismissedUrgentBannerSig(urgentResignationSignature)}
-                className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-white cursor-pointer"
+                className="rounded p-0.5 text-[#64748B] hover:bg-slate-100 hover:text-[#0F172A] cursor-pointer"
               >
                 <X className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
@@ -8601,10 +10396,12 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               {urgentResignationAlerts.slice(0, 3).map(({ record, assessment }) => (
                 <div
                   key={`toast_resig_${record.id}`}
-                  className="rounded border border-rose-500/30 bg-rose-950/30 px-2.5 py-1.5"
+                  className="rounded border border-rose-200 bg-rose-50 px-2.5 py-1.5"
                 >
-                  <div className="font-semibold text-zinc-100">{record.fullName}</div>
-                  <div className="text-[11px] text-rose-300">{assessment.label}</div>
+                  <div className="font-semibold text-[#0F172A]">
+                    {getResignationDisplayName(record, uiLang)}
+                  </div>
+                  <div className="text-[11px] text-rose-700">{assessment.label}</div>
                 </div>
               ))}
             </div>
@@ -8615,18 +10412,18 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   setViewMode('workspace');
                   setActiveTab('resignation');
                 }}
-                className="flex-1 rounded-md bg-rose-500 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-rose-400 cursor-pointer"
+                className="flex-1 rounded-md bg-rose-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-rose-700 cursor-pointer"
               >
-                Xem &amp; xử lý ngay
+                {t.viewAndHandleNow}
               </button>
               {notificationPermission === 'default' && (
                 <button
                   type="button"
                   onClick={() => void handleRequestBrowserNotifications()}
-                  className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/25 cursor-pointer"
+                  className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
                 >
                   <Bell className="h-3 w-3" aria-hidden="true" />
-                  Bật thông báo
+                  {t.enableNotify}
                 </button>
               )}
             </div>
@@ -8638,12 +10435,342 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         <button
           type="button"
           onClick={() => setChatbotOpen(true)}
-          aria-label="Mở Trợ lý AI Gemini"
-          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-full bg-[#22c55e] px-4 py-3 text-xs font-semibold text-[#0c0c0e] shadow-lg transition-transform hover:scale-[1.02] hover:opacity-95 cursor-pointer"
+          aria-label={t.aiAssistant}
+          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-full bg-[#16A34A] px-4 py-3 text-xs font-semibold text-white shadow-lg transition-transform hover:scale-[1.02] hover:bg-[#15803D] cursor-pointer"
         >
           <MessageSquareText className="h-4 w-4" aria-hidden="true" />
-          Trợ lý AI
+          {t.aiAssistant}
         </button>
+      )}
+
+      {/* RIGHT SIDE DRAWER FOR CANDIDATE DETAILS */}
+      {(() => {
+        const drawerPerson = drawerCandidateId
+          ? allPeopleCombined.find((p) => p.id === drawerCandidateId) || null
+          : null;
+        if (!drawerPerson) return null;
+        const drawerDisplayName = getCandidateDisplayName(drawerPerson, uiLang);
+        return (
+          <div className="fixed inset-0 z-50 flex justify-end bg-slate-900/35 backdrop-blur-[1px]">
+            <div
+              className="flex-1"
+              onClick={() => setDrawerCandidateId(null)}
+              aria-hidden="true"
+            />
+            <aside className="relative flex h-full w-full max-w-3xl flex-col border-l border-[#E2E8F0] bg-[#F8FAFC] shadow-2xl">
+              <div className="flex items-center justify-between gap-3 border-b border-[#E2E8F0] bg-white px-5 py-3.5">
+                <div className="min-w-0">
+                  <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+                    {t.drawer.title}
+                  </div>
+                  <h3 className="truncate text-base font-bold text-[#0F172A]">
+                    {drawerDisplayName}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDrawerCandidateId(null)}
+                  className="inline-flex items-center gap-1 rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC] hover:text-[#0F172A] cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                  {t.close}
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+                {renderCandidateCard(drawerPerson)}
+              </div>
+            </aside>
+          </div>
+        );
+      })()}
+
+      {/* MODAL: NAITEI / VISA SCHEDULE PROMPT */}
+      {naiteiPromptModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-md rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-xl">
+            <h3 className="text-base font-bold text-[#0F172A]">{t.naiteiModal.title}</h3>
+            <p className="mt-1 text-xs leading-relaxed text-[#64748B]">
+              {naiteiPromptModal.candidateName} ({naiteiPromptModal.targetStatus}) —{' '}
+              {t.naiteiModal.subtitle}
+            </p>
+            <div className="mt-4 space-y-3 text-xs">
+              <div>
+                <label className="mb-1 block font-semibold text-[#0F172A]">
+                  {t.naiteiModal.companyLabel}
+                </label>
+                <input
+                  type="text"
+                  placeholder={t.naiteiModal.companyPlaceholder}
+                  value={naiteiPromptModal.naiteiCompany}
+                  onChange={(e) =>
+                    setNaiteiPromptModal({
+                      ...naiteiPromptModal,
+                      naiteiCompany: e.target.value,
+                    })
+                  }
+                  className="w-full rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-[#0F172A] focus:border-[#16A34A] focus:bg-white focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block font-semibold text-[#0F172A]">
+                  {t.naiteiModal.joinDateLabel}
+                </label>
+                <input
+                  type="date"
+                  value={naiteiPromptModal.expectedJoinDate}
+                  onChange={(e) =>
+                    setNaiteiPromptModal({
+                      ...naiteiPromptModal,
+                      expectedJoinDate: e.target.value,
+                    })
+                  }
+                  className="w-full rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-[#0F172A] tabular-nums focus:border-[#16A34A] focus:bg-white focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block font-semibold text-[#0F172A]">
+                  {t.naiteiModal.visaDeadlineLabel}
+                </label>
+                <input
+                  type="date"
+                  value={naiteiPromptModal.visaSubmissionDeadline}
+                  onChange={(e) =>
+                    setNaiteiPromptModal({
+                      ...naiteiPromptModal,
+                      visaSubmissionDeadline: e.target.value,
+                    })
+                  }
+                  className="w-full rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-[#0F172A] tabular-nums focus:border-[#16A34A] focus:bg-white focus:outline-none"
+                />
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setNaiteiPromptModal(null)}
+                className="rounded-md border border-[#E2E8F0] bg-white px-3.5 py-2 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC] cursor-pointer"
+              >
+                {t.cancel}
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmNaiteiPrompt}
+                className="rounded-md bg-[#16A34A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#15803D] cursor-pointer"
+              >
+                {t.naiteiModal.confirmBtn}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: JITAI / FAIL REASON PROMPT */}
+      {jitaiPromptModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-md rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-xl">
+            <h3 className="text-base font-bold text-[#0F172A]">{t.jitaiModal.title}</h3>
+            <p className="mt-1 text-xs leading-relaxed text-[#64748B]">
+              {jitaiPromptModal.candidateName} ({jitaiPromptModal.targetStatus}) —{' '}
+              {t.jitaiModal.subtitle}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {t.jitaiModal.quickReasons.map((quickText) => (
+                <button
+                  key={quickText}
+                  type="button"
+                  onClick={() =>
+                    setJitaiPromptModal({
+                      ...jitaiPromptModal,
+                      reason: quickText,
+                    })
+                  }
+                  className="rounded border border-[#E2E8F0] bg-[#F8FAFC] px-2 py-1 text-[11px] font-medium text-[#334155] hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 cursor-pointer"
+                >
+                  {quickText}
+                </button>
+              ))}
+            </div>
+            <div className="mt-3 text-xs">
+              <label className="mb-1 block font-semibold text-[#0F172A]">
+                {t.jitaiModal.reasonLabel}
+              </label>
+              <textarea
+                rows={3}
+                placeholder={t.jitaiModal.placeholder}
+                value={jitaiPromptModal.reason}
+                onChange={(e) =>
+                  setJitaiPromptModal({
+                    ...jitaiPromptModal,
+                    reason: e.target.value,
+                  })
+                }
+                className="w-full rounded-md border border-[#E2E8F0] bg-[#F8FAFC] p-2.5 text-[#0F172A] focus:border-rose-400 focus:bg-white focus:outline-none"
+              />
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setJitaiPromptModal(null)}
+                className="rounded-md border border-[#E2E8F0] bg-white px-3.5 py-2 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC] cursor-pointer"
+              >
+                {t.cancel}
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmJitaiPrompt}
+                className="rounded-md bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-700 cursor-pointer"
+              >
+                {t.jitaiModal.confirmBtn}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: KYUJIN CONDITION & NG EDITOR */}
+      {kyujinConditionModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-md rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-xl">
+            <h3 className="text-base font-bold text-[#0F172A]">
+              {kyujinConditionModal.companyName} — {t.kyujinConds.editNgBtn}
+            </h3>
+            <div className="mt-4 space-y-3 text-xs">
+              <div>
+                <label className="mb-1 block font-semibold text-[#0F172A]">
+                  {uiLang === 'jp'
+                    ? 'NG国籍（カンマ区切り・例: ネパール, ミャンマー）'
+                    : 'Quốc tịch NG (cách nhau bằng dấu phẩy, VD: ネパール, ミャンマー)'}
+                </label>
+                <input
+                  type="text"
+                  placeholder="ネパール, インドネシア"
+                  value={kyujinConditionModal.excludedNationalitiesText}
+                  onChange={(e) =>
+                    setKyujinConditionModal({
+                      ...kyujinConditionModal,
+                      excludedNationalitiesText: e.target.value,
+                    })
+                  }
+                  className="w-full rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-[#0F172A] focus:border-[#16A34A] focus:bg-white focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block font-semibold text-[#0F172A]">
+                  {uiLang === 'jp' ? 'NG性別' : 'Giới tính NG'}
+                </label>
+                <div className="flex flex-wrap gap-3">
+                  {(['男性', '女性'] as const).map((g) => {
+                    const checked = kyujinConditionModal.excludedGenders.includes(g);
+                    return (
+                      <label key={g} className="inline-flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const next = e.target.checked
+                              ? Array.from(new Set([...kyujinConditionModal.excludedGenders, g]))
+                              : kyujinConditionModal.excludedGenders.filter((x) => x !== g);
+                            setKyujinConditionModal({
+                              ...kyujinConditionModal,
+                              excludedGenders: next,
+                            });
+                          }}
+                        />
+                        <span className="font-medium text-[#0F172A]">{g}NG</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-4 pt-1">
+                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={kyujinConditionModal.requiresInJapan}
+                    onChange={(e) =>
+                      setKyujinConditionModal({
+                        ...kyujinConditionModal,
+                        requiresInJapan: e.target.checked,
+                      })
+                    }
+                  />
+                  <span className="font-medium text-[#0F172A]">
+                    {uiLang === 'jp'
+                      ? '日本国内在住限定（海外NG）'
+                      : 'Chỉ tuyển trong nước Nhật (海外NG)'}
+                  </span>
+                </label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={kyujinConditionModal.requiresTokutei}
+                    onChange={(e) =>
+                      setKyujinConditionModal({
+                        ...kyujinConditionModal,
+                        requiresTokutei: e.target.checked,
+                      })
+                    }
+                  />
+                  <span className="font-medium text-[#0F172A]">
+                    {uiLang === 'jp' ? '特定技能必須' : 'Yêu cầu Tokutei (特定技能)'}
+                  </span>
+                </label>
+              </div>
+
+              <div>
+                <label className="mb-1 block font-semibold text-[#0F172A]">
+                  {t.kyujinConds.requiredLabel}
+                </label>
+                <input
+                  type="text"
+                  value={kyujinConditionModal.extraRequiredText}
+                  onChange={(e) =>
+                    setKyujinConditionModal({
+                      ...kyujinConditionModal,
+                      extraRequiredText: e.target.value,
+                    })
+                  }
+                  className="w-full rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-[#0F172A] focus:border-[#16A34A] focus:bg-white focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block font-semibold text-[#0F172A]">
+                  {t.kyujinConds.ngLabel}
+                </label>
+                <input
+                  type="text"
+                  value={kyujinConditionModal.extraNgText}
+                  onChange={(e) =>
+                    setKyujinConditionModal({
+                      ...kyujinConditionModal,
+                      extraNgText: e.target.value,
+                    })
+                  }
+                  className="w-full rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-[#0F172A] focus:border-rose-400 focus:bg-white focus:outline-none"
+                />
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setKyujinConditionModal(null)}
+                className="rounded-md border border-[#E2E8F0] bg-white px-3.5 py-2 text-xs font-semibold text-[#475569] hover:bg-[#F8FAFC] cursor-pointer"
+              >
+                {t.cancel}
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveKyujinConditions}
+                className="rounded-md bg-[#16A34A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#15803D] cursor-pointer"
+              >
+                {t.save}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Multi-turn Gemini Chatbot Drawer */}
@@ -8655,6 +10782,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         isSignedIn={authStatus === 'signed_in'}
         crmSummary={crmSummaryForAi}
         onCopySuccess={(msg) => showToast(msg)}
+        lang={uiLang}
       />
     </div>
   );
