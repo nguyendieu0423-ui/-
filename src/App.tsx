@@ -84,6 +84,7 @@ import {
   classifyProposedSubTab,
   cleanupAndReclassifyCandidates,
   copyTextSafely,
+  deduplicateAndNormalizeKyujins,
   deduplicateCandidatesUnion,
   detectEmploymentTypeFromText,
   detectIndustryFromText,
@@ -113,6 +114,7 @@ import {
   normalizeBonusInfo,
   normalizeCandidateNationality,
   normalizeHousingDisplay,
+  normalizeKyujinCompanyName,
   normalizeKyujinItem,
   parseBackupCsvToCandidates,
   parseChatIntoUpdates,
@@ -121,6 +123,7 @@ import {
   parseRawKyujinTextFallback,
   recognizeCandidateImageWithTesseract,
   sanitizeJobDescriptionForCandidate,
+  stripKyujinPdfNoise,
 } from './utils/crmHelpers';
 import {
   compressSavedRirekishoInCandidates,
@@ -201,13 +204,13 @@ function readFallbackKyujins(): KyujinCompany[] {
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map(normalizeKyujinItem);
+        return deduplicateAndNormalizeKyujins(parsed);
       }
     }
   } catch {
     // ignore storage parse errors
   }
-  return INITIAL_KYUJINS.map(normalizeKyujinItem);
+  return deduplicateAndNormalizeKyujins(INITIAL_KYUJINS);
 }
 
 function readFallbackPtPartners(): PtPartner[] {
@@ -1660,7 +1663,7 @@ export default function App() {
           }
           setKyujins(
             Array.isArray(data.kyujins)
-              ? data.kyujins.map(normalizeKyujinItem)
+              ? deduplicateAndNormalizeKyujins(data.kyujins)
               : []
           );
           setPtPartners(Array.isArray(data.ptPartners) ? data.ptPartners : []);
@@ -4251,6 +4254,10 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       setCandidates(res.candidates);
       setSchoolStudents(res.schoolStudents);
     }
+    const dedupedKyujins = deduplicateAndNormalizeKyujins(kyujins);
+    if (JSON.stringify(dedupedKyujins) !== JSON.stringify(kyujins)) {
+      setKyujins(dedupedKyujins);
+    }
     try {
       localStorage.setItem(CHANNEL_CLEANUP_VERSION_KEY, 'done');
     } catch {
@@ -4690,21 +4697,27 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       setKyujins((prev) => {
         const updated = [...prev];
         extractedEntries.forEach((entry) => {
+          const normalizedIncomingName =
+            normalizeKyujinCompanyName(entry.companyName) || '新規取込企業';
+          const incomingNameKey = normalizedIncomingName
+            .replace(/[\s　]+/g, '')
+            .toLowerCase();
           const existingIdx = updated.findIndex(
             (c) =>
-              String(c.companyName || '').replace(/\s+/g, '') ===
-              String(entry.companyName || '').replace(/\s+/g, '')
+              normalizeKyujinCompanyName(c.companyName)
+                .replace(/[\s　]+/g, '')
+                .toLowerCase() === incomingNameKey
           );
           if (existingIdx >= 0) {
             const target = updated[existingIdx];
             const existingSlots = [...(target.areaBreakdown || [])];
-            const incomingCode = String(entry.slot.jobCode || '').trim();
+            const incomingCode = stripKyujinPdfNoise(String(entry.slot.jobCode || '')).trim();
             const matchingSlotIdx =
               incomingCode && !/^新規枠$/i.test(incomingCode)
                 ? existingSlots.findIndex(
                     (sl) =>
                       sl.slotId === entry.slot.slotId ||
-                      (String(sl.jobCode || '').trim() === incomingCode &&
+                      (stripKyujinPdfNoise(String(sl.jobCode || '')).trim() === incomingCode &&
                         (sl.salaryManuallyEdited ||
                           sl.manualProtectedFields?.includes('salary')))
                   )
@@ -4733,13 +4746,14 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
             updated[existingIdx] = normalizeKyujinItem({
               ...target,
+              companyName: normalizedIncomingName,
               areaBreakdown: existingSlots,
             });
           } else {
             updated.unshift(
               normalizeKyujinItem({
                 id: `kj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                companyName: entry.companyName,
+                companyName: normalizedIncomingName,
                 sector: entry.sector || entry.slot.sector,
                 industry: entry.industry,
                 employmentType: entry.employmentType || entry.slot.employmentType,
@@ -4749,7 +4763,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             );
           }
         });
-        return updated;
+        return deduplicateAndNormalizeKyujins(updated);
       });
     },
     []
@@ -4834,10 +4848,12 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         existingNgConditions: strArr('ngConditions'),
       });
 
+      const cleanCompName =
+        normalizeKyujinCompanyName(str('companyName') || fallbackComp) || '新規取込企業';
+      const cleanedJobCode = stripKyujinPdfNoise(derivedCode) || derivedCode;
+
       return {
-        companyName: (str('companyName') || fallbackComp || '新規取込企業')
-          .replace(/\s*代表者.*$/, '')
-          .trim(),
+        companyName: cleanCompName,
         sector,
         industry,
         employmentType,
@@ -4847,30 +4863,30 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           sector,
           industry,
           employmentType,
-          jobCode: derivedCode,
-          area: cleanArea || '勤務地要確認',
-          shiftTime: shiftLabel,
+          jobCode: cleanedJobCode,
+          area: stripKyujinPdfNoise(cleanArea) || '勤務地要確認',
+          shiftTime: stripKyujinPdfNoise(shiftLabel),
           shiftType: str('shiftType') || detectKyujinShiftType(shiftLabel, cleanDesc),
-          holidays: str('holidays'),
-          overtimeHours: str('overtimeHours'),
+          holidays: stripKyujinPdfNoise(str('holidays')),
+          overtimeHours: stripKyujinPdfNoise(str('overtimeHours')),
           salary: resolvedSalary,
           nightShiftAllowance: str('nightShiftAllowance'),
           estimatedNetSalary: str('estimatedNetSalary'),
           annualSalary: str('annualSalary'),
           hourlyWage: resolvedHourlyWage,
-          commuteAllowance: str('commuteAllowance'),
+          commuteAllowance: stripKyujinPdfNoise(str('commuteAllowance')),
           shiftsPerWeek: str('shiftsPerWeek'),
           bonus: bonusNorm.bonus,
-          bonusDetail: bonusNorm.bonusDetail,
+          bonusDetail: stripKyujinPdfNoise(bonusNorm.bonusDetail),
           minJlpt: normalizedJlpt,
           housingSupport: normalizeHousingDisplay(str('housingSupport')),
           recruitmentStatus: '募集中',
           recruitCount: str('recruitCount'),
-          interviewProcess: str('interviewProcess'),
-          specialBenefits: str('specialBenefits'),
+          interviewProcess: stripKyujinPdfNoise(str('interviewProcess')),
+          specialBenefits: stripKyujinPdfNoise(str('specialBenefits')),
           careQualification: str('careQualification'),
           experienceRequirement: str('experienceRequirement'),
-          experienceDetail: str('experienceDetail'),
+          experienceDetail: stripKyujinPdfNoise(str('experienceDetail')),
           jobDescription: cleanDesc,
           excludedNationalities: conds.excludedNationalities,
           excludedGenders: conds.excludedGenders,

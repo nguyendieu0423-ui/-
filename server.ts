@@ -94,8 +94,8 @@ const KYUJIN_EXTRACTION_PROMPT = `あなたは日本の人材紹介会社（特�
 添付されたPDF・画像（複数ページ含む）またはテキストデータを確認し、求人票が複数含まれる場合や、1つの求人票に複数の施設・勤務先・店舗一覧表がある場合は、必ず施設・勤務地・枠ごとに1件ずつ分離してJSON配列で返してください。
 
 【重要ルール：分野・雇用形態（Baito含む）・待遇の精密分類】
-1. companyName: 「企業名・法人名・店舗運営会社名」（後ろの「代表者〜」は削除）。
-2. jobCode: 「案件番号」または「施設名・店舗名」。
+1. companyName: 「企業名・法人名・店舗運営会社名」のみ（「|」「｜」などの表罫線、後ろの「代表者〜」「更新日〜」「--- Trang 〜」は絶対に削除すること）。
+2. jobCode: 「案件番号」または「施設名・店舗名」（「|」「｜」や代表者名を含めない）。
 3. sector (Lĩnh vực lớn): 以下の8分類から最も適切なものを1つ選択:
    - "Kaigo / Điều dưỡng"
    - "Thực phẩm & Dịch vụ ăn uống"
@@ -131,7 +131,7 @@ const KYUJIN_EXTRACTION_PROMPT = `あなたは日本の人材紹介会社（特�
 24. bonus / bonusDetail: 「賞与あり」「賞与なし」「要確認」＋詳細（例: 年2回 計2.5ヶ月分）。重要：チェックボックス☑・✔・●や「無」「賞与なし」「退職金・賞与無」が指定されている場合は、選択肢に「賞与あり」の文字が並んでいても必ず「賞与なし」を優先すること。
 25. experienceRequirement: 必ず「Không yêu cầu kinh nghiệm (未経験OK)」「Yêu cầu có kinh nghiệm (経験者必須)」「Ưu tiên có kinh nghiệm (経験者歓迎)」の3分類から選択。
 26. experienceDetail: 必須資格や歓迎経験の詳細。
-27. jobDescription: 業務内容（業務の特徴・具体的な作業内容を省略せず詳しく記載。フォーム定型文や社内メモは除去）。
+27. jobDescription: 業務内容（業務の特徴・具体的な作業内容を省略せず詳しく記載。フォーム定型文、「--- Trang X/Y ---」「求人票」「更新日」「代表者」「法人番号」、表の「|」「｜」記号、社内メモは完全に除去すること）。
 28. excludedNationalities: 採用不可・NGと明記された国籍の配列（例: ["ネパール"], ["ベトナム"]）。記載がなければ []。
 29. excludedGenders: 採用不可・NGと明記された性別の配列（例: "男性NG" や "女性限定" なら ["男性"]、"女性NG" や "男性限定" なら ["女性"]）。記載がなければ []。
 30. requiresInJapan: "国内在住限定"、"日本在住のみ"、"在日限定"、"海外NG"、"海外招へい 不可" などの記載があれば true、それ以外は false。
@@ -929,8 +929,40 @@ async function startServer() {
         typeof rawText === 'string' && rawText.trim() && rawItems.length <= 1
           ? extractKyujinSalaryInfo(rawText)
           : null;
+      const stripServerKyujinNoise = (raw: string): string =>
+        raw
+          .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
+          .replace(/-{2,}\s*(?:Trang|Page|ページ)\s*\d+(?:\s*\/\s*\d+)?\s*-{2,}/gi, ' ')
+          .replace(/(?:^|[\s\n|｜])(?:Trang|Page|ページ)\s*\d+\s*\/\s*\d+(?=$|[\s\n|｜])/gim, ' ')
+          .replace(/(?:^|[\s\n|｜])求人票(?:\s*[（(][^）)\n]{0,24}[）)])?(?=$|[\s\n|｜])/g, ' ')
+          .replace(
+            /(?:^|[\s\n|｜])(?:更新日|作成日|公開日|掲載日)\s*[|｜:：]\s*(?:\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2}日?|[令和平成]\d+年\d{1,2}月\d{1,2}日?|[^\s|｜\n]{1,24})/gi,
+            ' '
+          )
+          .replace(
+            /(?:^|[\s\n|｜。、])(?:代表(?:者|取締役|社員)?(?:名|氏名)?|理事長|施設長|管理者(?:名)?|採用担当(?:者)?|担当(?:者)?(?:名|氏名)?)\s*(?:[|｜:：]\s*|\s+)[^\s|｜\n。、]{1,16}(?:[ \u3000]+(?!(?:主な|仕事|業務|勤務|施設|介護|給与|待遇|休日|時間|募集|応募|資格|経験|福利|手当|詳細|特徴|条件|内容))[^\s|｜\n。、]{1,14})?/gi,
+            ' '
+          )
+          .replace(/(?:^|[\s\n|｜])(?:法人番号|事業所番号|求人番号)\s*[|｜:：]\s*[A-Za-z0-9\-ー]{3,24}/gi, ' ')
+          .replace(/[|｜]\s*[-:]{2,}(?:\s*[|｜]\s*[-:]{2,})*\s*[|｜]?/g, ' ')
+          .replace(/\s*[|｜]+\s*/g, ' ')
+          .replace(/[ \t]{2,}/g, ' ')
+          .trim();
+
+      const cleanServerCompanyName = (raw: unknown): string =>
+        stripServerKyujinNoise(String(raw ?? ''))
+          .replace(/^\s*(?:企業名|会社名|法人名|運営会社)\s*[:：]\s*/i, '')
+          .replace(
+            /(?:^|\s)(?:代表(?:者|取締役|社員)?|理事長|施設長|更新日|作成日|法人番号)(?=\s*[:：]|\s+\S|$).*$/i,
+            ''
+          )
+          .replace(/^[\s|｜\-–—•●■◆:：]+|[\s|｜\-–—•●■◆:：]+$/g, '')
+          .trim();
+
       const cleanKyujinField = (v: unknown): string =>
-        sanitizeExcelFloatText(stripKyujinFormBoilerplate(String(v ?? '').trim()));
+        stripServerKyujinNoise(
+          sanitizeExcelFloatText(stripKyujinFormBoilerplate(String(v ?? '').trim()))
+        );
 
       const normalizedItems = rawItems.map((item) => {
         const aiSal = cleanKyujinField(item.salary);
@@ -985,7 +1017,7 @@ async function startServer() {
 
         return {
           ...item,
-          companyName: cleanKyujinField(item.companyName),
+          companyName: cleanServerCompanyName(item.companyName),
           jobCode: cleanKyujinField(item.jobCode),
           area: cleanKyujinField(item.area),
           shiftTime: cleanKyujinField(item.shiftTime),

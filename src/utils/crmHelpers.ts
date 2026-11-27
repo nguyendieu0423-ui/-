@@ -1219,7 +1219,7 @@ export const migrateLegacyData = (rawData: unknown): MigratedLegacyDataResult =>
       return {
         candidates: [],
         schoolStudents: [],
-        kyujins: validObjects.map((item) => normalizeKyujinItem(item)),
+        kyujins: deduplicateAndNormalizeKyujins(validObjects.map((item) => normalizeKyujinItem(item))),
         ptPartners: [],
         resignations: [],
         hasCandidatesSection: false,
@@ -1359,15 +1359,16 @@ export const migrateLegacyData = (rawData: unknown): MigratedLegacyDataResult =>
     });
   }
 
-  const normalizedKyujins: KyujinCompany[] = foundKyujins
+  const normalizedKyujinsRaw: KyujinCompany[] = foundKyujins
     ? foundKyujins.arr
         .filter((item) => isRecordObject(item))
         .map((item) => normalizeKyujinItem(item))
     : [];
+  const normalizedKyujins: KyujinCompany[] = deduplicateAndNormalizeKyujins(normalizedKyujinsRaw);
 
-  if (foundKyujins && normalizedKyujins.length < foundKyujins.arr.length) {
+  if (foundKyujins && normalizedKyujinsRaw.length < foundKyujins.arr.length) {
     warnings.push(
-      `Đã bỏ qua ${foundKyujins.arr.length - normalizedKyujins.length} bản ghi tin tuyển dụng null/lỗi.`
+      `Đã bỏ qua ${foundKyujins.arr.length - normalizedKyujinsRaw.length} bản ghi tin tuyển dụng null/lỗi.`
     );
   }
 
@@ -2425,9 +2426,67 @@ export const buildAnonymousJobPostText = (
   const empType = slot.employmentType || comp.employmentType || 'Tokutei Ginou (特定技能)';
   const sector = slot.sector || comp.sector || detectSectorFromIndustryOrText(slot.industry || comp.industry);
   const industry = slot.industry || comp.industry || '特定技能';
-  const publicArea = formatPublicArea(slot.area) || slot.area || 'Nhật Bản';
+  const sanitizedAreaInput = anonymizeKyujinTextForCandidate(
+    stripKyujinPdfNoise(slot.area || ''),
+    comp,
+    slot,
+    lang,
+    { maskCompanyWith: '', maskFacilityWith: '' }
+  )
+    .replace(/^[（(\s、・:：]+|[）)\s、・:：]+$/g, '')
+    .trim();
+  const rawPublicArea =
+    formatPublicArea(sanitizedAreaInput) || sanitizedAreaInput || (lang === 'jp' ? '日本国内' : 'Nhật Bản');
+  const publicArea = anonymizeKyujinTextForCandidate(rawPublicArea, comp, slot, lang);
   const isBaito = /baito|アルバイト|パート/i.test(empType);
-  const cleanJobDesc = sanitizeJobDescriptionForCandidate(slot.jobDescription || '');
+  const cleanJobDesc = anonymizeKyujinTextForCandidate(
+    sanitizeJobDescriptionForCandidate(slot.jobDescription || ''),
+    comp,
+    slot,
+    lang
+  );
+  const cleanExpDetail = anonymizeKyujinTextForCandidate(
+    stripKyujinPdfNoise(slot.experienceDetail || ''),
+    comp,
+    slot,
+    lang
+  );
+  const cleanInterview = anonymizeKyujinTextForCandidate(
+    stripKyujinPdfNoise(slot.interviewProcess || ''),
+    comp,
+    slot,
+    lang
+  );
+  const cleanBenefits = anonymizeKyujinTextForCandidate(
+    stripKyujinPdfNoise(slot.specialBenefits || ''),
+    comp,
+    slot,
+    lang
+  );
+  const cleanBonusDetail = anonymizeKyujinTextForCandidate(
+    stripKyujinPdfNoise(slot.bonusDetail || ''),
+    comp,
+    slot,
+    lang
+  );
+  const cleanShiftTime = anonymizeKyujinTextForCandidate(
+    stripKyujinPdfNoise(slot.shiftTime || ''),
+    comp,
+    slot,
+    lang
+  );
+  const cleanHolidays = anonymizeKyujinTextForCandidate(
+    stripKyujinPdfNoise(slot.holidays || ''),
+    comp,
+    slot,
+    lang
+  );
+  const cleanOvertime = anonymizeKyujinTextForCandidate(
+    stripKyujinPdfNoise(slot.overtimeHours || ''),
+    comp,
+    slot,
+    lang
+  );
   const expText =
     slot.experienceRequirement ||
     (slot.careQualification && slot.careQualification !== '不問'
@@ -2439,10 +2498,10 @@ export const buildAnonymousJobPostText = (
       : 'Không yêu cầu kinh nghiệm (未経験OK)');
 
   const shiftLineParts = [
-    slot.shiftTime || '',
+    cleanShiftTime,
     slot.shiftType ? `(${slot.shiftType})` : '',
-    slot.holidays ? (lang === 'jp' ? `休日：${slot.holidays}` : `Ngày nghỉ: ${slot.holidays}`) : '',
-    slot.overtimeHours ? (lang === 'jp' ? `残業：${slot.overtimeHours}` : `Tăng ca: ${slot.overtimeHours}`) : '',
+    cleanHolidays ? (lang === 'jp' ? `休日：${cleanHolidays}` : `Ngày nghỉ: ${cleanHolidays}`) : '',
+    cleanOvertime ? (lang === 'jp' ? `残業：${cleanOvertime}` : `Tăng ca: ${cleanOvertime}`) : '',
   ].filter(Boolean);
 
   if (lang === 'jp') {
@@ -2460,31 +2519,33 @@ export const buildAnonymousJobPostText = (
           slot.estimatedNetSalary ? `手取り目安：${slot.estimatedNetSalary}` : '',
           slot.annualSalary ? `想定年収：${slot.annualSalary}` : '',
           slot.bonus === '賞与あり'
-            ? `賞与あり${slot.bonusDetail ? `（${slot.bonusDetail}）` : ''}`
+            ? `賞与あり${cleanBonusDetail ? `（${cleanBonusDetail}）` : ''}`
             : slot.bonus === '賞与なし'
-            ? `賞与なし${slot.bonusDetail ? `（${slot.bonusDetail}）` : ''}`
+            ? `賞与なし${cleanBonusDetail ? `（${cleanBonusDetail}）` : ''}`
             : '',
         ]
           .filter(Boolean)
           .join(' ／ ');
 
-    return [
+    const assembledJp = [
       `【求人案内（匿名）】`,
       `・雇用形態：${empType}`,
       `・分野 / 職種：${sector} - ${industry}${slot.facilityType ? `（${slot.facilityType}）` : ''}`,
       `・勤務地：${publicArea}`,
       slot.recruitCount ? `・募集人数：${slot.recruitCount}` : '',
       `・仕事内容：${cleanJobDesc || '面接時に詳しくご説明いたします。'}`,
-      `・経験要件：${expText}${slot.experienceDetail ? `（${slot.experienceDetail}）` : ''}`,
+      `・経験要件：${expText}${cleanExpDetail ? `（${cleanExpDetail}）` : ''}`,
       `・日本語レベル：${slot.minJlpt || '応相談'}`,
       `・給与・待遇：${compPay}`,
       `・住宅・寮：${slot.housingSupport || '要確認'}`,
       shiftLineParts.length > 0 ? `・勤務時間・休日：${shiftLineParts.join(' / ')}` : '',
-      slot.interviewProcess ? `・選考方法：${slot.interviewProcess}` : '',
-      slot.specialBenefits ? `・特別手当・福利厚生：${slot.specialBenefits}` : '',
+      cleanInterview ? `・選考方法：${cleanInterview}` : '',
+      cleanBenefits ? `・特別手当・福利厚生：${cleanBenefits}` : '',
     ]
       .filter(Boolean)
       .join('\n');
+
+    return anonymizeKyujinTextForCandidate(assembledJp, comp, slot, 'jp');
   }
 
   const paySummaryVi = isBaito
@@ -2494,38 +2555,40 @@ export const buildAnonymousJobPostText = (
         slot.shiftsPerWeek ? `Số ca/tuần: ${slot.shiftsPerWeek}` : '',
       ]
         .filter(Boolean)
-        .join(' | ')
+        .join(' / ')
     : [
         `Lương cơ bản / Tổng nhận: ${slot.salary || 'Trao đổi khi phỏng vấn'}`,
         slot.nightShiftAllowance ? `Phụ cấp ca đêm: ${slot.nightShiftAllowance}` : '',
         slot.estimatedNetSalary ? `Thực nhận ước tính (手取り): ${slot.estimatedNetSalary}` : '',
         slot.annualSalary ? `Thu nhập năm (年収): ${slot.annualSalary}` : '',
         slot.bonus === '賞与あり'
-          ? `Thưởng: Có${slot.bonusDetail ? ` (${slot.bonusDetail})` : ''}`
+          ? `Thưởng: Có${cleanBonusDetail ? ` (${cleanBonusDetail})` : ''}`
           : slot.bonus === '賞与なし'
-          ? `Thưởng: Không${slot.bonusDetail ? ` (${slot.bonusDetail})` : ''}`
+          ? `Thưởng: Không${cleanBonusDetail ? ` (${cleanBonusDetail})` : ''}`
           : '',
       ]
         .filter(Boolean)
-        .join(' | ');
+        .join(' / ');
 
-  return [
+  const assembledVi = [
     `📢 [ĐƠN TUYỂN DỤNG ẨN DANH]`,
     `• Hình thức: ${empType}`,
     `• Lĩnh vực - Ngành nghề: ${sector} - ${industry}${slot.facilityType ? ` (${slot.facilityType})` : ''}`,
     `• Khu vực làm việc: ${publicArea}`,
     slot.recruitCount ? `• Số lượng tuyển: ${slot.recruitCount}` : '',
     `• Nội dung công việc: ${cleanJobDesc || 'Trao đổi chi tiết khi Mendan'}`,
-    `• Yêu cầu kinh nghiệm: ${expText}${slot.experienceDetail ? ` — ${slot.experienceDetail}` : ''}`,
+    `• Yêu cầu kinh nghiệm: ${expText}${cleanExpDetail ? ` — ${cleanExpDetail}` : ''}`,
     `• Trình độ tiếng Nhật: ${slot.minJlpt || 'Trao đổi thêm'}`,
     `• Chế độ lương thưởng: ${paySummaryVi}`,
     `• Nhà ở / KTX: ${slot.housingSupport || 'Xác nhận khi phỏng vấn'}`,
-    shiftLineParts.length > 0 ? `• Thời gian & Ngày nghỉ: ${shiftLineParts.join(' | ')}` : '',
-    slot.interviewProcess ? `• Quy trình phỏng vấn: ${slot.interviewProcess}` : '',
-    slot.specialBenefits ? `• Phúc lợi đặc biệt: ${slot.specialBenefits}` : '',
+    shiftLineParts.length > 0 ? `• Thời gian & Ngày nghỉ: ${shiftLineParts.join(' / ')}` : '',
+    cleanInterview ? `• Quy trình phỏng vấn: ${cleanInterview}` : '',
+    cleanBenefits ? `• Phúc lợi đặc biệt: ${cleanBenefits}` : '',
   ]
     .filter(Boolean)
     .join('\n');
+
+  return anonymizeKyujinTextForCandidate(assembledVi, comp, slot, 'vi');
 };
 
 // ============================================================================
@@ -2783,18 +2846,319 @@ export const normalizeHousingDisplay = (val = ''): string => {
   return s;
 };
 
+const CORPORATE_LEGAL_ENTITY_SOURCE =
+  '(?:株式会社|有限会社|合同会社|合資会社|合名会社|医療法人(?:社団|財団)?|社会福祉法人|一般社団法人|一般財団法人|公益社団法人|公益財団法人|特定非営利活動法人|NPO法人|事業協同組合|協同組合|学校法人|宗教法人|（株）|\\(株\\)|（有）|\\(有\\)|（同）|\\(同\\)|Co\\.,?\\s*Ltd\\.?|Ltd\\.?|Inc\\.?|Corp\\.?|Corporation|K\\.K\\.)';
+
+const GENERIC_COMPANY_WORDS = new Set([
+  '会社',
+  '企業',
+  '法人',
+  '介護',
+  '福祉',
+  '運輸',
+  '運送',
+  '物流',
+  '食品',
+  '飲食',
+  '外食',
+  '宿泊',
+  'ホテル',
+  '建設',
+  '製造',
+  '工業',
+  '産業',
+  '施設',
+  '事業所',
+  'サービス',
+  'ジャパン',
+  'japan',
+  'グループ',
+  'ホールディングス',
+  'コーポレーション',
+  'サポート',
+  'センター',
+  'システム',
+]);
+
+const GENERIC_JOBCODE_RX =
+  /^(?:JOB[-_]?\d+|新規枠|案件\d*|[A-Z]{1,4}[-_]?\d{1,6}|\d+|(?:東京|大阪|京都|北海|愛知|埼玉|千葉|神奈川|兵庫|福岡|広島|静岡|宮城|茨城|栃木|群馬|新潟|長野|岐阜|三重|滋賀|奈良|和歌山|岡山|山口|香川|愛媛|熊本|大分|鹿児島|沖縄)[都道府県]?)$/i;
+
+const escapeRegexLiteral = (str: string): string =>
+  str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+export const normalizeKyujinCompanyName = (rawName = ''): string => {
+  let s = String(rawName || '')
+    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
+    .replace(/-{2,}\s*(?:Trang|Page|ページ)\s*\d+(?:\s*\/\s*\d+)?\s*-{2,}/gi, ' ')
+    .replace(/^\s*(?:企業名|会社名|法人名|運営会社|法人名称)\s*[|｜:：]\s*/i, '')
+    .replace(/[（(]\s*(?:代表(?:者|取締役)?|更新日|法人番号)[^)）]*[)）]/gi, '')
+    .replace(/[|｜]+/g, ' ')
+    .replace(
+      /(?:^|\s)(?:代表(?:者|取締役|社員)?(?:名|氏名)?|理事長|施設長|更新日|作成日|法人番号|事業所番号|求人番号)(?=\s*[|｜:：]|\s+\S|$).*$/i,
+      ''
+    )
+    .replace(/\s*代表者.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  s = s.replace(/^[\s|｜\-–—•●■◆:：]+|[\s|｜\-–—•●■◆:：]+$/g, '').trim();
+  return s;
+};
+
+export const stripKyujinPdfNoise = (rawText = ''): string => {
+  const base = stripKyujinFormBoilerplate(sanitizeExcelFloatText(String(rawText || '')));
+  if (!base) return '';
+  return base
+    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
+    .replace(/-{2,}\s*(?:Trang|Page|ページ)\s*\d+(?:\s*\/\s*\d+)?\s*-{2,}/gi, ' ')
+    .replace(/(?:^|[\s\n|｜])(?:Trang|Page|ページ)\s*\d+\s*\/\s*\d+(?=$|[\s\n|｜])/gim, ' ')
+    .replace(
+      /(?:^|[\s\n|｜])求人票(?:\s*[（(][^）)\n]{0,24}[）)])?(?=$|[\s\n|｜])/g,
+      ' '
+    )
+    .replace(
+      /(?:^|[\s\n|｜])(?:更新日|作成日|公開日|掲載日)\s*[|｜:：]\s*(?:\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2}日?|[令和平成]\d+年\d{1,2}月\d{1,2}日?|[^\s|｜\n]{1,24})/gi,
+      ' '
+    )
+    .replace(
+      /[（(\[【]\s*(?:代表(?:者|取締役|社員)?(?:名|氏名)?|理事長|施設長|管理者(?:名)?|採用担当(?:者)?|担当(?:者)?(?:名|氏名)?)\s*(?:[|｜:：]\s*|\s+)[^)）】\]]{1,36}[)）】\]]/gi,
+      ' '
+    )
+    .replace(
+      /(?:^|[\s\n|｜。、,，])(?:代表(?:者|取締役|社員)?(?:名|氏名)?|理事長|施設長|管理者(?:名)?|採用担当(?:者)?|担当(?:者)?(?:名|氏名)?)\s*(?:[|｜:：]\s*|\s+)[^\s|｜\n。、)）】\]]{1,16}(?:[ \u3000]+(?!(?:主な|仕事|業務|勤務|施設|介護|給与|待遇|休日|時間|募集|応募|資格|経験|福利|手当|詳細|特徴|条件|内容|食事|入浴|排泄|送迎|調理|配送|清掃|製造|接客))[^\s|｜\n。、)）】\]]{1,14})?/gi,
+      ' '
+    )
+    .replace(/[（(]\s*[)）]/g, ' ')
+    .replace(
+      /(?:^|[\s\n|｜])(?:法人番号|事業所番号|求人番号|会社番号)\s*[|｜:：]\s*[A-Za-z0-9\-ー]{3,24}/gi,
+      ' '
+    )
+    .replace(
+      /(?:^|[\s\n|｜])(?:本社所在地|企業所在地|所在地)\s*[|｜:：]\s*〒?\s*\d{3}-\d{4}[^\n|｜]{0,60}/gi,
+      ' '
+    )
+    .replace(/[|｜]\s*[-:]{2,}(?:\s*[|｜]\s*[-:]{2,})*\s*[|｜]?/g, ' ')
+    .replace(/\s*[|｜]+\s*/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+};
+
 export const sanitizeJobDescriptionForCandidate = (desc = ''): string => {
-  const cleaned = stripKyujinFormBoilerplate(sanitizeExcelFloatText(String(desc || '')));
+  const cleaned = stripKyujinPdfNoise(String(desc || ''));
   return cleaned
     .replace(/(?:家賃控除額は実費を上回る[^\n。]*[。\n]?)/g, '')
     .replace(/(?:写真掲載許可(?:をもらう|取得)[^\n。]*[。\n]?)/g, '')
     .replace(/(?:[※＊]\s*(?:社内用|内部メモ|担当メモ|紹介手数料)[^\n。]*[。\n]?)/g, '')
     .replace(/(?:[（(](?:社内メモ|担当用|内部用)[^)）]*[)）])/g, '')
     .replace(
-      /(?:受動喫煙|試用期間|選考方法|応募書類|担当者|連絡先|電話番号|FAX|メールアドレス|所在地|法人番号)[\s\S]*$/i,
+      /(?:受動喫煙|試用期間|選考方法|応募書類|連絡先|電話番号|FAX|メールアドレス)[\s\S]*$/i,
       ''
     )
     .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const stripCorporateAffixes = (name: string): string => {
+  const leading = new RegExp(`^${CORPORATE_LEGAL_ENTITY_SOURCE}\\s*`, 'i');
+  const trailing = new RegExp(`\\s*${CORPORATE_LEGAL_ENTITY_SOURCE}$`, 'i');
+  let out = name.trim();
+  for (let i = 0; i < 3; i++) {
+    out = out.replace(leading, '').replace(trailing, '').trim();
+  }
+  return out;
+};
+
+export const anonymizeKyujinTextForCandidate = (
+  rawText = '',
+  comp?: Partial<KyujinCompany> | null,
+  slot?: Partial<KyujinSlot> | null,
+  lang: 'vi' | 'jp' = 'vi',
+  options?: { maskCompanyWith?: string; maskFacilityWith?: string }
+): string => {
+  let out = stripKyujinPdfNoise(String(rawText || ''));
+  if (!out) return '';
+
+  const isKaigo = /介護|Kaigo|Điều dưỡng/i.test(
+    `${slot?.sector || ''} ${comp?.sector || ''} ${slot?.industry || ''} ${comp?.industry || ''}`
+  );
+  const companyMask =
+    options?.maskCompanyWith !== undefined
+      ? options.maskCompanyWith
+      : lang === 'jp'
+      ? '当該企業'
+      : 'Doanh nghiệp đối tác';
+  const facilityMask =
+    options?.maskFacilityWith !== undefined
+      ? options.maskFacilityWith
+      : lang === 'jp'
+      ? isKaigo
+        ? '当施設'
+        : '当事業所'
+      : 'Cơ sở tuyển dụng';
+
+  const facilityTokens = new Set<string>();
+  const companyTokens = new Set<string>();
+  const stripPersonalNames = new Set<string>();
+
+  const normComp = normalizeKyujinCompanyName(comp?.companyName || '');
+  const isPlaceholderComp =
+    !normComp ||
+    /^(?:新規取込企業|名称未設定企業|企業名要確認|新規企業)$/i.test(normComp);
+
+  if (!isPlaceholderComp) {
+    companyTokens.add(normComp);
+    const noSpaceComp = normComp.replace(/\s+/g, '');
+    if (noSpaceComp.length >= 2) companyTokens.add(noSpaceComp);
+
+    const root = stripCorporateAffixes(normComp);
+    if (root.length >= 2 && !GENERIC_COMPANY_WORDS.has(root.toLowerCase())) {
+      companyTokens.add(root);
+      const rootNoSpace = root.replace(/\s+/g, '');
+      if (rootNoSpace.length >= 2) companyTokens.add(rootNoSpace);
+    }
+
+    const parenAliasMatches = normComp.match(/[（(]([^)）]{2,28})[)）]/g) || [];
+    for (const m of parenAliasMatches) {
+      const inner = m
+        .slice(1, -1)
+        .replace(/^(?:旧|別名|通称|屋号)[：:\s]*/, '')
+        .trim();
+      const innerRoot = stripCorporateAffixes(inner);
+      if (inner.length >= 2 && !GENERIC_COMPANY_WORDS.has(inner.toLowerCase())) {
+        companyTokens.add(inner);
+      }
+      if (innerRoot.length >= 2 && !GENERIC_COMPANY_WORDS.has(innerRoot.toLowerCase())) {
+        companyTokens.add(innerRoot);
+      }
+    }
+  }
+
+  const rawJobCode = stripKyujinPdfNoise(String(slot?.jobCode || '')).trim();
+  if (rawJobCode.length >= 3 && !GENERIC_JOBCODE_RX.test(rawJobCode)) {
+    facilityTokens.add(rawJobCode);
+    const strippedCode = rawJobCode.replace(/\s*[（(][^）)]*[）)]\s*$/, '').trim();
+    if (strippedCode.length >= 3 && !GENERIC_JOBCODE_RX.test(strippedCode)) {
+      facilityTokens.add(strippedCode);
+    }
+  }
+
+  const compAny = (comp || {}) as Record<string, unknown>;
+  for (const key of [
+    'representative',
+    'representativeName',
+    'repName',
+    'ceo',
+    'contactPerson',
+    'pic',
+    '代表者',
+    '担当者',
+  ]) {
+    const val = String(compAny[key] ?? '').trim();
+    if (val.length >= 2) stripPersonalNames.add(val);
+  }
+
+  // 1) Strip explicit personal/representative names, phone, email, URLs
+  for (const name of Array.from(stripPersonalNames).sort((a, b) => b.length - a.length)) {
+    out = out.replace(new RegExp(escapeRegexLiteral(name), 'g'), '');
+  }
+  out = out
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '')
+    .replace(/https?:\/\/[^\s)）\]>]+/gi, '')
+    .replace(/(?:TEL|FAX|電話|連絡先)?\s*[：:｜|]?\s*0\d{1,4}[-\s(（]\d{1,4}[-\s)）]\d{3,4}/gi, '')
+    .replace(/〒\s*\d{3}-?\d{4}/g, '');
+
+  // 2) Replace labeled facility / company lines first
+  out = out.replace(
+    /(?:施設名|事業所名|店舗名|勤務先名|就業場所名|施設名称)\s*[|｜:：]\s*[^\n、。()（）|｜]{2,40}/g,
+    facilityMask
+  );
+  out = out.replace(
+    /(?:企業名|会社名|法人名|運営会社|法人名称)\s*[|｜:：]\s*[^\n、。()（）|｜]{2,40}/g,
+    companyMask
+  );
+
+  // 3) Replace explicit full company names (with legal affixes) & facility tokens BEFORE root brand patterns
+  for (const tok of Array.from(companyTokens)
+    .filter((t) => new RegExp(CORPORATE_LEGAL_ENTITY_SOURCE, 'i').test(t))
+    .sort((a, b) => b.length - a.length)) {
+    const isAscii = /[A-Za-z]/.test(tok);
+    const tokCore = isAscii
+      ? escapeRegexLiteral(tok).replace(/\\ /g, '\\s*')
+      : escapeRegexLiteral(tok);
+    const flags = isAscii ? 'gi' : 'g';
+    out = out.replace(new RegExp(tokCore, flags), companyMask);
+  }
+
+  for (const tok of Array.from(facilityTokens).sort((a, b) => b.length - a.length)) {
+    const pattern = /[A-Za-z]/.test(tok)
+      ? escapeRegexLiteral(tok).replace(/\\ /g, '\\s*')
+      : escapeRegexLiteral(tok);
+    const flags = /[A-Za-z]/.test(tok) ? 'gi' : 'g';
+    out = out.replace(new RegExp(pattern, flags), facilityMask);
+  }
+
+  // 4) Replace known proprietary facility brand patterns (without swallowing generic nouns like 規定/面接/業務)
+  const stopBranchWordLookahead =
+    '(?!(?:規定|面接|選考|業務|社員|採用|求人|仕事|研修|説明|案内|での|にて|では|への|との|とは|から|まで|より|など))';
+  out = out.replace(
+    new RegExp(
+      `(?:ソエルガーデン|ケアパートナー)(?:[\\s・-]*(?:${stopBranchWordLookahead}[一-龠ァ-ヶーA-Za-z0-9・ー\\-]){1,10}(?:店|支店|支社|営業所|事業所|工場|倉庫|センター|施設|ホーム|館|院|園)|[\\s・-]*(?:上尾|大宮|川口|越谷|草加|所沢|川越|熊谷|さいたま|春日部|船橋|柏|松戸|市川|千葉|八王子|立川|町田|横浜|川崎|相模原|厚木|名古屋|豊田|大阪|堺|神戸|姫路|京都|福岡|北九州|札幌|仙台|広島|岡山))?`,
+      'g'
+    ),
+    facilityMask
+  );
+  out = out.replace(
+    /[ァ-ヶー]{3,}(?:ガーデン|ヴィラ|テラス|レジデンス|ヒルズ|パレス|メゾン|ハイツ)(?:[一-龠ァ-ヶーA-Za-z0-9・ー\-]{1,10}(?:店|施設|ホーム|館|園))?/g,
+    facilityMask
+  );
+
+  // 5) Replace remaining company root tokens + optional branch suffixes (longest first)
+  const branchSuffixSrc =
+    '(?:[\\s・-]*(?:[一-龠ァ-ヶーA-Za-z0-9]{1,10}(?:店|支店|支社|営業所|事業所|工場|倉庫|センター|施設|ホーム|館|院|園)|上尾|大宮|川口|越谷|草加|所沢|川越|熊谷|さいたま|春日部|船橋|柏|松戸|市川|千葉|八王子|立川|町田|横浜|川崎|相模原|厚木|名古屋|豊田|大阪|堺|神戸|姫路|京都|福岡|北九州|札幌|仙台|広島|岡山))?';
+
+  for (const tok of Array.from(companyTokens)
+    .filter((t) => !new RegExp(CORPORATE_LEGAL_ENTITY_SOURCE, 'i').test(t))
+    .sort((a, b) => b.length - a.length)) {
+    const isAscii = /[A-Za-z]/.test(tok);
+    const tokCore = isAscii
+      ? escapeRegexLiteral(tok).replace(/\\ /g, '\\s*')
+      : escapeRegexLiteral(tok);
+    const flags = isAscii ? 'gi' : 'g';
+    out = out.replace(new RegExp(`${tokCore}${branchSuffixSrc}`, flags), (matched) =>
+      matched.length > tok.length ? facilityMask : companyMask
+    );
+  }
+
+  // 6) Catch any remaining corporate entity names mentioned anywhere in the text
+  out = out.replace(
+    /(?:株式会社|有限会社|合同会社|合資会社|合名会社|医療法人(?:社団|財団)?|社会福祉法人|一般社団法人|一般財団法人|協同組合|NPO法人)\s*(?:(?!(?:との|での|への|から|まで|より|など|にお|によ|にて|では|が|を|に|は|で|と|の))[一-龠ァ-ヶーA-Za-z0-9・ー&＆]){2,22}/g,
+    companyMask
+  );
+  out = out.replace(
+    /[一-龠ァ-ヶーA-Za-z0-9・ー&＆]{2,22}\s*(?:株式会社|有限会社|合同会社|合資会社|（株）|\(株\)|（有）|\(有\))/g,
+    companyMask
+  );
+
+  // 7) Tidy redundant adjacent masks or stray punctuation
+  if (companyMask) {
+    const escC = escapeRegexLiteral(companyMask);
+    out = out.replace(new RegExp(`${escC}(?:[\\s・/]+${escC})+`, 'g'), companyMask);
+  }
+  if (facilityMask) {
+    const escF = escapeRegexLiteral(facilityMask);
+    out = out.replace(new RegExp(`${escF}(?:[\\s・/]+${escF})+`, 'g'), facilityMask);
+  }
+  if (companyMask && facilityMask) {
+    const escC = escapeRegexLiteral(companyMask);
+    const escF = escapeRegexLiteral(facilityMask);
+    out = out
+      .replace(new RegExp(`${escC}\\s*[（(]\\s*${escF}\\s*[）)]`, 'g'), facilityMask)
+      .replace(new RegExp(`${escC}\\s*[・/]\\s*${escF}`, 'g'), facilityMask);
+  }
+
+  return out
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 };
 
@@ -2827,21 +3191,19 @@ export const normalizeKyujinItem = (
   const comp = rawCompObj as Partial<KyujinCompany> & Partial<KyujinSlot> & Record<string, unknown>;
 
   const compId = cleanLegacyStr(comp.id) || `kj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const compCompanyName = cleanLegacyStr(comp.companyName ?? comp.company_name ?? comp.name);
+  const compCompanyName = normalizeKyujinCompanyName(
+    cleanLegacyStr(comp.companyName ?? comp.company_name ?? comp.name)
+  );
   const compSector = cleanLegacyStr(comp.sector);
   const compIndustry = cleanLegacyStr(comp.industry);
   const compEmploymentType = cleanLegacyStr(comp.employmentType ?? comp.employment_type);
-  const compJobCode = cleanLegacyStr(comp.jobCode ?? comp.job_code);
-  const compArea = cleanLegacyStr(comp.area);
-  const compShiftTime = sanitizeExcelFloatText(
-    stripKyujinFormBoilerplate(cleanLegacyStr(comp.shiftTime ?? comp.shift_time))
-  );
+  const compJobCode = stripKyujinPdfNoise(cleanLegacyStr(comp.jobCode ?? comp.job_code));
+  const compArea = stripKyujinPdfNoise(cleanLegacyStr(comp.area));
+  const compShiftTime = stripKyujinPdfNoise(cleanLegacyStr(comp.shiftTime ?? comp.shift_time));
   const compShiftType = cleanLegacyStr(comp.shiftType ?? comp.shift_type);
-  const compHolidays = sanitizeExcelFloatText(
-    stripKyujinFormBoilerplate(cleanLegacyStr(comp.holidays))
-  );
-  const compOvertimeHours = sanitizeExcelFloatText(
-    stripKyujinFormBoilerplate(cleanLegacyStr(comp.overtimeHours ?? comp.overtime_hours))
+  const compHolidays = stripKyujinPdfNoise(cleanLegacyStr(comp.holidays));
+  const compOvertimeHours = stripKyujinPdfNoise(
+    cleanLegacyStr(comp.overtimeHours ?? comp.overtime_hours)
   );
   const compSalary = sanitizeExcelFloatText(
     stripKyujinFormBoilerplate(cleanLegacyStr(comp.salary))
@@ -2860,13 +3222,13 @@ export const normalizeKyujinItem = (
   const compHourlyWage = sanitizeExcelFloatText(
     stripKyujinFormBoilerplate(cleanLegacyStr(comp.hourlyWage ?? comp.hourly_wage))
   );
-  const compCommuteAllowance = cleanLegacyStr(
-    comp.commuteAllowance ?? comp.commute_allowance
+  const compCommuteAllowance = stripKyujinPdfNoise(
+    cleanLegacyStr(comp.commuteAllowance ?? comp.commute_allowance)
   );
   const compShiftsPerWeek = cleanLegacyStr(comp.shiftsPerWeek ?? comp.shifts_per_week);
   const compBonus = cleanLegacyStr(comp.bonus);
-  const compBonusDetail = sanitizeExcelFloatText(
-    stripKyujinFormBoilerplate(cleanLegacyStr(comp.bonusDetail ?? comp.bonus_detail))
+  const compBonusDetail = stripKyujinPdfNoise(
+    cleanLegacyStr(comp.bonusDetail ?? comp.bonus_detail)
   );
   const compMinJlpt = cleanLegacyStr(comp.minJlpt ?? comp.min_jlpt);
   const compHousingSupport = cleanLegacyStr(comp.housingSupport ?? comp.housing_support);
@@ -2874,11 +3236,11 @@ export const normalizeKyujinItem = (
     comp.recruitmentStatus ?? comp.recruitment_status
   );
   const compRecruitCount = cleanLegacyStr(comp.recruitCount ?? comp.recruit_count);
-  const compInterviewProcess = cleanLegacyStr(
-    comp.interviewProcess ?? comp.interview_process
+  const compInterviewProcess = stripKyujinPdfNoise(
+    cleanLegacyStr(comp.interviewProcess ?? comp.interview_process)
   );
-  const compSpecialBenefits = sanitizeExcelFloatText(
-    stripKyujinFormBoilerplate(cleanLegacyStr(comp.specialBenefits ?? comp.special_benefits))
+  const compSpecialBenefits = stripKyujinPdfNoise(
+    cleanLegacyStr(comp.specialBenefits ?? comp.special_benefits)
   );
   const compCareQualification = cleanLegacyStr(
     comp.careQualification ?? comp.care_qualification
@@ -2886,8 +3248,8 @@ export const normalizeKyujinItem = (
   const compExperienceRequirement = cleanLegacyStr(
     comp.experienceRequirement ?? comp.experience_requirement
   );
-  const compExperienceDetail = cleanLegacyStr(
-    comp.experienceDetail ?? comp.experience_detail
+  const compExperienceDetail = stripKyujinPdfNoise(
+    cleanLegacyStr(comp.experienceDetail ?? comp.experience_detail)
   );
   const compJobDescription = cleanLegacyStr(
     comp.jobDescription ?? comp.job_description ?? comp.description
@@ -3046,21 +3408,16 @@ export const normalizeKyujinItem = (
       (effectiveHourly ? `時給 ${effectiveHourly}` : '給与要確認');
 
     const slShiftTime =
-      sanitizeExcelFloatText(
-        stripKyujinFormBoilerplate(cleanLegacyStr(sl.shiftTime ?? sl.shift_time))
-      ) || compShiftTime;
+      stripKyujinPdfNoise(cleanLegacyStr(sl.shiftTime ?? sl.shift_time)) || compShiftTime;
     const slShiftType =
       cleanLegacyStr(sl.shiftType ?? sl.shift_type) ||
       compShiftType ||
       detectKyujinShiftType(slShiftTime, `${cleanDesc} ${slJobDescRaw}`);
     const slHolidays =
-      sanitizeExcelFloatText(
-        stripKyujinFormBoilerplate(cleanLegacyStr(sl.holidays))
-      ) || compHolidays;
+      stripKyujinPdfNoise(cleanLegacyStr(sl.holidays)) || compHolidays;
     const slOvertimeHours =
-      sanitizeExcelFloatText(
-        stripKyujinFormBoilerplate(cleanLegacyStr(sl.overtimeHours ?? sl.overtime_hours))
-      ) || compOvertimeHours;
+      stripKyujinPdfNoise(cleanLegacyStr(sl.overtimeHours ?? sl.overtime_hours)) ||
+      compOvertimeHours;
     const slEstNet =
       sanitizeExcelFloatText(
         stripKyujinFormBoilerplate(
@@ -3078,8 +3435,8 @@ export const normalizeKyujinItem = (
       sector: slSector,
       industry: slIndustry,
       employmentType: slEmploymentType,
-      jobCode: cleanLegacyStr(sl.jobCode ?? sl.job_code) || compJobCode,
-      area: cleanLegacyStr(sl.area) || compArea,
+      jobCode: stripKyujinPdfNoise(cleanLegacyStr(sl.jobCode ?? sl.job_code)) || compJobCode,
+      area: stripKyujinPdfNoise(cleanLegacyStr(sl.area)) || compArea,
       shiftTime: slShiftTime,
       shiftType: slShiftType,
       holidays: slHolidays,
@@ -3093,11 +3450,12 @@ export const normalizeKyujinItem = (
       annualSalary: slAnnualSal,
       hourlyWage: effectiveHourly,
       commuteAllowance:
-        cleanLegacyStr(sl.commuteAllowance ?? sl.commute_allowance) || compCommuteAllowance,
+        stripKyujinPdfNoise(cleanLegacyStr(sl.commuteAllowance ?? sl.commute_allowance)) ||
+        compCommuteAllowance,
       shiftsPerWeek:
         cleanLegacyStr(sl.shiftsPerWeek ?? sl.shifts_per_week) || compShiftsPerWeek,
       bonus: bonusNorm.bonus,
-      bonusDetail: bonusNorm.bonusDetail,
+      bonusDetail: stripKyujinPdfNoise(bonusNorm.bonusDetail),
       minJlpt: slotMinJlpt,
       housingSupport: normalizeHousingDisplay(
         cleanLegacyStr(sl.housingSupport ?? sl.housing_support) || compHousingSupport
@@ -3106,15 +3464,15 @@ export const normalizeKyujinItem = (
       recruitCount:
         cleanLegacyStr(sl.recruitCount ?? sl.recruit_count) || compRecruitCount,
       interviewProcess:
-        cleanLegacyStr(sl.interviewProcess ?? sl.interview_process) || compInterviewProcess,
+        stripKyujinPdfNoise(cleanLegacyStr(sl.interviewProcess ?? sl.interview_process)) ||
+        compInterviewProcess,
       specialBenefits:
-        sanitizeExcelFloatText(
-          stripKyujinFormBoilerplate(cleanLegacyStr(sl.specialBenefits ?? sl.special_benefits))
-        ) || compSpecialBenefits,
+        stripKyujinPdfNoise(cleanLegacyStr(sl.specialBenefits ?? sl.special_benefits)) ||
+        compSpecialBenefits,
       careQualification: slCareQual,
       facilityType,
       experienceRequirement: expReq,
-      experienceDetail: slExpDetail,
+      experienceDetail: stripKyujinPdfNoise(slExpDetail),
       jobDescription: cleanDesc,
       excludedNationalities: conds.excludedNationalities,
       excludedGenders: conds.excludedGenders,
@@ -3167,9 +3525,7 @@ export const normalizeKyujinItem = (
 
   return {
     id: compId,
-    companyName: (compCompanyName || '名称未設定企業')
-      .replace(/\s*代表者.*$/, '')
-      .trim(),
+    companyName: normalizeKyujinCompanyName(compCompanyName) || '名称未設定企業',
     sector: primarySector,
     industry: primaryIndustry,
     employmentType: primaryEmpType,
@@ -3186,6 +3542,84 @@ export const normalizeKyujinItem = (
     ngConditions: mergedNgConditions,
     areaBreakdown: normalizedSlots,
   };
+};
+
+export const deduplicateAndNormalizeKyujins = (
+  list: Array<Partial<KyujinCompany> & Record<string, unknown>> | unknown[] = []
+): KyujinCompany[] => {
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const normalizedList = list.map((item) => normalizeKyujinItem(item));
+  const groupedMap = new Map<string, KyujinCompany>();
+
+  for (const comp of normalizedList) {
+    const cleanName = normalizeKyujinCompanyName(comp.companyName) || '名称未設定企業';
+    const key = cleanName.replace(/[\s　]+/g, '').toLowerCase() || comp.id;
+    const existing = groupedMap.get(key);
+
+    if (!existing) {
+      groupedMap.set(key, {
+        ...comp,
+        companyName: cleanName,
+      });
+      continue;
+    }
+
+    const mergedSlots = [...(existing.areaBreakdown || [])];
+    const seenIds = new Set(mergedSlots.map((s) => s.slotId));
+    const exactSignature = (sl: KyujinSlot) =>
+      [
+        stripKyujinPdfNoise(sl.jobCode || '').replace(/\s+/g, ''),
+        stripKyujinPdfNoise(sl.area || '').replace(/\s+/g, ''),
+        String(sl.salary || '').replace(/\s+/g, ''),
+        String(sl.shiftTime || '').replace(/\s+/g, ''),
+        String(sl.jobDescription || '').replace(/\s+/g, '').slice(0, 120),
+      ].join('::');
+    const seenSignatures = new Set(mergedSlots.map(exactSignature));
+
+    for (const incomingSlot of comp.areaBreakdown || []) {
+      const sig = exactSignature(incomingSlot);
+      if (seenIds.has(incomingSlot.slotId)) {
+        // Exact same slotId -> keep existing if protected, otherwise skip exact duplicate
+        if (seenSignatures.has(sig)) continue;
+        const uniqueSlotId = `${incomingSlot.slotId}_${mergedSlots.length + 1}`;
+        seenIds.add(uniqueSlotId);
+        seenSignatures.add(sig);
+        mergedSlots.push({ ...incomingSlot, slotId: uniqueSlotId });
+        continue;
+      }
+      if (seenSignatures.has(sig) && !incomingSlot.salaryManuallyEdited) {
+        continue;
+      }
+      seenIds.add(incomingSlot.slotId);
+      seenSignatures.add(sig);
+      mergedSlots.push(incomingSlot);
+    }
+
+    groupedMap.set(
+      key,
+      normalizeKyujinItem({
+        ...existing,
+        companyName: cleanName,
+        excludedNationalities: Array.from(
+          new Set([...(existing.excludedNationalities || []), ...(comp.excludedNationalities || [])])
+        ),
+        excludedGenders: Array.from(
+          new Set([...(existing.excludedGenders || []), ...(comp.excludedGenders || [])])
+        ),
+        requiresInJapan: Boolean(existing.requiresInJapan || comp.requiresInJapan),
+        requiresTokutei: Boolean(existing.requiresTokutei || comp.requiresTokutei),
+        requiredConditions: Array.from(
+          new Set([...(existing.requiredConditions || []), ...(comp.requiredConditions || [])])
+        ),
+        ngConditions: Array.from(
+          new Set([...(existing.ngConditions || []), ...(comp.ngConditions || [])])
+        ),
+        areaBreakdown: mergedSlots,
+      })
+    );
+  }
+
+  return Array.from(groupedMap.values());
 };
 
 const extractJlptLevel = (
@@ -3466,10 +3900,10 @@ const parseExcelBlockToKyujin = (
         .filter(Boolean);
 
       if (!companyName && /^(?:企業名|会社名|法人名|施設名|事業所名)$/.test(cell) && rightValues.length > 0) {
-        companyName = rightValues[0].replace(/\s*代表者.*$/, '').trim();
+        companyName = normalizeKyujinCompanyName(rightValues[0]);
       }
       if (!jobCode && /^案件番号$/.test(cell) && rightValues.length > 0) {
-        jobCode = rightValues[0].trim();
+        jobCode = stripKyujinPdfNoise(rightValues[0]);
       }
       if (!workArea && /^(?:勤務先|勤務地|就業場所)$/.test(cell) && rightValues.length > 0) {
         workArea = rightValues.join(' ').trim();
@@ -3494,13 +3928,13 @@ const parseExcelBlockToKyujin = (
   }
 
   const finalCompany =
-    companyName ||
-    fileName
-      .replace(/^求人票[_・\-\s]*/i, '')
-      .replace(/様.*$/, '')
-      .replace(/\.[^.]+$/, '')
-      .trim() ||
-    '新規取込企業';
+    normalizeKyujinCompanyName(
+      companyName ||
+        fileName
+          .replace(/^求人票[_・\-\s]*/i, '')
+          .replace(/様.*$/, '')
+          .replace(/\.[^.]+$/, '')
+    ) || '新規取込企業';
 
   const cleanArea = formatPublicArea(workArea || fallbackLocation);
   const industry = detectIndustryFromText(
@@ -3735,12 +4169,14 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
     });
 
     return {
-      companyName: compM ? compM[1].trim() : `${sourceTitle} #${idx + 1}`,
+      companyName:
+        normalizeKyujinCompanyName(compM ? compM[1] : `${sourceTitle} #${idx + 1}`) ||
+        `${sourceTitle} #${idx + 1}`,
       sector,
       industry,
       employmentType,
       jobCode: `JOB-${idx + 1}`,
-      area: inferredArea,
+      area: stripKyujinPdfNoise(inferredArea),
       shiftTime: specs.shiftTime,
       shiftType: specs.shiftType,
       holidays: specs.holidays,
@@ -4837,9 +5273,12 @@ export const buildSmartReplyMessages = (
         ? matches
             .slice(0, 3)
             .map(
-              ({ slot, score }, i) =>
-                `[Job ${i + 1} (${score}% match)] ${slot.employmentType || 'Tokutei'} / ${slot.industry} / Area: ${formatPublicArea(
-                  slot.area
+              ({ company, slot, score }, i) =>
+                `[Job ${i + 1} (${score}% match)] ${slot.employmentType || 'Tokutei'} / ${slot.industry} / Area: ${anonymizeKyujinTextForCandidate(
+                  formatPublicArea(slot.area),
+                  company,
+                  slot,
+                  'vi'
                 )} / Salary: ${slot.salary} / Housing: ${slot.housingSupport}`
             )
             .join('\n')
