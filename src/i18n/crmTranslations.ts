@@ -93,6 +93,21 @@ export const CRM_I18N = {
       n > 0
         ? `✅ Đã tự động chuẩn hóa quốc tịch cho ${n} hồ sơ.`
         : 'ℹ️ Toàn bộ hồ sơ đã có quốc tịch phù hợp.',
+    dataCleanupBtn: 'Dọn dẹp dữ liệu (Lọc trùng & Phân loại kênh)',
+    dataCleanupToast: (
+      movedOther: number,
+      movedCompany: number,
+      movedLine: number,
+      movedSchool: number,
+      deduped: number,
+      totalUnique: number
+    ) => {
+      const totalChanges = movedOther + movedCompany + movedLine + movedSchool + deduped;
+      if (totalChanges === 0) {
+        return `ℹ️ Dữ liệu đã gọn gàng (${totalUnique} ứng viên, không có trùng lặp hay sai kênh).`;
+      }
+      return `✅ Đã dọn dữ liệu (${totalUnique} hồ sơ): Khác +${movedOther}, Fanpage +${movedCompany}, LINE +${movedLine}, Trường +${movedSchool}, gộp trùng ${deduped}.`;
+    },
     fbChatRegister: 'Đăng ký từ chat FB / LINE',
     newCandidate: '+ Thêm ứng viên',
     careFilters: {
@@ -451,6 +466,21 @@ export const CRM_I18N = {
       n > 0
         ? `✅ ${n}名の国籍を自動補正しました。`
         : 'ℹ️ 補正が必要なプロフィールはありませんでした。',
+    dataCleanupBtn: 'データ整理（重複・流入経路の自動再分類）',
+    dataCleanupToast: (
+      movedOther: number,
+      movedCompany: number,
+      movedLine: number,
+      movedSchool: number,
+      deduped: number,
+      totalUnique: number
+    ) => {
+      const totalChanges = movedOther + movedCompany + movedLine + movedSchool + deduped;
+      if (totalChanges === 0) {
+        return `ℹ️ 重複や流入経路の誤分類はありません（全${totalUnique}名）。`;
+      }
+      return `✅ データ整理完了（合計${totalUnique}名）: その他へ ${movedOther}名 / FB会社公式へ ${movedCompany}名 / LINEへ ${movedLine}名 / 日本語学校へ ${movedSchool}名 / 重複統合 ${deduped}件`;
+    },
     fbChatRegister: 'FB / LINEチャット登録',
     newCandidate: '+ 新規相談者登録',
     careFilters: {

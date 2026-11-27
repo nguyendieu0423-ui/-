@@ -556,6 +556,372 @@ export const findDuplicateCandidate = (
   return null;
 };
 
+const normUrlKey = (v?: string): string =>
+  String(v || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\/(?:www\.|m\.|mbasic\.)?/, '')
+    .replace(/[?#].*$/, '')
+    .replace(/\/+$/, '');
+
+const normPhoneKey = (v?: string): string => String(v || '').replace(/\D/g, '');
+
+const normNameKey = (v?: string): string =>
+  String(v || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+
+const isRealSocialUrl = (v?: string): boolean => {
+  const s = String(v || '').trim();
+  if (!s) return false;
+  if (/^(?:-|—|なし|無|不明|未定|n\/a|none)$/i.test(s)) return false;
+  return /^https?:\/\//i.test(s) || /(?:facebook\.com|fb\.com|m\.me|messenger\.com)/i.test(s);
+};
+
+const isFbNameSameOrSubsetOfName = (fbName?: string, legalName?: string): boolean => {
+  const f = normNameKey(fbName);
+  const n = normNameKey(legalName);
+  if (!f) return true;
+  if (!n) return false;
+  if (f === n) return true;
+  const fTokens = f.split(/[^a-z0-9\p{L}]+/u).filter((t) => t.length >= 2);
+  const nTokens = new Set(n.split(/[^a-z0-9\p{L}]+/u).filter((t) => t.length >= 2));
+  if (fTokens.length === 0 || nTokens.size === 0) return false;
+  return fTokens.every((t) => nTokens.has(t));
+};
+
+const areCandidatesSamePerson = (a: Candidate, b: Candidate): boolean => {
+  if (a.id && b.id && a.id === b.id) return true;
+
+  const urlA = normUrlKey(a.fbProfileUrl);
+  const urlB = normUrlKey(b.fbProfileUrl);
+  if (urlA && urlB) {
+    return urlA === urlB;
+  }
+
+  const phoneA = normPhoneKey(a.phone);
+  const phoneB = normPhoneKey(b.phone);
+  if (phoneA.length >= 9 && phoneB.length >= 9) {
+    return phoneA === phoneB;
+  }
+
+  const nameA = normNameKey(a.name);
+  const nameB = normNameKey(b.name);
+  if (nameA.length >= 3 && nameB && nameA === nameB) {
+    // Do not merge if birth dates explicitly conflict
+    const bdA = String(a.birthDate || '').trim();
+    const bdB = String(b.birthDate || '').trim();
+    if (bdA && bdB && bdA !== bdB) return false;
+    return true;
+  }
+
+  return false;
+};
+
+const mergeCandidateRecords = (primary: Candidate, secondary: Candidate): Candidate => {
+  const pickStr = (a?: string, b?: string) => {
+    const sa = String(a || '').trim();
+    const sb = String(b || '').trim();
+    if (!sa || sa === '要確認' || sa === '国籍不明' || sa === '未定') {
+      return sb || sa;
+    }
+    return sa;
+  };
+  const mergeUniqueText = (a?: string, b?: string) => {
+    const sa = String(a || '').trim();
+    const sb = String(b || '').trim();
+    if (!sa) return sb;
+    if (!sb) return sa;
+    if (sa === sb || sa.includes(sb)) return sa;
+    if (sb.includes(sa)) return sb;
+    return `${sa}\n${sb}`;
+  };
+
+  const isSch = Boolean(
+    primary._isSchool ||
+      primary.channel === 'school' ||
+      secondary._isSchool ||
+      secondary.channel === 'school' ||
+      String(primary.schoolName || secondary.schoolName || '').trim()
+  );
+
+  const primaryStatus = String(primary.progressStatus || '').trim();
+  const secondaryStatus = String(secondary.progressStatus || '').trim();
+  const effectiveStatus =
+    (!primaryStatus || primaryStatus === '新規相談') &&
+    secondaryStatus &&
+    secondaryStatus !== '新規相談'
+      ? secondaryStatus
+      : primaryStatus || secondaryStatus || '新規相談';
+
+  return {
+    ...secondary,
+    ...primary,
+    id: primary.id || secondary.id,
+    fbSenderId: pickStr(primary.fbSenderId, secondary.fbSenderId),
+    fbProfileUrl: pickStr(primary.fbProfileUrl, secondary.fbProfileUrl),
+    name: pickStr(primary.name, secondary.name),
+    fbName: pickStr(primary.fbName, secondary.fbName),
+    furigana: pickStr(primary.furigana, secondary.furigana),
+    channel: isSch
+      ? 'school'
+      : primary.channel === 'personal' && isRealSocialUrl(primary.fbProfileUrl)
+      ? 'personal'
+      : secondary.channel === 'personal' && isRealSocialUrl(secondary.fbProfileUrl)
+      ? 'personal'
+      : primary.channel || secondary.channel || 'other',
+    schoolName: pickStr(primary.schoolName, secondary.schoolName),
+    graduationDate: pickStr(primary.graduationDate, secondary.graduationDate),
+    nationality: pickStr(primary.nationality, secondary.nationality),
+    gender: pickStr(primary.gender, secondary.gender),
+    age: pickStr(primary.age, secondary.age),
+    birthDate: pickStr(primary.birthDate, secondary.birthDate),
+    postalCode: pickStr(primary.postalCode, secondary.postalCode),
+    jlpt: pickStr(primary.jlpt, secondary.jlpt) || '要確認',
+    desiredIndustry: pickStr(primary.desiredIndustry, secondary.desiredIndustry),
+    desiredArea: pickStr(primary.desiredArea, secondary.desiredArea),
+    conversionGoal: pickStr(primary.conversionGoal, secondary.conversionGoal),
+    visaStatus: pickStr(primary.visaStatus, secondary.visaStatus),
+    visaExpiry: pickStr(primary.visaExpiry, secondary.visaExpiry),
+    passedExam: pickStr(primary.passedExam, secondary.passedExam),
+    japanExperience: pickStr(primary.japanExperience, secondary.japanExperience),
+    salaryExpectation: pickStr(primary.salaryExpectation, secondary.salaryExpectation),
+    negotiationLog: mergeUniqueText(primary.negotiationLog, secondary.negotiationLog),
+    startDate: pickStr(primary.startDate, secondary.startDate),
+    phone: pickStr(primary.phone, secondary.phone),
+    email: pickStr(primary.email, secondary.email),
+    address: pickStr(primary.address, secondary.address),
+    progressStatus: effectiveStatus,
+    proposedCompany: pickStr(primary.proposedCompany, secondary.proposedCompany),
+    proposalDate: pickStr(primary.proposalDate, secondary.proposalDate),
+    naiteiCompany: pickStr(primary.naiteiCompany, secondary.naiteiCompany),
+    expectedJoinDate: pickStr(primary.expectedJoinDate, secondary.expectedJoinDate),
+    visaSubmissionDeadline: pickStr(primary.visaSubmissionDeadline, secondary.visaSubmissionDeadline),
+    mendanDate: pickStr(primary.mendanDate, secondary.mendanDate),
+    interviewDate: pickStr(primary.interviewDate, secondary.interviewDate),
+    lastContactDate: pickStr(primary.lastContactDate, secondary.lastContactDate),
+    declineReason: pickStr(primary.declineReason, secondary.declineReason),
+    memo: mergeUniqueText(primary.memo, secondary.memo),
+    nationalityManuallyEdited: Boolean(
+      primary.nationalityManuallyEdited || secondary.nationalityManuallyEdited
+    ),
+    channelManuallyEdited: Boolean(
+      primary.channelManuallyEdited || secondary.channelManuallyEdited
+    ),
+    googleCalendarEventId: pickStr(primary.googleCalendarEventId, secondary.googleCalendarEventId),
+    googleCalendarEventLink: pickStr(
+      primary.googleCalendarEventLink,
+      secondary.googleCalendarEventLink
+    ),
+    savedRirekisho: primary.savedRirekisho || secondary.savedRirekisho,
+    _isSchool: isSch,
+  };
+};
+
+export const deduplicateCandidatesUnion = (
+  candidatesList: Candidate[] = [],
+  schoolStudentsList: Candidate[] = []
+): Candidate[] => {
+  const result: Candidate[] = [];
+  const pushOrMerge = (item: Candidate, isSchool: boolean) => {
+    const normalizedItem: Candidate = {
+      ...item,
+      channel: isSchool ? 'school' : item.channel || 'personal',
+      _isSchool: isSchool,
+    };
+    const dupIdx = result.findIndex((existing) =>
+      areCandidatesSamePerson(existing, normalizedItem)
+    );
+    if (dupIdx >= 0) {
+      result[dupIdx] = mergeCandidateRecords(result[dupIdx], normalizedItem);
+    } else {
+      result.push(normalizedItem);
+    }
+  };
+
+  schoolStudentsList.forEach((s) => pushOrMerge(s, true));
+  candidatesList.forEach((c) => {
+    const isSch = Boolean(c._isSchool || c.channel === 'school');
+    pushOrMerge(c, isSch);
+  });
+  return result;
+};
+
+export interface CleanupCandidatesResult {
+  candidates: Candidate[];
+  schoolStudents: Candidate[];
+  movedToOther: number;
+  movedToCompany: number;
+  movedToLine: number;
+  movedToSchool: number;
+  dedupedCount: number;
+  changedCount: number;
+}
+
+const classifyLegacyNonSchoolChannel = (c: Candidate): ChannelType => {
+  const rawCh = String(c.channel || '').trim().toLowerCase();
+  if (c.channelManuallyEdited) {
+    if (rawCh === 'company' || rawCh === 'line' || rawCh === 'other' || rawCh === 'personal') {
+      return rawCh as ChannelType;
+    }
+  }
+  if (rawCh === 'company' || rawCh === 'line' || rawCh === 'other') {
+    return rawCh as ChannelType;
+  }
+
+  const fbUrl = String(c.fbProfileUrl || '').trim();
+  const fbSender = String(c.fbSenderId || '').trim();
+  const rawFbName = String(c.fbName || '').trim();
+  const cleanFbName =
+    rawFbName &&
+    !/^(?:-|—|未定|不明|未設定|未記入|未確認|なし|無|none|n\/a|kintone)$/i.test(rawFbName) &&
+    !/^https?:\/\//i.test(rawFbName)
+      ? rawFbName
+      : '';
+
+  const notes = [c.memo, c.negotiationLog, c.conversionGoal, c.id].filter(Boolean).join(' ');
+  const companyRx =
+    /(?:fanpage|page\s*công\s*ty|fb\s*công\s*ty|会社公式|会社fb|公式fb|公式ページ|企業ページ|自社求人)/i;
+  const lineRx =
+    /(?:^|[\s:：・(（【\[「『])LINE(?:$|[\s:：・)）】\]」』]|で|から|にて|より|の|経由|相談|応募|登録|連絡|id)|ライン(?:経由|相談|応募)?/i;
+  const kintoneOrReferralRx =
+    /(?:kintone|キントーン|直接紹介|知人紹介|紹介経由|紹介者|zalo|tiktok|電話応募|メール応募|求職者登録|旧データ|cand_csv_|kintone_)/i;
+  const personalFbChatRx =
+    /(?:facebook|messenger|メッセンジャー|fb個人|fb\s*cá\s*nhân|fb経由|fbから|link\s*fb|inbox|tên\s*fb|Ghi chú nguyên văn|\bfb\b)/i;
+
+  if (isRealSocialUrl(fbUrl) || Boolean(fbSender)) {
+    if (companyRx.test(notes) && !/fb個人|fb\s*cá\s*nhân/i.test(notes)) {
+      return 'company';
+    }
+    return 'personal';
+  }
+
+  if (companyRx.test(`${notes} ${cleanFbName}`)) {
+    return 'company';
+  }
+  if (lineRx.test(`${notes} ${cleanFbName} ${c.phone || ''}`)) {
+    return 'line';
+  }
+  if (kintoneOrReferralRx.test(notes)) {
+    return 'other';
+  }
+
+  const hasExplicitPersonalFbEvidence =
+    personalFbChatRx.test(notes) && !companyRx.test(notes);
+  if (hasExplicitPersonalFbEvidence) {
+    return 'personal';
+  }
+
+  if (!cleanFbName || isFbNameSameOrSubsetOfName(cleanFbName, c.name)) {
+    return 'other';
+  }
+
+  return 'personal';
+};
+
+export const cleanupAndReclassifyCandidates = (
+  candidatesList: Candidate[] = [],
+  schoolStudentsList: Candidate[] = []
+): CleanupCandidatesResult => {
+  const initialTotal = candidatesList.length + schoolStudentsList.length;
+  const schoolMerged: Candidate[] = [];
+  const regularMerged: Candidate[] = [];
+  let dedupedCount = 0;
+  let movedToOther = 0;
+  let movedToCompany = 0;
+  let movedToLine = 0;
+  let movedToSchool = 0;
+
+  const isSchoolRec = (item: Candidate): boolean =>
+    Boolean(item._isSchool || item.channel === 'school' || String(item.schoolName || '').trim());
+
+  // 1. Seed school students first (deduplicating intra-school)
+  schoolStudentsList.forEach((rawStu) => {
+    const stu: Candidate = { ...rawStu, channel: 'school', _isSchool: true };
+    const idx = schoolMerged.findIndex((existing) => areCandidatesSamePerson(existing, stu));
+    if (idx >= 0) {
+      schoolMerged[idx] = mergeCandidateRecords(schoolMerged[idx], stu);
+      dedupedCount += 1;
+    } else {
+      schoolMerged.push(stu);
+    }
+  });
+
+  // 2. Process candidates: eliminate overlap with schoolStudents, move school records, dedupe regular, reclassify channels
+  candidatesList.forEach((rawCand) => {
+    const cand: Candidate = { ...rawCand };
+    const schIdx = schoolMerged.findIndex((stu) => areCandidatesSamePerson(stu, cand));
+    if (schIdx >= 0) {
+      schoolMerged[schIdx] = mergeCandidateRecords(schoolMerged[schIdx], cand);
+      dedupedCount += 1;
+      return;
+    }
+
+    if (isSchoolRec(cand)) {
+      schoolMerged.push({ ...cand, channel: 'school', _isSchool: true });
+      movedToSchool += 1;
+      return;
+    }
+
+    const regIdx = regularMerged.findIndex((existing) => areCandidatesSamePerson(existing, cand));
+    if (regIdx >= 0) {
+      regularMerged[regIdx] = mergeCandidateRecords(regularMerged[regIdx], cand);
+      dedupedCount += 1;
+      return;
+    }
+
+    const prevChannel = String(cand.channel || 'personal').trim().toLowerCase() || 'personal';
+    const nextChannel = classifyLegacyNonSchoolChannel(cand);
+    if (nextChannel !== prevChannel) {
+      if (nextChannel === 'other') movedToOther += 1;
+      else if (nextChannel === 'company') movedToCompany += 1;
+      else if (nextChannel === 'line') movedToLine += 1;
+    }
+    regularMerged.push({
+      ...cand,
+      channel: nextChannel,
+      _isSchool: false,
+    });
+  });
+
+  // 3. Re-check regularMerged after merges in case a merged record changed channel
+  const finalRegular = regularMerged.map((cand) => {
+    const prevChannel = String(cand.channel || 'personal').trim().toLowerCase() || 'personal';
+    const nextChannel = classifyLegacyNonSchoolChannel(cand);
+    if (nextChannel !== prevChannel) {
+      if (nextChannel === 'other') movedToOther += 1;
+      else if (nextChannel === 'company') movedToCompany += 1;
+      else if (nextChannel === 'line') movedToLine += 1;
+    }
+    return {
+      ...cand,
+      channel: nextChannel,
+      _isSchool: false,
+    };
+  });
+
+  const finalTotal = finalRegular.length + schoolMerged.length;
+  const changedCount =
+    movedToOther +
+    movedToCompany +
+    movedToLine +
+    movedToSchool +
+    dedupedCount +
+    (finalTotal !== initialTotal ? Math.abs(initialTotal - finalTotal) : 0);
+
+  return {
+    candidates: finalRegular,
+    schoolStudents: schoolMerged,
+    movedToOther,
+    movedToCompany,
+    movedToLine,
+    movedToSchool,
+    dedupedCount,
+    changedCount,
+  };
+};
+
 export const isStale7DayProposal = (
   person: Partial<Candidate> = {},
   todayIsoOverride?: string
@@ -633,11 +999,16 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
 
   const fbSenderId = cleanLegacyStr(raw.fbSenderId ?? raw.fb_sender_id);
   const fbProfileUrl = cleanLegacyStr(raw.fbProfileUrl ?? raw.fb_profile_url);
-  const fbName = cleanLegacyStr(raw.fbName ?? raw.fb_name ?? raw.facebookName ?? raw.facebook_name);
+  const rawFbName = cleanLegacyStr(raw.fbName ?? raw.fb_name ?? raw.facebookName ?? raw.facebook_name);
+  const fbName = isPlaceholderExtractionVal(rawFbName) ? '' : rawFbName;
+  const name = cleanLegacyStr(raw.name ?? raw.fullName ?? raw.full_name ?? raw.candidate_name);
   const phone = cleanLegacyStr(raw.phone ?? raw.tel);
   const memo = cleanLegacyStr(raw.memo ?? raw.notes ?? raw.note);
   const negotiationLog = cleanLegacyStr(
     raw.negotiationLog ?? raw.rawLog ?? raw.negotiation_log ?? raw.raw_log
+  );
+  const channelManuallyEdited = Boolean(
+    raw.channelManuallyEdited ?? raw.channel_manually_edited
   );
 
   let channel: ChannelType | string = 'personal';
@@ -645,17 +1016,26 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
     channel = 'school';
   } else if (rawChannel === 'company' || rawChannel === 'line' || rawChannel === 'other') {
     channel = rawChannel;
+  } else if (channelManuallyEdited && rawChannel === 'personal') {
+    channel = 'personal';
   } else if (rawChannel === 'personal' || !rawChannel) {
-    const hasFbSignal = Boolean(fbProfileUrl || fbName || fbSenderId);
+    const distinctFbName = Boolean(fbName) && !isFbNameSameOrSubsetOfName(fbName, name);
+    const hasFbSignal = Boolean(
+      isRealSocialUrl(fbProfileUrl) || fbSenderId || distinctFbName
+    );
     if (hasFbSignal) {
       channel = 'personal';
     } else {
       const hint = `${phone} ${memo} ${negotiationLog}`;
-      channel = /\bline\b|ライン/i.test(hint) ? 'line' : 'other';
+      channel =
+        /(?:^|[\s:：・(（【\[「『])LINE(?:$|[\s:：・)）】\]」』]|で|から|にて|より|の|経由|相談|応募|登録|連絡|id)|ライン/i.test(
+          hint
+        )
+          ? 'line'
+          : 'other';
     }
   }
 
-  const name = cleanLegacyStr(raw.name ?? raw.fullName ?? raw.full_name ?? raw.candidate_name);
   const furigana = cleanLegacyStr(raw.furigana ?? raw.kana);
   const rawNationality = cleanLegacyStr(raw.nationality ?? raw.kokuseki ?? raw.country);
   const nationality = rawNationality ? normalizeCandidateNationality(rawNationality) : '';
@@ -747,6 +1127,7 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
     nationalityManuallyEdited: Boolean(
       raw.nationalityManuallyEdited ?? raw.nationality_manually_edited
     ),
+    channelManuallyEdited,
     googleCalendarEventId: cleanLegacyStr(
       raw.googleCalendarEventId ?? raw.google_calendar_event_id
     ),

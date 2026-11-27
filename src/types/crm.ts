@@ -77,6 +77,7 @@ export interface Candidate {
   declineReason?: string;
   memo?: string;
   nationalityManuallyEdited?: boolean;
+  channelManuallyEdited?: boolean;
   googleCalendarEventId?: string;
   googleCalendarEventLink?: string;
   savedRirekisho?: SavedRirekishoRecord;

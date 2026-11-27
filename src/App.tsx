@@ -82,7 +82,9 @@ import {
   buildSmartReplyMessages,
   calcJapaneseAgeFromBirthDate,
   classifyProposedSubTab,
+  cleanupAndReclassifyCandidates,
   copyTextSafely,
+  deduplicateCandidatesUnion,
   detectEmploymentTypeFromText,
   detectIndustryFromText,
   detectKyujinShiftType,
@@ -161,6 +163,7 @@ import {
 
 const MESSENGER_WEBHOOK_URL = 'https://fb-crm.ai.studio/api/webhooks/messenger';
 const FB_PAGE_LINK_STORAGE_KEY = 'tokutei_fb_page_link_v1';
+const CHANNEL_CLEANUP_VERSION_KEY = 'tokutei_crm_channel_cleanup_v1';
 
 function readFallbackCandidates(): Candidate[] {
   try {
@@ -1629,17 +1632,32 @@ export default function App() {
           const loadedCandidates = Array.isArray(data.candidates)
             ? data.candidates.map(migrateCandidateRecord)
             : [];
-          setCandidates(
-            mergePendingWebhookCandidates(
-              loadedCandidates,
-              data.pendingWebhookCandidates
-            )
+          const mergedWebhooks = mergePendingWebhookCandidates(
+            loadedCandidates,
+            data.pendingWebhookCandidates
           );
-          setSchoolStudents(
-            Array.isArray(data.schoolStudents)
-              ? data.schoolStudents.map(migrateCandidateRecord)
-              : []
-          );
+          const loadedStudents = Array.isArray(data.schoolStudents)
+            ? data.schoolStudents.map(migrateCandidateRecord)
+            : [];
+          let needsCleanup = false;
+          try {
+            needsCleanup = localStorage.getItem(CHANNEL_CLEANUP_VERSION_KEY) !== 'done';
+          } catch {
+            needsCleanup = false;
+          }
+          if (needsCleanup) {
+            const cleaned = cleanupAndReclassifyCandidates(mergedWebhooks, loadedStudents);
+            setCandidates(cleaned.candidates);
+            setSchoolStudents(cleaned.schoolStudents);
+            try {
+              localStorage.setItem(CHANNEL_CLEANUP_VERSION_KEY, 'done');
+            } catch {
+              // ignore
+            }
+          } else {
+            setCandidates(mergedWebhooks);
+            setSchoolStudents(loadedStudents);
+          }
           setKyujins(
             Array.isArray(data.kyujins)
               ? data.kyujins.map(normalizeKyujinItem)
@@ -1803,6 +1821,27 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  const oneTimeChannelCleanupRanRef = useRef(false);
+  useEffect(() => {
+    if (oneTimeChannelCleanupRanRef.current) return;
+    oneTimeChannelCleanupRanRef.current = true;
+    try {
+      if (localStorage.getItem(CHANNEL_CLEANUP_VERSION_KEY) === 'done') return;
+    } catch {
+      return;
+    }
+    const cleaned = cleanupAndReclassifyCandidates(candidates, schoolStudents);
+    if (cleaned.changedCount > 0) {
+      setCandidates(cleaned.candidates);
+      setSchoolStudents(cleaned.schoolStudents);
+    }
+    try {
+      localStorage.setItem(CHANNEL_CLEANUP_VERSION_KEY, 'done');
+    } catch {
+      // ignore storage errors
+    }
+  }, [candidates, schoolStudents]);
 
   useEffect(() => {
     void persistCandidatesWithIdbFallback(STORAGE_KEYS.CANDIDATES, candidates);
@@ -2469,19 +2508,20 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
             csvCandidates.push({ ...item, _isSchool: false });
           }
         });
-        if (csvCandidates.length > 0) {
-          setCandidates(csvCandidates);
-          await persistCandidatesWithIdbFallback(STORAGE_KEYS.CANDIDATES, csvCandidates);
+        const csvCleaned = cleanupAndReclassifyCandidates(csvCandidates, csvStudents);
+        if (csvCleaned.candidates.length > 0) {
+          setCandidates(csvCleaned.candidates);
+          await persistCandidatesWithIdbFallback(STORAGE_KEYS.CANDIDATES, csvCleaned.candidates);
         }
-        if (csvStudents.length > 0) {
-          setSchoolStudents(csvStudents);
-          await persistCandidatesWithIdbFallback(STORAGE_KEYS.SCHOOL_STUDENTS, csvStudents);
+        if (csvCleaned.schoolStudents.length > 0) {
+          setSchoolStudents(csvCleaned.schoolStudents);
+          await persistCandidatesWithIdbFallback(STORAGE_KEYS.SCHOOL_STUDENTS, csvCleaned.schoolStudents);
         }
         setGasWriteLocked(true);
         showToast(
           uiLang === 'jp'
-            ? `📂 CSVデータ復元完了：相談者 ${csvCandidates.length}名 ／ 留学生 ${csvStudents.length}名（新構造へ自動変換済）`
-            : `📂 Đã khôi phục & chuẩn hóa CSV: ${csvCandidates.length} ứng viên / ${csvStudents.length} DHS`
+            ? `📂 CSVデータ復元完了：相談者 ${csvCleaned.candidates.length}名 ／ 留学生 ${csvCleaned.schoolStudents.length}名（新構造へ自動変換済）`
+            : `📂 Đã khôi phục & chuẩn hóa CSV: ${csvCleaned.candidates.length} ứng viên / ${csvCleaned.schoolStudents.length} DHS`
         );
         return;
       }
@@ -2499,13 +2539,20 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       }
 
       const migrated = migrateLegacyData(parsed);
+      const cleanedBackup =
+        migrated.hasCandidatesSection || migrated.hasStudentsSection
+          ? cleanupAndReclassifyCandidates(migrated.candidates, migrated.schoolStudents)
+          : null;
 
-      const compressedCandidates = migrated.hasCandidatesSection
-        ? await compressSavedRirekishoInCandidates(migrated.candidates)
-        : [];
-      const compressedStudents = migrated.hasStudentsSection
-        ? await compressSavedRirekishoInCandidates(migrated.schoolStudents)
-        : [];
+      const compressedCandidates =
+        migrated.hasCandidatesSection && cleanedBackup
+          ? await compressSavedRirekishoInCandidates(cleanedBackup.candidates)
+          : [];
+      const compressedStudents =
+        (migrated.hasStudentsSection || (cleanedBackup && cleanedBackup.schoolStudents.length > 0)) &&
+        cleanedBackup
+          ? await compressSavedRirekishoInCandidates(cleanedBackup.schoolStudents)
+          : [];
 
       let usedIndexedDbOffload = false;
       const storageErrors: string[] = [];
@@ -2522,7 +2569,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
         }
       }
 
-      if (migrated.hasStudentsSection) {
+      if (migrated.hasStudentsSection || (cleanedBackup && cleanedBackup.schoolStudents.length > 0)) {
         setSchoolStudents(compressedStudents);
         const persistStuRes = await persistCandidatesWithIdbFallback(
           STORAGE_KEYS.SCHOOL_STUDENTS,
@@ -2613,39 +2660,45 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
   // ==========================================================================
   // DERIVED COLLECTIONS
   // ==========================================================================
+  const allPeopleCombined = useMemo<Candidate[]>(
+    () => deduplicateCandidatesUnion(candidates, schoolStudents),
+    [candidates, schoolStudents]
+  );
+
+  const schoolCandidates = useMemo(
+    () => allPeopleCombined.filter((p) => Boolean(p._isSchool || p.channel === 'school')),
+    [allPeopleCombined]
+  );
+
+  const nonSchoolCandidates = useMemo(
+    () => allPeopleCombined.filter((p) => !p._isSchool && p.channel !== 'school'),
+    [allPeopleCombined]
+  );
+
   const personalCandidates = useMemo(
     () =>
-      candidates.filter(
+      nonSchoolCandidates.filter(
         (c) =>
           c.channel !== 'company' &&
-          c.channel !== 'school' &&
           c.channel !== 'line' &&
           c.channel !== 'other'
       ),
-    [candidates]
+    [nonSchoolCandidates]
   );
 
   const companyCandidates = useMemo(
-    () => candidates.filter((c) => c.channel === 'company'),
-    [candidates]
+    () => nonSchoolCandidates.filter((c) => c.channel === 'company'),
+    [nonSchoolCandidates]
   );
 
   const lineCandidates = useMemo(
-    () => candidates.filter((c) => c.channel === 'line'),
-    [candidates]
+    () => nonSchoolCandidates.filter((c) => c.channel === 'line'),
+    [nonSchoolCandidates]
   );
 
   const otherCandidates = useMemo(
-    () => candidates.filter((c) => c.channel === 'other'),
-    [candidates]
-  );
-
-  const allPeopleCombined = useMemo<Candidate[]>(
-    () => [
-      ...candidates.map((c) => ({ ...c, _isSchool: false })),
-      ...schoolStudents.map((s) => ({ ...s, channel: 'school', _isSchool: true })),
-    ],
-    [candidates, schoolStudents]
+    () => nonSchoolCandidates.filter((c) => c.channel === 'other'),
+    [nonSchoolCandidates]
   );
 
   const mendanPeopleSorted = useMemo(() => {
@@ -3113,21 +3166,21 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
   const filteredCandidates = useMemo(() => {
     let baseList: Candidate[] = [];
     if (activeTab === 'personal') {
-      baseList = personalCandidates.map((c) => ({ ...c, _isSchool: false }));
+      baseList = personalCandidates;
     } else if (activeTab === 'company') {
-      baseList = companyCandidates.map((c) => ({ ...c, _isSchool: false }));
+      baseList = companyCandidates;
     } else if (activeTab === 'line') {
-      baseList = lineCandidates.map((c) => ({ ...c, _isSchool: false }));
+      baseList = lineCandidates;
     } else if (activeTab === 'other') {
-      baseList = otherCandidates.map((c) => ({ ...c, _isSchool: false }));
+      baseList = otherCandidates;
     } else if (activeTab === 'school') {
-      baseList = schoolStudents.map((s) => ({ ...s, channel: 'school', _isSchool: true }));
+      baseList = schoolCandidates;
     } else if (activeTab === 'mendan') {
       baseList = mendanPeopleSorted;
     } else if (activeTab === 'proposed') {
       baseList = allProposedPeople;
     } else {
-      baseList = candidates.map((c) => ({ ...c, _isSchool: false }));
+      baseList = allPeopleCombined;
     }
 
     const q = searchQuery.trim().toLowerCase();
@@ -3250,6 +3303,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     companyCandidates,
     lineCandidates,
     otherCandidates,
+    schoolCandidates,
+    allPeopleCombined,
     schoolStudents,
     mendanPeopleSorted,
     allProposedPeople,
@@ -4147,6 +4202,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     const updatedPerson: Candidate = {
       ...person,
       channel: nextChannel,
+      channelManuallyEdited: true,
       _isSchool: willBeSchool,
     };
 
@@ -4189,6 +4245,30 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     showToast(t.autoFixNatToast(totalChanged));
   };
 
+  const handleDataCleanupAndReclassify = () => {
+    const res = cleanupAndReclassifyCandidates(candidates, schoolStudents);
+    if (res.changedCount > 0) {
+      setCandidates(res.candidates);
+      setSchoolStudents(res.schoolStudents);
+    }
+    try {
+      localStorage.setItem(CHANNEL_CLEANUP_VERSION_KEY, 'done');
+    } catch {
+      // ignore storage errors
+    }
+    const totalUnique = res.candidates.length + res.schoolStudents.length;
+    showToast(
+      t.dataCleanupToast(
+        res.movedToOther,
+        res.movedToCompany,
+        res.movedToLine,
+        res.movedToSchool,
+        res.dedupedCount,
+        totalUnique
+      )
+    );
+  };
+
   const handleSaveEditingPerson = () => {
     if (!editingPerson) return;
     const { data, isSchool, isNew } = editingPerson;
@@ -4213,12 +4293,17 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     const prevPerson = isNew
       ? undefined
       : allPeopleCombined.find((x) => x.id === data.id);
+    const nextChannelValue = isSchoolTarget ? 'school' : data.channel || 'personal';
+    const channelChangedByUser = Boolean(
+      prevPerson && (prevPerson.channel || 'personal') !== nextChannelValue
+    );
 
     const savedPerson: Candidate = {
       ...data,
       name: effectiveName,
       memo: fallbackNote,
-      channel: isSchoolTarget ? 'school' : data.channel || 'personal',
+      channel: nextChannelValue,
+      channelManuallyEdited: channelChangedByUser ? true : data.channelManuallyEdited,
       _isSchool: isSchoolTarget,
     };
 
@@ -5644,7 +5729,7 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
     return [
       `=== CRM LIVE EXACT STATS (DO NOT GUESS OR ALTER NUMBERS) ===`,
-      `総登録人材: ${allPeopleCombined.length}名 (FB・SNS応募等: ${candidates.length}名 [FB個人:${personalCandidates.length}, FB会社公式:${companyCandidates.length}, LINE:${lineCandidates.length}, その他:${otherCandidates.length}] / 日本語学校・留学生: ${schoolStudents.length}名).`,
+      `総登録人材: ${allPeopleCombined.length}名 (FB・SNS・その他: ${nonSchoolCandidates.length}名 [FB個人:${personalCandidates.length}, FB会社公式:${companyCandidates.length}, LINE:${lineCandidates.length}, その他:${otherCandidates.length}] / 日本語学校・留学生: ${schoolCandidates.length}名).`,
       `進捗ステータス内訳: ${statusSummary || 'なし'}. 推薦済み(実質): ${allProposedPeople.length}名 (進行中:${proposedStageCounts.in_progress}, 内定:${proposedStageCounts.naitei}, 辞退・終了:${proposedStageCounts.jitai}).`,
       `求人データベース: ${kyujinStats.totalCompanies}社・計${kyujinStats.totalSlots}ポジション (募集中:${kyujinStats.openSlots}枠, 募集終了:${kyujinStats.closedSlots}枠, 賞与あり:${kyujinStats.bonusSlots}枠, アルバイト:${kyujinStats.baitoSlots}枠).`,
       `退職者管理: 計${resignations.length}名 (期限アラート:${resignationAlerts.length}名, 期限<=3日/超過:${urgentResignationAlerts.length}名, 退職日未確定:${unconfirmedResigCount}名).`,
@@ -5654,12 +5739,12 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
     ].join('\n');
   }, [
     allPeopleCombined,
-    candidates.length,
+    nonSchoolCandidates.length,
     personalCandidates.length,
     companyCandidates.length,
     lineCandidates.length,
     otherCandidates.length,
-    schoolStudents.length,
+    schoolCandidates.length,
     allProposedPeople.length,
     proposedStageCounts,
     kyujinStats,
@@ -5745,8 +5830,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
 
       {viewMode === 'home' ? (
         <HomePage
-          candidateCount={candidates.length}
-          schoolCount={schoolStudents.length}
+          candidateCount={nonSchoolCandidates.length}
+          schoolCount={schoolCandidates.length}
           companyCount={kyujinStats.totalCompanies}
           slotCount={kyujinStats.totalSlots}
           ptCount={ptPartners.length}
@@ -5901,12 +5986,12 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           <div className="flex items-center gap-1 overflow-x-auto border-b border-[#E2E8F0] bg-white px-4 py-2 lg:hidden print:hidden">
             {(
               [
-                { id: 'all', label: `${t.tabs.allMobile} (${candidates.length})` },
+                { id: 'all', label: `${t.tabs.allMobile} (${allPeopleCombined.length})` },
                 { id: 'personal', label: `${t.tabs.personal} (${personalCandidates.length})` },
                 { id: 'company', label: `${t.tabs.company} (${companyCandidates.length})` },
                 { id: 'line', label: `${t.tabs.line} (${lineCandidates.length})` },
                 { id: 'other', label: `${t.tabs.other} (${otherCandidates.length})` },
-                { id: 'school', label: `${t.tabs.schoolMobile} (${schoolStudents.length})` },
+                { id: 'school', label: `${t.tabs.schoolMobile} (${schoolCandidates.length})` },
                 { id: 'mendan', label: `${t.tabs.mendan} (${mendanPeopleSorted.length})` },
                 { id: 'proposed', label: `${t.tabs.proposed} (${allProposedPeople.length})` },
                 { id: 'resignation', label: `${t.tabs.resignation} (${resignations.length})` },
@@ -5938,12 +6023,12 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
               </div>
               {(
                 [
-                  { id: 'all', label: t.tabs.allDesktop, count: `${candidates.length}` },
+                  { id: 'all', label: t.tabs.allDesktop, count: `${allPeopleCombined.length}` },
                   { id: 'personal', label: t.tabs.personal, count: `${personalCandidates.length}` },
                   { id: 'company', label: t.tabs.company, count: `${companyCandidates.length}` },
                   { id: 'line', label: t.tabs.line, count: `${lineCandidates.length}` },
                   { id: 'other', label: t.tabs.other, count: `${otherCandidates.length}` },
-                  { id: 'school', label: t.tabs.school, count: `${schoolStudents.length}` },
+                  { id: 'school', label: t.tabs.school, count: `${schoolCandidates.length}` },
                 ] as Array<{ id: MainTabId; label: string; count: string }>
               ).map((item) => (
                 <button
@@ -6148,6 +6233,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                     >
                       <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                       {t.autoFixNatBtn}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleDataCleanupAndReclassify}
+                      className="inline-flex items-center gap-1 rounded-md border border-sky-300 bg-sky-50 px-2.5 py-2 text-xs font-semibold text-sky-800 hover:bg-sky-100 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                      {t.dataCleanupBtn}
                     </button>
 
                     <button
@@ -7686,8 +7780,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                   },
                   {
                     label: t.tabs.school,
-                    count: schoolStudents.length,
-                    pct: Math.round((schoolStudents.length / totalPeopleCount) * 100),
+                    count: schoolCandidates.length,
+                    pct: Math.round((schoolCandidates.length / totalPeopleCount) * 100),
                     barClass: 'bg-purple-500',
                   },
                 ];
@@ -7783,8 +7877,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
                         </div>
                         <div className="mt-1 text-[11px] text-[#64748B] tabular-nums">
                           {uiLang === 'jp'
-                            ? `SNS・紹介等 ${candidates.length}名 · 留学生 ${schoolStudents.length}名`
-                            : `FB/LINE/Khác ${candidates.length} · DHS ${schoolStudents.length}`}
+                            ? `SNS・紹介等 ${nonSchoolCandidates.length}名 · 留学生 ${schoolCandidates.length}名`
+                            : `FB/LINE/Khác ${nonSchoolCandidates.length} · DHS ${schoolCandidates.length}`}
                         </div>
                       </div>
                       <div className="rounded-lg border border-[#E2E8F0] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
