@@ -30,12 +30,12 @@ const SALARY_LABEL_SOURCE =
   '(?:想定月収|総支給額?|基本給|月給|時給|給与形態|給与|賃金|報酬|月収|Lương(?:\\s*(?:cơ bản|tháng|giờ|thực nhận))?|Salary)';
 
 const SALARY_LINE_LABEL_REGEX = new RegExp(
-  `^\\s*(?:[・●■▪▶★◆【\\[\\(]?\\s*)?(${SALARY_LABEL_SOURCE})\\s*[】\\]\\)]?\\s*(?:[:：\\t]|\\s{2,}|(?=\\d|時給|月給))(.*)$`,
+  `^\\s*(?:[・●■▪▶★◆【\\[\\(]?\\s*)?(${SALARY_LABEL_SOURCE})\\s*[】\\]\\)]?\\s*(?:[:：|｜\\t]|\\s{2,}|(?=\\d|時給|月給))(.*)$`,
   'i'
 );
 
 const SALARY_INLINE_LABEL_REGEX = new RegExp(
-  `(${SALARY_LABEL_SOURCE})\\s*(?:[:：]|\\s+)\\s*([^\\n]+)`,
+  `(${SALARY_LABEL_SOURCE})\\s*(?:[:：|｜]|\\s+)\\s*([^\\n]+)`,
   'gi'
 );
 
@@ -74,7 +74,7 @@ export const sanitizeExcelFloatText = (raw: unknown): string => {
 export const extractEstimatedNetSalaryText = (rawText: string): string => {
   const cleaned = normalizeJapaneseNumberText(stripKyujinFormBoilerplate(rawText));
   const m = cleaned.match(
-    /(?:手取り|控除後(?:支給)?|実収入)\s*[：:・\s]*([0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?(?:\s*[～\-]\s*[0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?)?)/i
+    /(?:手取り(?:目安)?|控除後(?:支給)?|実収入)\s*[：:・|｜\s]*(?:約)?\s*([0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?(?:\s*[～\-]\s*[0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?)?)/i
   );
   if (!m) return '';
   const amt = extractAmountSegment(m[1], { allowBareNumber: true });
@@ -84,10 +84,10 @@ export const extractEstimatedNetSalaryText = (rawText: string): string => {
 export const extractAnnualSalaryText = (rawText: string): string => {
   const cleaned = normalizeJapaneseNumberText(stripKyujinFormBoilerplate(rawText));
   const m = cleaned.match(
-    /(?:想定年収|モデル年収|年収)\s*[：:・\s]*([0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?(?:\s*[～\-]\s*[0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?)?)/i
+    /(?:想定年収|モデル年収|年収)\s*[：:・|｜\s]*(?:約)?\s*([0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?(?:\s*[～\-]\s*[0-9,]+(?:\.[0-9]+)?\s*(?:万円|万|円)?)?)/i
   );
   if (!m) return '';
-  const amt = extractAmountSegment(m[1], { allowBareNumber: false });
+  const amt = extractAmountSegment(m[1], { allowBareNumber: false, maxYenLimit: 25000000 });
   return amt ? amt.formatted : '';
 };
 
@@ -117,7 +117,7 @@ interface RawAmountMatch {
 
 const extractAmountSegment = (
   rawSegment: string,
-  options: { allowBareNumber?: boolean } = {}
+  options: { allowBareNumber?: boolean; maxYenLimit?: number } = {}
 ): RawAmountMatch | null => {
   const normalized = normalizeJapaneseNumberText(rawSegment).trim();
   if (!normalized || /要確認|未定|応相談/.test(normalized)) {
@@ -175,7 +175,8 @@ const extractAmountSegment = (
     const effectiveUnit1 =
       unit1 || (unit2 && unit2.startsWith('万') ? '万' : unit2 && unit2.toLowerCase() === 'k' ? 'k' : unit2 || '');
     const yen1 = parseAmountUnitToYen(num1, effectiveUnit1);
-    if (!yen1 || yen1 < 500 || yen1 > 3000000) continue;
+    const maxYenLimit = options.maxYenLimit ?? 3000000;
+    if (!yen1 || yen1 < 500 || yen1 > maxYenLimit) continue;
 
     // Avoid matching standalone years like "2026" without unit
     if (!unit1 && !unit2 && yen1 >= 1990 && yen1 <= 2099) {
@@ -304,7 +305,10 @@ export const extractKyujinSalaryInfo = (
       if (extracted) {
         const parsed = classifyRawMatch(extracted, `${label} ${valuePart}`);
         let priority = 50;
-        if (/総支給|想定月収|月収/i.test(label)) priority = 100;
+        const isTrialHourly =
+          parsed.salaryType === 'hourly' && /試用期間|研修期間|見習い/.test(line);
+        if (isTrialHourly) priority = 40;
+        else if (/総支給|想定月収|月収/i.test(label)) priority = 100;
         else if (/月給|基本給/i.test(label)) priority = 90;
         else if (/時給/i.test(label)) priority = 85;
         else if (/給与|賃金|報酬|Salary|Lương/i.test(label)) priority = 80;
@@ -323,7 +327,11 @@ export const extractKyujinSalaryInfo = (
       if (extracted) {
         const parsed = classifyRawMatch(extracted, `${label} ${val}`);
         let priority = 75;
-        if (/総支給|想定月収|月収/i.test(label)) priority = 98;
+        const isTrialHourly =
+          parsed.salaryType === 'hourly' &&
+          /試用期間|研修期間|見習い/.test(line.slice(0, (inlineM.index || 0) + label.length + 12));
+        if (isTrialHourly) priority = 38;
+        else if (/総支給|想定月収|月収/i.test(label)) priority = 98;
         else if (/月給|基本給/i.test(label)) priority = 88;
         else if (/時給/i.test(label)) priority = 84;
         candidates.push({ priority, parsed });

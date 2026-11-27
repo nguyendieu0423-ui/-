@@ -4815,16 +4815,29 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       const resolvedHourlyWage =
         parsedSalary.salaryType === 'hourly' ? parsedSalary.hourlyWage : str('hourlyWage');
 
+      const rawEmpType = str('employmentType');
+      const fullEmpContext = `${rawEmpType} ${resolvedSalary} ${str('annualSalary')} ${str('targetVisa')} ${cleanDesc} ${sourceName}`;
+      const hasMonthlyOrFullTimeSignals =
+        parsedSalary.salaryType === 'monthly' ||
+        /(?:月給|基本給|想定月収|総支給|想定年収|モデル年収|正社員|正職員|社員登用)/.test(
+          fullEmpContext
+        );
+
       let employmentType =
-        str('employmentType') ||
+        rawEmpType ||
         detectEmploymentTypeFromText(
           `${resolvedSalary} ${resolvedHourlyWage} ${cleanDesc}`,
           sourceName
         );
-      if (
-        !str('employmentType') &&
+      if (/baito|アルバイト|パート/i.test(employmentType) && hasMonthlyOrFullTimeSignals) {
+        employmentType = /特定技能|tokutei/i.test(fullEmpContext)
+          ? 'Tokutei Ginou (特定技能)'
+          : 'Nhân viên chính thức / Chuyển đổi visa (正社員・登用)';
+      } else if (
+        !rawEmpType &&
+        !hasMonthlyOrFullTimeSignals &&
         parsedSalary.salaryType === 'hourly' &&
-        !/tokutei|特定技能|正社員/i.test(cleanDesc)
+        !/tokutei|特定技能|正社員/i.test(fullEmpContext)
       ) {
         employmentType = 'Baito / Làm thêm (アルバイト・パート)';
       }
@@ -4836,13 +4849,15 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       const derivedCode =
         str('jobCode') || cleanArea || `${sourceName.replace(/\.[^.]+$/, '')}-${idx + 1}`;
       const bonusNorm = normalizeBonusInfo(str('bonus'), str('bonusDetail'), cleanDesc);
+      const overseasRecruitOk = str('overseasRecruitOk');
       const conds = extractNormalizedKyujinConditions({
-        text: `${cleanDesc} ${str('experienceDetail')} ${str('experienceRequirement')}`,
+        text: `${cleanDesc} ${str('experienceDetail')} ${str('experienceRequirement')} ${overseasRecruitOk ? `海外招へい ${overseasRecruitOk}` : ''}`,
         minJlpt: normalizedJlpt,
         employmentType,
         existingExcludedNationalities: strArr('excludedNationalities'),
         existingExcludedGenders: strArr('excludedGenders'),
-        existingRequiresInJapan: Boolean(parsed.requiresInJapan),
+        existingRequiresInJapan:
+          Boolean(parsed.requiresInJapan) || overseasRecruitOk === '不可',
         existingRequiresTokutei: Boolean(parsed.requiresTokutei),
         existingRequiredConditions: strArr('requiredConditions'),
         existingNgConditions: strArr('ngConditions'),
@@ -4851,6 +4866,8 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
       const cleanCompName =
         normalizeKyujinCompanyName(str('companyName') || fallbackComp) || '新規取込企業';
       const cleanedJobCode = stripKyujinPdfNoise(derivedCode) || derivedCode;
+      const cleanTargetVisa = stripKyujinPdfNoise(str('targetVisa'));
+      const cleanTrialPeriodNote = stripKyujinPdfNoise(str('trialPeriodNote'));
 
       return {
         companyName: cleanCompName,
@@ -4863,6 +4880,9 @@ Tên: ${p.name || ''} / FB: ${p.fbName || ''} / Quốc tịch: ${p.nationality |
           sector,
           industry,
           employmentType,
+          targetVisa: cleanTargetVisa || undefined,
+          trialPeriodNote: cleanTrialPeriodNote || undefined,
+          overseasRecruitOk: overseasRecruitOk || undefined,
           jobCode: cleanedJobCode,
           area: stripKyujinPdfNoise(cleanArea) || '勤務地要確認',
           shiftTime: stripKyujinPdfNoise(shiftLabel),

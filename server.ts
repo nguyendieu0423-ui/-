@@ -91,11 +91,12 @@ function safeParseGeminiJson<T>(rawText: string | undefined, fallback: T): T {
 }
 
 const KYUJIN_EXTRACTION_PROMPT = `あなたは日本の人材紹介会社（特定技能・正社員・アルバイト/パート）向けの求人票精密データ抽出AIです。
-添付されたPDF・画像（複数ページ含む）またはテキストデータを確認し、求人票が複数含まれる場合や、1つの求人票に複数の施設・勤務先・店舗一覧表がある場合は、必ず施設・勤務地・枠ごとに1件ずつ分離してJSON配列で返してください。
+添付されたPDF・画像（複数ページ含む）およびテキストデータを確認し、求人票が複数含まれる場合や、1つの求人票に複数の施設・勤務先・店舗一覧表がある場合は、必ず施設・勤務地・枠ごとに1件ずつ分離してJSON配列で返してください。
+※テキストとページ画像の両方が添付されている場合は、**必ずページ画像の表レイアウト（左右2カラム・行の対応関係）とチェックボックス（☑/✔/●）や丸印（〇）を目視で確認**し、テキストの列ズレを補正して正確に抽出すること。
 
-【重要ルール：分野・雇用形態（Baito含む）・待遇の精密分類】
-1. companyName: 「企業名・法人名・店舗運営会社名」のみ（「|」「｜」などの表罫線、後ろの「代表者〜」「更新日〜」「--- Trang 〜」は絶対に削除すること）。
-2. jobCode: 「案件番号」または「施設名・店舗名」（「|」「｜」や代表者名を含めない）。
+【重要ルール：分野・雇用形態・表カラム・チェック欄の精密抽出】
+1. companyName: 「企業名・法人名・店舗運営会社名」のみ（「|」「｜」などの表罫線、後ろの「代表者〜」「更新日〜」「--- Trang 〜」「案件番号〜」は絶対に削除すること）。
+2. jobCode: 「案件番号」または「施設名・店舗名」（「|」「｜」や代表者名・社内メモを含めない）。
 3. sector (Lĩnh vực lớn): 以下の8分類から最も適切なものを1つ選択:
    - "Kaigo / Điều dưỡng"
    - "Thực phẩm & Dịch vụ ăn uống"
@@ -105,39 +106,45 @@ const KYUJIN_EXTRACTION_PROMPT = `あなたは日本の人材紹介会社（特�
    - "Vệ sinh tòa nhà & Nông nghiệp"
    - "Vận tải & Logistics"
    - "Bán lẻ / Dịch vụ Baito"
-4. industry (Ngành nghề cụ thể): 介護, 外食業, 飲食料品製造業, 宿泊, 自動車運送業, ビルクリーニング, 建設, 自動車整備, 農業, 素形材・産業機械・電気電子情報関連製造業, コンビニ・小売（アルバイト） 等。
+4. industry (Ngành nghề cụ thể): 介護, 外食業, 飲食料品製造業, 宿泊, 自動車運送業, ビルクリーニング, 建設, 自動車整備, 農業, 素形材・産業機械・電気電子情報関連製造業, コンビニ・小売（アルバイト） 等。業種欄に「自動車運送業」等の記載があればそのまま正確に出力すること。
 5. employmentType (Hình thức tuyển dụng): 以下の3分類から必ず判定:
    - "Tokutei Ginou (特定技能)"
    - "Nhân viên chính thức / Chuyển đổi visa (正社員・登用)"
    - "Baito / Làm thêm (アルバイト・パート)"
-6. facilityType: 介護の場合の施設形態（デイサービス、グループホーム、有料老人ホーム、特別養護老人ホーム、老健、訪問介護）。
-7. area: 勤務地を「都道府県＋区・市」レベルで正確に記載。
-8. shiftTime: 勤務時間・シフト枠。就業時間欄に複数のシフト枠（例: ①08:00〜17:00 / ②09:00〜18:00 / ③11:00〜20:00 / ④14:00〜22:00）が並んでいる場合は1つにまとめず、番号・時刻をすべて原文どおり列挙すること。
-9. shiftType: 勤務形態を「日勤のみ」「シフト制」「夜勤あり」から正確に判定（22:00以降の深夜・夜勤シフトがなければ「日勤のみ」または「シフト制（夜勤なし）」として扱う）。
-10. holidays: 年間休日日数・休日形態（例: 110日/年・月7〜10日、完全週休2日制 等）。
-11. overtimeHours: 残業時間・みなし残業・月平均残業時間（例: 月平均10時間、なし）。
-12. salary: 給与・月給・時給・基本給・想定月収・賃金・報酬・給与形態・総支給から必ず抽出（例: 220,000円, 22万円, 22.5万円, 20万～25万円, 220k, 月給215,000円（夜勤手当含む））。時給の場合は「時給 1,150円〜（交通費支給）」のように記載。金額の記載がある場合は絶対に「給与要確認」にしないこと。浮動小数点誤差（22.999999等）は整数に丸める。
-13. nightShiftAllowance: 夜勤手当（例: 6,000円/回、なし）。
-14. estimatedNetSalary: 手取り目安・控除後の記載があればそのまま記載（例: 約185,000円）。
-15. annualSalary: 想定年収・モデル年収の記載があれば記載（例: 320万円〜380万円）。
-16. hourlyWage: 時給（アルバイト・パート、または10,000円未満の時給表記がある場合: 1,250円 / 1,150円〜（交通費支給） / 1,200円～1,500円）。
-17. commuteAllowance: 交通費・通勤手当（例: 全額支給 / 月上限20,000円）。
-18. shiftsPerWeek: 週の勤務日数・時間（例: 週3〜5日 / 週28時間以内）。
-19. recruitCount: 募集人数（例: 2名、若干名）。
-20. interviewProcess: 選考フロー・面接回数（例: 書類選考 → 面接1〜2回）。
-21. specialBenefits: 福利厚生・待遇・各種手当・退職金・社会保険等（「社会保険加入事業者か〜」「(例)〜」「※1〜」等の求人票フォーム注記定型文は絶対に除去すること）。
-22. minJlpt: N1, N2, N3, N4, N5, 日常会話, 不問, 要確認（「N4以上」→「N4」のように基準級に正規化）。
-23. housingSupport: 「自社寮あり」「借上げ宿舎あり」「寮・社宅あり」「提供無」「要確認」。
-24. bonus / bonusDetail: 「賞与あり」「賞与なし」「要確認」＋詳細（例: 年2回 計2.5ヶ月分）。重要：チェックボックス☑・✔・●や「無」「賞与なし」「退職金・賞与無」が指定されている場合は、選択肢に「賞与あり」の文字が並んでいても必ず「賞与なし」を優先すること。
-25. experienceRequirement: 必ず「Không yêu cầu kinh nghiệm (未経験OK)」「Yêu cầu có kinh nghiệm (経験者必須)」「Ưu tiên có kinh nghiệm (経験者歓迎)」の3分類から選択。
-26. experienceDetail: 必須資格や歓迎経験の詳細。
-27. jobDescription: 業務内容（業務の特徴・具体的な作業内容を省略せず詳しく記載。フォーム定型文、「--- Trang X/Y ---」「求人票」「更新日」「代表者」「法人番号」、表の「|」「｜」記号、社内メモは完全に除去すること）。
-28. excludedNationalities: 採用不可・NGと明記された国籍の配列（例: ["ネパール"], ["ベトナム"]）。記載がなければ []。
-29. excludedGenders: 採用不可・NGと明記された性別の配列（例: "男性NG" や "女性限定" なら ["男性"]、"女性NG" や "男性限定" なら ["女性"]）。記載がなければ []。
-30. requiresInJapan: "国内在住限定"、"日本在住のみ"、"在日限定"、"海外NG"、"海外招へい 不可" などの記載があれば true、それ以外は false。
-31. requiresTokutei: 特定技能（または特定技能試験合格）が必須であれば true、それ以外は false。
-32. requiredConditions: 必須応募条件の配列（例: ["特定技能", "日本国内在住", "JLPT N4", "介護初任者研修"]）。
-33. ngConditions: 除外・NG条件の配列（例: ["ネパール人NG", "男性NG", "海外NG", "タトゥーNG"]）。`;
+   ★超重要：月給制・基本給・想定年収・正社員の求人であり、備考欄等に「試用期間3ヶ月アルバイト」「試用期間中は時給〇〇円」等の記載がある場合は、絶対に "Baito / Làm thêm" にせず、必ず "Nhân viên chính thức / Chuyển đổi visa (正社員・登用)"（特定技能が明記されている場合は "Tokutei Ginou (特定技能)"）に分類すること！
+6. targetVisa: 対象ビザ・在留資格・雇用区分の要約（例: "特定技能1号", "正社員・特定活動/技人国など", "技術・人文知識・国際業務" 等）。
+7. trialPeriodNote: 試用期間に関する記載があればそのまま抽出（例: "試用期間3ヶ月アルバイト雇用あり"、なければ ""）。
+8. overseasRecruitOk: 「海外招へい 可 / 不可」の丸印・チェックを確認し、可なら "可"、不可なら "不可"、記載不明なら ""。
+9. facilityType: 介護の場合の施設形態（デイサービス、グループホーム、有料老人ホーム、特別養護老人ホーム、老健、訪問介護）。
+10. area: 勤務地を「都道府県＋区・市」レベルで正確に記載。
+11. shiftTime: 勤務時間・シフト枠（「就業時間」欄の右側の値を正確に取得。例: "9:00 ～ 18:00" や、複数シフト ①08:00〜17:00 / ②09:00〜18:00 等）。他行の項目と取り違えないこと。
+12. shiftType: 勤務形態を「日勤のみ」「シフト制」「夜勤あり」から正確に判定（22:00以降の深夜・夜勤シフトがなければ「日勤のみ」または「シフト制（夜勤なし）」として扱う）。
+13. holidays: 年間休日日数・休日形態（例: 110日/年・月7〜10日、完全週休2日制 等）。
+14. overtimeHours: 残業時間・みなし残業・月平均残業時間（例: 月平均10時間、なし）。
+15. salary: 給与・月給・基本給・想定月収・総支給から必ず抽出（例: 280,000円, 22万円, 月給215,000円）。※試用期間中のアルバイト時給より、本採用時の「月給」「基本給」「想定月収」を最優先すること！純粋なアルバイト求人のみ「時給 1,150円〜」とする。金額の記載がある場合は絶対に「給与要確認」にしないこと。
+16. nightShiftAllowance: 夜勤手当（例: 6,000円/回、なし）。
+17. estimatedNetSalary: 「手取り」欄の金額（例: 223,270円、約185,000円）。表の隣・別行の値と取り違えないこと。
+18. annualSalary: 「年収」「想定年収」「モデル年収」欄の金額（例: 3,628,000円、320万円〜380万円）。
+19. hourlyWage: 時給（アルバイト・パート、または試用期間時給等の明記がある場合）。
+20. commuteAllowance: 「交通費」「通勤手当」欄の値（例: 上限 50,000円 / 全額支給 / 月上限20,000円）。
+21. shiftsPerWeek: 週の勤務日数・時間（例: 週3〜5日 / 週28時間以内）。
+22. recruitCount: 募集人数（例: 2名、若干名）。
+23. interviewProcess: 選考フロー・面接回数（例: 書類選考 → 面接1〜2回）。
+24. specialBenefits: 福利厚生・待遇・各種手当・退職金・社会保険等（「社会保険加入事業者か〜」「(例)〜」「※1〜」等の求人票フォーム注記定型文は絶対に除去すること）。
+25. minJlpt: N1, N2, N3, N4, N5, 日常会話, 不問, 要確認（「N4以上」→「N4」のように基準級に正規化）。
+26. housingSupport: 「自社寮あり」「借上げ宿舎あり」「寮・社宅あり」「提供無」「要確認」。
+   ★超重要：「自社寮を提供」「借上げ宿舎を提供」「提供無」が並んでいる場合、実際に☑/✔/●/〇がついている選択肢だけを採用すること。「提供無」にチェックがある場合は絶対に「提供無」を返すこと！
+27. bonus / bonusDetail: 「賞与あり」「賞与なし」「要確認」＋詳細（例: 年2回 計2.5ヶ月分）。チェックボックス☑・✔・●や「無」「賞与なし」「退職金・賞与無」が指定されている場合は、選択肢に「賞与あり」の文字が並んでいても必ず「賞与なし」を優先すること。
+28. experienceRequirement: 必ず「Không yêu cầu kinh nghiệm (未経験OK)」「Yêu cầu có kinh nghiệm (経験者必須)」「Ưu tiên có kinh nghiệm (経験者歓迎)」の3分類から選択。
+29. experienceDetail: 必須資格や歓迎経験の詳細（例: 準中型免許以上必須 等）。
+30. jobDescription: 「主な仕事内容」「業務内容」欄の具体的な作業内容のみを記載。
+   ★厳守：「関係社外秘」「社外秘」「取扱注意」「極秘」「写真掲載許可もらう」「案件番号〜」「企業名〜」「--- Trang X/Y ---」「求人票」「更新日」「代表者」「法人番号」、表の「|」「｜」記号は絶対に混入させないこと！
+31. excludedNationalities: 採用不可・NGと明記された国籍の配列（例: ["ネパール"], ["ベトナム"]）。記載がなければ []。
+32. excludedGenders: 採用不可・NGと明記された性別の配列（例: "男性NG" や "女性限定" なら ["男性"]、"女性NG" や "男性限定" なら ["女性"]）。記載がなければ []。
+33. requiresInJapan: "国内在住限定"、"日本在住のみ"、"在日限定"、"海外NG"、"海外招へい 不可" に丸印・チェックがあれば true、海外招へい「可」または記載なしなら false。
+34. requiresTokutei: 特定技能（または特定技能試験合格）が必須であれば true、それ以外は false。
+35. requiredConditions: 必須応募条件の配列（例: ["特定技能", "日本国内在住", "JLPT N4", "準中型免許"]）。
+36. ngConditions: 除外・NG条件の配列（例: ["ネパール人NG", "男性NG", "海外NG", "タトゥーNG"]）。`;
 
 const RIREKISHO_EXTRACTION_PROMPT = `あなたは日本の特定技能人材紹介会社の履歴書データ抽出AIです。
 提供された履歴書ファイル（PDF/画像/Excelテキスト/Wordテキスト）または応募者とのチャット履歴から、2カラム標準履歴書の全項目を正確に抽出してJSONで返してください。
@@ -807,28 +814,41 @@ async function startServer() {
         { text: string } | { inlineData: { mimeType: string; data: string } }
       > = [{ text: KYUJIN_EXTRACTION_PROMPT }];
 
-      if (typeof rawText === 'string' && rawText.trim()) {
+      const hasRawText = typeof rawText === 'string' && rawText.trim().length > 0;
+      const validImages = Array.isArray(images)
+        ? images.filter(
+            (img): img is { mimeType: string; base64Data: string } =>
+              Boolean(
+                img &&
+                  typeof img === 'object' &&
+                  typeof (img as { mimeType?: unknown }).mimeType === 'string' &&
+                  ALLOWED_MIME_TYPES.has((img as { mimeType: string }).mimeType) &&
+                  typeof (img as { base64Data?: unknown }).base64Data === 'string' &&
+                  (img as { base64Data: string }).base64Data.length > 0
+              )
+          )
+        : [];
+
+      if (hasRawText && validImages.length > 0) {
+        parts.push({
+          text: `Tên nguồn/file: ${typeof fileName === 'string' ? fileName : 'Kyujin_PDF'} (${validImages.length} trang ảnh trực quan + văn bản trích xuất).\nHãy đối chiếu đồng thời ảnh trang PDF để đọc đúng cột bảng 2 chiều, dấu tick (☑/✔/●) ở mục 住宅設備/賞与, và dấu khoanh tròn (〇) ở mục 海外招へい 可/不可.\n\nNội dung văn bản:\n${rawText}`,
+        });
+        validImages.slice(0, 8).forEach((img) => {
+          parts.push({
+            inlineData: { mimeType: img.mimeType, data: img.base64Data },
+          });
+        });
+      } else if (hasRawText) {
         parts.push({
           text: `Tên nguồn/file: ${typeof fileName === 'string' ? fileName : 'Văn bản thô'}\n\nNội dung tuyển dụng:\n${rawText}`,
         });
       } else if (Array.isArray(images) && images.length > 0) {
-        const validImages = images.filter(
-          (img): img is { mimeType: string; base64Data: string } =>
-            Boolean(
-              img &&
-                typeof img === 'object' &&
-                typeof (img as { mimeType?: unknown }).mimeType === 'string' &&
-                ALLOWED_MIME_TYPES.has((img as { mimeType: string }).mimeType) &&
-                typeof (img as { base64Data?: unknown }).base64Data === 'string' &&
-                (img as { base64Data: string }).base64Data.length > 0
-            )
-        );
         if (validImages.length === 0) {
           res.status(400).json({ error: 'Không có trang ảnh hợp lệ để nhận diện OCR.' });
           return;
         }
         parts.push({
-          text: `Tên nguồn/file: ${typeof fileName === 'string' ? fileName : 'PDF_Scan'} (${validImages.length} trang ảnh scan). Hãy đọc toàn bộ chữ tiếng Nhật, bảng lương (給与/月給/時給/万), địa điểm và điều kiện tuyển dụng trên tất cả các trang ảnh này.`,
+          text: `Tên nguồn/file: ${typeof fileName === 'string' ? fileName : 'PDF_Scan'} (${validImages.length} trang ảnh scan). Hãy đọc toàn bộ chữ tiếng Nhật, bảng lương (給与/月給/時給/万), địa điểm, dấu tick (☑) và điều kiện tuyển dụng trên tất cả các trang ảnh này.`,
         });
         validImages.slice(0, 12).forEach((img) => {
           parts.push({
@@ -863,6 +883,9 @@ async function startServer() {
                 sector: { type: Type.STRING },
                 industry: { type: Type.STRING },
                 employmentType: { type: Type.STRING },
+                targetVisa: { type: Type.STRING },
+                trialPeriodNote: { type: Type.STRING },
+                overseasRecruitOk: { type: Type.STRING },
                 facilityType: { type: Type.STRING },
                 area: { type: Type.STRING },
                 shiftTime: { type: Type.STRING },
@@ -934,7 +957,11 @@ async function startServer() {
           .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
           .replace(/-{2,}\s*(?:Trang|Page|ページ)\s*\d+(?:\s*\/\s*\d+)?\s*-{2,}/gi, ' ')
           .replace(/(?:^|[\s\n|｜])(?:Trang|Page|ページ)\s*\d+\s*\/\s*\d+(?=$|[\s\n|｜])/gim, ' ')
+          .replace(/(?:^|[\s\n|｜])(?:関係社外秘|社外秘|取扱注意|極秘|社内限)(?=$|[\s\n|｜])/g, ' ')
+          .replace(/(?:^|[\s\n|｜])写真掲載許可(?:もらう|あり|要|済|取得済)?(?=$|[\s\n|｜])/g, ' ')
           .replace(/(?:^|[\s\n|｜])求人票(?:\s*[（(][^）)\n]{0,24}[）)])?(?=$|[\s\n|｜])/g, ' ')
+          .replace(/(?:^|[\s\n|｜])案件番号\s*[|｜:：]?\s*[A-Za-z0-9\-ー_]{1,24}(?=$|[\s\n|｜])/g, ' ')
+          .replace(/(?:^|[\s\n|｜])企業名\s*[|｜:：]\s*[^\n|｜]{1,36}(?=$|[\s\n|｜])/g, ' ')
           .replace(
             /(?:^|[\s\n|｜])(?:更新日|作成日|公開日|掲載日)\s*[|｜:：]\s*(?:\d{4}[年\/\-]\d{1,2}[月\/\-]\d{1,2}日?|[令和平成]\d+年\d{1,2}月\d{1,2}日?|[^\s|｜\n]{1,24})/gi,
             ' '
@@ -1002,6 +1029,11 @@ async function startServer() {
           (typeof rawText === 'string' && rawItems.length <= 1
             ? extractAnnualSalaryText(rawText)
             : '');
+        const commuteFallback =
+          typeof rawText === 'string' && rawItems.length <= 1
+            ? rawText.match(/(?:交通費|通勤手当)\s*[：:|｜\s]*([^\n|｜]{2,45})/i)?.[1]?.trim() || ''
+            : '';
+        const cleanCommute = cleanKyujinField(item.commuteAllowance) || cleanKyujinField(commuteFallback);
         const rawJlpt = cleanKyujinField(item.minJlpt);
         const normJlptMatch = rawJlpt.match(/(N[1-5])\s*(?:以上|程度|相当)?/i);
         const finalJlpt = normJlptMatch ? normJlptMatch[1].toUpperCase() : rawJlpt;
@@ -1015,10 +1047,32 @@ async function startServer() {
           ? '賞与なし'
           : bonusRaw;
 
+        const rawEmp = cleanKyujinField(item.employmentType);
+        const rawTextCheck = typeof rawText === 'string' ? rawText : '';
+        const fullContextForEmp = `${rawEmp} ${finalSalary} ${cleanAnnual} ${cleanKyujinField(item.targetVisa)} ${cleanKyujinField(item.jobDescription)} ${rawTextCheck}`;
+        const hasMonthlyOrFullTimeSignals =
+          salaryParsed.salaryType === 'monthly' ||
+          /(?:月給|基本給|想定月収|総支給|想定年収|モデル年収|正社員|正職員|社員登用)/.test(fullContextForEmp);
+        let finalEmp = rawEmp;
+        if (/baito|アルバイト|パート/i.test(rawEmp) && hasMonthlyOrFullTimeSignals) {
+          finalEmp = /特定技能|tokutei/i.test(fullContextForEmp)
+            ? 'Tokutei Ginou (特定技能)'
+            : 'Nhân viên chính thức / Chuyển đổi visa (正社員・登用)';
+        }
+
+        const trialNoteFromText = rawTextCheck.match(/(?:試用期間|研修期間)[^\n。]{0,36}(?:アルバイト|パート)/)?.[0] || '';
+        const cleanTrialNote = cleanKyujinField(item.trialPeriodNote) || cleanKyujinField(trialNoteFromText);
+        const cleanTargetVisa = cleanKyujinField(item.targetVisa);
+        const cleanOverseas = cleanKyujinField(item.overseasRecruitOk);
+
         return {
           ...item,
           companyName: cleanServerCompanyName(item.companyName),
           jobCode: cleanKyujinField(item.jobCode),
+          employmentType: finalEmp || item.employmentType,
+          targetVisa: cleanTargetVisa,
+          trialPeriodNote: cleanTrialNote,
+          overseasRecruitOk: cleanOverseas,
           area: cleanKyujinField(item.area),
           shiftTime: cleanKyujinField(item.shiftTime),
           shiftType: cleanKyujinField(item.shiftType),
@@ -1029,7 +1083,7 @@ async function startServer() {
           estimatedNetSalary: cleanNet,
           annualSalary: cleanAnnual,
           nightShiftAllowance: cleanKyujinField(item.nightShiftAllowance),
-          commuteAllowance: cleanKyujinField(item.commuteAllowance),
+          commuteAllowance: cleanCommute,
           shiftsPerWeek: cleanKyujinField(item.shiftsPerWeek),
           recruitCount: cleanKyujinField(item.recruitCount),
           interviewProcess: cleanKyujinField(item.interviewProcess),

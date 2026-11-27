@@ -181,15 +181,19 @@ const openPdfDocumentWithFallback = async (
   throw classifyPdfLoadError(lastError, fileName);
 };
 
+const MAX_VISUAL_PAGES = 8;
+
 const renderPageToBase64Image = async (
   pdfDoc: Awaited<ReturnType<typeof openPdfDocumentWithFallback>>,
-  pageNumber: number
+  pageNumber: number,
+  maxTargetDim = 1700,
+  jpegQuality = 0.85
 ): Promise<RenderedPdfPageImage> => {
   const page = await pdfDoc.getPage(pageNumber);
   const baseViewport = page.getViewport({ scale: 1 });
   const maxDim = Math.max(baseViewport.width, baseViewport.height, 1);
-  // Target ~1700px max dimension (clamped between 1.5x and 2.2x) for crisp Japanese OCR
-  const scale = Math.min(2.2, Math.max(1.5, 1700 / maxDim));
+  // Target crisp resolution (clamped between 1.35x and 2.2x) for Japanese text, checkboxes & radio circles
+  const scale = Math.min(2.2, Math.max(1.35, maxTargetDim / maxDim));
   const viewport = page.getViewport({ scale });
 
   const canvas = document.createElement('canvas');
@@ -210,7 +214,7 @@ const renderPageToBase64Image = async (
     background: '#ffffff',
   }).promise;
 
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.86);
+  const dataUrl = canvas.toDataURL('image/jpeg', jpegQuality);
   const commaIdx = dataUrl.indexOf(',');
   const base64Data = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
 
@@ -227,7 +231,8 @@ const renderPageToBase64Image = async (
 
 export const extractPdfWithOcrFallback = async (
   file: File,
-  onProgress?: (statusText: string) => void
+  onProgress?: (statusText: string) => void,
+  options?: { includeVisualImages?: boolean }
 ): Promise<PdfExtractionResult> => {
   if (file.size === 0) {
     throw new Error(`File PDF "${file.name}" bị rỗng (0 bytes).`);
@@ -259,6 +264,20 @@ export const extractPdfWithOcrFallback = async (
   const meaningfulCharCount = countMeaningfulPdfChars(combinedText);
 
   if (meaningfulCharCount >= MIN_MEANINGFUL_TEXT_CHARS) {
+    const renderedImages: RenderedPdfPageImage[] = [];
+    if (options?.includeVisualImages) {
+      const visualCount = Math.min(numPages, MAX_VISUAL_PAGES);
+      for (let p = 1; p <= visualCount; p++) {
+        onProgress?.(`Đang chụp bố cục bảng & checkbox trang ${p}/${visualCount}...`);
+        try {
+          const rendered = await renderPageToBase64Image(pdfDoc, p, 1450, 0.8);
+          renderedImages.push(rendered);
+        } catch {
+          // Keep extracted text even if canvas render fails on a page
+        }
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
     try {
       await pdfDoc.cleanup(false);
     } catch {
@@ -269,7 +288,7 @@ export const extractPdfWithOcrFallback = async (
       text: combinedText,
       meaningfulCharCount,
       numPages,
-      renderedImages: [],
+      renderedImages,
     };
   }
 
@@ -282,7 +301,7 @@ export const extractPdfWithOcrFallback = async (
   const renderedImages: RenderedPdfPageImage[] = [];
   for (let p = 1; p <= pagesToRender; p++) {
     onProgress?.(`Phát hiện PDF ảnh scan, đang render OCR trang ${p}/${pagesToRender}...`);
-    const rendered = await renderPageToBase64Image(pdfDoc, p);
+    const rendered = await renderPageToBase64Image(pdfDoc, p, 1700, 0.86);
     renderedImages.push(rendered);
     await new Promise((r) => setTimeout(r, 0));
   }

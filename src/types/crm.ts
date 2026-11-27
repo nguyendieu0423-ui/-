@@ -127,6 +127,9 @@ export interface KyujinSlot {
   requiresTokutei?: boolean;
   requiredConditions?: string[];
   ngConditions?: string[];
+  targetVisa?: string;
+  trialPeriodNote?: string;
+  overseasRecruitOk?: string;
   salaryManuallyEdited?: boolean;
   manualProtectedFields?: string[];
 }

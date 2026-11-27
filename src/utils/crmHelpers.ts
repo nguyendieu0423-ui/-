@@ -2418,6 +2418,180 @@ export const findMatchingKyujinsForCandidate = (
   kyujinsList: KyujinCompany[] = []
 ): KyujinMatchResult[] => evaluateCandidateKyujinMatches(cand, kyujinsList).matches;
 
+const formatKyujinSectorForJp = (sector = '', industry = ''): string => {
+  const s = String(sector || '').trim();
+  const ind = String(industry || '').trim();
+  if (/kaigo|điều dưỡng|介護/i.test(`${s} ${ind}`)) return '介護・福祉';
+  if (/vận tải|logistics|運送|物流/i.test(`${s} ${ind}`)) return '運送・物流';
+  if (/thực phẩm|ăn uống|外食|飲食/i.test(`${s} ${ind}`)) return '飲食・食品製造';
+  if (/sản xuất|nhà máy|製造/i.test(`${s} ${ind}`)) return '製造・工場';
+  if (/xây dựng|cơ khí|建設|整備/i.test(`${s} ${ind}`)) return '建設・機械整備';
+  if (/khách sạn|du lịch|宿泊/i.test(`${s} ${ind}`)) return '宿泊・観光';
+  if (/vệ sinh|nông nghiệp|ビルクリーニング|農業/i.test(`${s} ${ind}`)) return 'ビルクリーニング・農業';
+  if (/bán lẻ|baito|小売|コンビニ/i.test(`${s} ${ind}`)) return '小売・サービス';
+  return ind || '特定技能';
+};
+
+const formatKyujinEmploymentForJp = (empType = ''): string => {
+  const s = String(empType || '').trim();
+  if (/baito|アルバイト|パート/i.test(s)) return 'アルバイト・パート';
+  if (/正社員|登用|chính thức/i.test(s)) return '正社員・登用';
+  if (/特定技能|tokutei/i.test(s)) return '特定技能';
+  return s.replace(/[A-Za-zÀ-Ỹà-ỹ\s/()]+/g, '').trim() || '特定技能';
+};
+
+const formatKyujinExperienceForJp = (expReq = '', careQual = ''): string => {
+  const s = String(expReq || '').trim();
+  if (/経験者必須|Yêu cầu có kinh nghiệm/i.test(s)) return '経験者必須';
+  if (/未経験可・経験者優遇|経験者優遇|経験あれば尚可|尚可|Ưu tiên có kinh nghiệm/i.test(s)) {
+    return '未経験可・経験者優遇';
+  }
+  if (/未経験|Không yêu cầu/i.test(s)) return '未経験OK';
+  if (careQual && careQual !== '不問') return `資格・経験優遇（${careQual}）`;
+  const jpOnly = s
+    .replace(/(?:Không yêu cầu kinh nghiệm|Yêu cầu có kinh nghiệm|Ưu tiên có kinh nghiệm(?:\s*\/\s*Không yêu cầu bắt buộc)?)/gi, '')
+    .replace(/^\s*[()（）\/\s]+|[()（）\/\s]+$/g, '')
+    .trim();
+  return jpOnly || '未経験OK';
+};
+
+const sanitizeTextForJpOutput = (raw = ''): string => {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (/^(?:thỏa thuận|trao đổi(?:\s*(?:khi|thêm|lúc))?(?:\s*phỏng vấn)?|chưa rõ|đang cập nhật)$/i.test(s)) {
+    return '応相談';
+  }
+  if (/^(?:xác nhận khi phỏng vấn|cần xác nhận)$/i.test(s)) return '要確認';
+  return s
+    .replace(/Không yêu cầu kinh nghiệm\s*\(未経験OK\)/gi, '未経験OK')
+    .replace(/Yêu cầu có kinh nghiệm\s*\(経験者必須\)/gi, '経験者必須')
+    .replace(/Ưu tiên có kinh nghiệm(?:\s*\/\s*Không yêu cầu bắt buộc)?\s*\(未経験可・経験者優遇\)/gi, '未経験可・経験者優遇')
+    .replace(/Ưu tiên có kinh nghiệm(?:\s*\/\s*Không yêu cầu bắt buộc)?/gi, '未経験可・経験者優遇')
+    .replace(/Ưu tiên có chứng chỉ\/kinh nghiệm\s*\(([^)]+)\)/gi, '資格・経験優遇（$1）')
+    .replace(/Không yêu cầu kinh nghiệm/gi, '未経験OK')
+    .replace(/Yêu cầu có kinh nghiệm/gi, '経験者必須')
+    .replace(/Baito\s*\/\s*Làm thêm\s*\(アルバイト・パート\)/gi, 'アルバイト・パート')
+    .replace(/Nhân viên chính thức\s*\/\s*Chuyển đổi visa\s*\(正社員・登用\)/gi, '正社員・登用')
+    .replace(/Tokutei Ginou\s*\(特定技能\)/gi, '特定技能')
+    .replace(/日勤のみ\s*\(Chỉ ca ngày\)/gi, '日勤のみ')
+    .replace(/シフト制\s*\(Ca xoay\s*-\s*không ca đêm\)/gi, 'シフト制（夜勤なし）')
+    .replace(/シフト制\s*\(Ca xoay\)/gi, 'シフト制')
+    .replace(/夜勤あり\s*\(Có ca đêm\)/gi, '夜勤あり')
+    .replace(/\(Chỉ ca ngày\)/gi, '')
+    .replace(/\(Ca xoay\s*-\s*không ca đêm\)/gi, '（夜勤なし）')
+    .replace(/\(Ca xoay\)/gi, '')
+    .replace(/\(Có ca đêm\)/gi, '')
+    .trim();
+};
+
+const buildVisaAndEmploymentSummary = (
+  comp: KyujinCompany,
+  slot: KyujinSlot,
+  lang: 'vi' | 'jp'
+): string => {
+  const empType = slot.employmentType || comp.employmentType || 'Tokutei Ginou (特定技能)';
+  const combinedText = [
+    slot.targetVisa || '',
+    slot.trialPeriodNote || '',
+    slot.jobDescription || '',
+    slot.specialBenefits || '',
+    slot.experienceDetail || '',
+    slot.salary || '',
+    ...(comp.requiredConditions || []),
+    ...(slot.requiredConditions || []),
+    ...(comp.ngConditions || []),
+    ...(slot.ngConditions || []),
+  ].join(' ');
+
+  const isBaito = /baito|アルバイト|パート/i.test(empType);
+  const isFullTime = /正社員|登用|chính thức/i.test(empType);
+  const requiresInJapan = Boolean(
+    slot.requiresInJapan ||
+      comp.requiresInJapan ||
+      /国内在住|日本在住|在日限定|海外招へい\s*(?:不可|NG|×)|海外\s*(?:NG|不可)/i.test(combinedText)
+  );
+  const overseasOk =
+    !requiresInJapan &&
+    (slot.overseasRecruitOk === '可' ||
+      /海外招へい\s*(?:可|OK|○|〇)|海外から応募可|海外OK/i.test(combinedText));
+
+  const trialM =
+    (slot.trialPeriodNote && slot.trialPeriodNote.trim()) ||
+    (combinedText.match(/(?:試用期間|研修期間)[^\n。]{0,28}(?:アルバイト|パート)/)?.[0] || '');
+  const hasTrialBaito = Boolean(trialM);
+  const trialMonthsM = (slot.trialPeriodNote || combinedText).match(/試用期間\s*(\d+\s*(?:ヶ|か|カ)?月)/);
+
+  const hasSpecificVisaKeywords = /特定活動|技人国|技術・人文知識・国際業務/.test(combinedText);
+  const explicitTargetVisa = stripKyujinPdfNoise(slot.targetVisa || '').trim();
+
+  if (lang === 'jp') {
+    let baseLabel = explicitTargetVisa;
+    if (!baseLabel) {
+      if (isBaito) {
+        baseLabel = 'アルバイト・パート（資格外活動・週28時間以内等）';
+      } else if (isFullTime) {
+        baseLabel = hasSpecificVisaKeywords
+          ? '正社員・特定活動/技人国など'
+          : '正社員（ビザ変更・転籍可）';
+      } else {
+        baseLabel = '特定技能1号';
+      }
+    } else {
+      baseLabel = sanitizeTextForJpOutput(baseLabel);
+    }
+
+    const tags: string[] = [];
+    if (requiresInJapan && !/国内在住/.test(baseLabel)) {
+      tags.push('国内在住のみ');
+    } else if (overseasOk && !/海外招へい/.test(baseLabel)) {
+      tags.push('海外招へい可');
+    }
+    if (hasTrialBaito && !/試用期間/.test(baseLabel)) {
+      tags.push(
+        trialMonthsM
+          ? `試用期間${trialMonthsM[1].replace(/\s+/g, '')}アルバイト雇用あり`
+          : '試用期間中アルバイト雇用あり'
+      );
+    }
+    return tags.length > 0 ? `${baseLabel}（${tags.join('・')}）` : baseLabel;
+  }
+
+  let baseVi = '';
+  if (explicitTargetVisa) {
+    baseVi = isBaito
+      ? `Baito / Làm thêm (${explicitTargetVisa})`
+      : isFullTime
+      ? `Nhân viên chính thức (${explicitTargetVisa})`
+      : `Tokutei Ginou (${explicitTargetVisa})`;
+  } else if (isBaito) {
+    baseVi = 'Baito / Làm thêm (アルバイト・パート)';
+  } else if (isFullTime) {
+    baseVi = hasSpecificVisaKeywords
+      ? 'Nhân viên chính thức — Chính quy / Tokutei Katsudo / Kỹ sư (正社員・特定活動/技人国など)'
+      : 'Nhân viên chính thức / Chuyển đổi visa (正社員・登用)';
+  } else {
+    baseVi = 'Tokutei Ginou số 1 (特定技能1号)';
+  }
+
+  const tagsVi: string[] = [];
+  if (requiresInJapan) {
+    tagsVi.push('Chỉ tuyển đang ở Nhật (国内在住のみ)');
+  } else if (overseasOk) {
+    tagsVi.push('Nhận ứng viên từ nước ngoài / Bảo lãnh mới (海外招へい可)');
+  }
+  if (hasTrialBaito) {
+    const viMonths = trialMonthsM
+      ? trialMonthsM[1].replace(/\s+/g, '').replace(/[ヶかカ]月/g, ' tháng')
+      : '';
+    tagsVi.push(
+      viMonths
+        ? `Thử việc ${viMonths} đầu ký hợp đồng Baito`
+        : 'Có giai đoạn thử việc Baito'
+    );
+  }
+  return tagsVi.length > 0 ? `${baseVi} — ${tagsVi.join(' ・ ')}` : baseVi;
+};
+
 export const buildAnonymousJobPostText = (
   comp: KyujinCompany,
   slot: KyujinSlot,
@@ -2487,41 +2661,78 @@ export const buildAnonymousJobPostText = (
     slot,
     lang
   );
+  const cleanCommute = anonymizeKyujinTextForCandidate(
+    stripKyujinPdfNoise(slot.commuteAllowance || ''),
+    comp,
+    slot,
+    lang
+  );
+  const visaEmploymentSummary = anonymizeKyujinTextForCandidate(
+    buildVisaAndEmploymentSummary(comp, slot, lang),
+    comp,
+    slot,
+    lang
+  );
+
   const expText =
-    slot.experienceRequirement ||
-    (slot.careQualification && slot.careQualification !== '不問'
-      ? lang === 'jp'
-        ? `資格・経験優遇（${slot.careQualification}）`
-        : `Ưu tiên có chứng chỉ/kinh nghiệm (${slot.careQualification})`
-      : lang === 'jp'
-      ? '未経験OK'
-      : 'Không yêu cầu kinh nghiệm (未経験OK)');
+    lang === 'jp'
+      ? formatKyujinExperienceForJp(slot.experienceRequirement, slot.careQualification)
+      : slot.experienceRequirement ||
+        (slot.careQualification && slot.careQualification !== '不問'
+          ? `Ưu tiên có chứng chỉ/kinh nghiệm (${slot.careQualification})`
+          : 'Không yêu cầu kinh nghiệm (未経験OK)');
 
   const shiftLineParts = [
-    cleanShiftTime,
-    slot.shiftType ? `(${slot.shiftType})` : '',
-    cleanHolidays ? (lang === 'jp' ? `休日：${cleanHolidays}` : `Ngày nghỉ: ${cleanHolidays}`) : '',
-    cleanOvertime ? (lang === 'jp' ? `残業：${cleanOvertime}` : `Tăng ca: ${cleanOvertime}`) : '',
+    lang === 'jp' ? sanitizeTextForJpOutput(cleanShiftTime) : cleanShiftTime,
+    slot.shiftType
+      ? `(${lang === 'jp' ? sanitizeTextForJpOutput(slot.shiftType) : slot.shiftType})`
+      : '',
+    cleanHolidays
+      ? lang === 'jp'
+        ? `休日：${sanitizeTextForJpOutput(cleanHolidays)}`
+        : `Ngày nghỉ: ${cleanHolidays}`
+      : '',
+    cleanOvertime
+      ? lang === 'jp'
+        ? `残業：${sanitizeTextForJpOutput(cleanOvertime)}`
+        : `Tăng ca: ${cleanOvertime}`
+      : '',
   ].filter(Boolean);
 
   if (lang === 'jp') {
+    const jpSector = formatKyujinSectorForJp(sector, industry);
+    const jpIndustry = sanitizeTextForJpOutput(industry);
+    const jpEmpType = formatKyujinEmploymentForJp(empType);
+    const jpSalary = sanitizeTextForJpOutput(slot.salary || '') || '応相談';
+    const jpHourly = sanitizeTextForJpOutput(slot.hourlyWage || '');
+    const jpNet = sanitizeTextForJpOutput(slot.estimatedNetSalary || '');
+    const jpAnnual = sanitizeTextForJpOutput(slot.annualSalary || '');
+    const jpCommute = sanitizeTextForJpOutput(cleanCommute);
+    const jpHousing = sanitizeTextForJpOutput(slot.housingSupport || '') || '要確認';
+    const jpJobDesc = sanitizeTextForJpOutput(cleanJobDesc);
+    const jpExpDetail = sanitizeTextForJpOutput(cleanExpDetail);
+    const jpInterview = sanitizeTextForJpOutput(cleanInterview);
+    const jpBenefits = sanitizeTextForJpOutput(cleanBenefits);
+    const jpFacilityType = sanitizeTextForJpOutput(slot.facilityType || '');
+
     const compPay = isBaito
       ? [
-          slot.hourlyWage ? `時給：${slot.hourlyWage}` : `給与：${slot.salary || '応相談'}`,
-          slot.commuteAllowance ? `交通費：${slot.commuteAllowance}` : '',
-          slot.shiftsPerWeek ? `シフト：${slot.shiftsPerWeek}` : '',
+          jpHourly ? `時給：${jpHourly}` : `給与：${jpSalary}`,
+          jpCommute ? `交通費：${jpCommute}` : '',
+          slot.shiftsPerWeek ? `シフト：${sanitizeTextForJpOutput(slot.shiftsPerWeek)}` : '',
         ]
           .filter(Boolean)
           .join(' ／ ')
       : [
-          `基本給・総支給：${slot.salary || '応相談'}`,
-          slot.nightShiftAllowance ? `夜勤手当：${slot.nightShiftAllowance}` : '',
-          slot.estimatedNetSalary ? `手取り目安：${slot.estimatedNetSalary}` : '',
-          slot.annualSalary ? `想定年収：${slot.annualSalary}` : '',
+          `基本給・総支給：${jpSalary}`,
+          slot.nightShiftAllowance ? `夜勤手当：${sanitizeTextForJpOutput(slot.nightShiftAllowance)}` : '',
+          jpNet ? `手取り目安：${jpNet}` : '',
+          jpAnnual ? `想定年収：${jpAnnual}` : '',
+          jpCommute ? `交通費：${jpCommute}` : '',
           slot.bonus === '賞与あり'
-            ? `賞与あり${cleanBonusDetail ? `（${cleanBonusDetail}）` : ''}`
+            ? `賞与あり${cleanBonusDetail ? `（${sanitizeTextForJpOutput(cleanBonusDetail)}）` : ''}`
             : slot.bonus === '賞与なし'
-            ? `賞与なし${cleanBonusDetail ? `（${cleanBonusDetail}）` : ''}`
+            ? `賞与なし${cleanBonusDetail ? `（${sanitizeTextForJpOutput(cleanBonusDetail)}）` : ''}`
             : '',
         ]
           .filter(Boolean)
@@ -2529,18 +2740,19 @@ export const buildAnonymousJobPostText = (
 
     const assembledJp = [
       `【求人案内（匿名）】`,
-      `・雇用形態：${empType}`,
-      `・分野 / 職種：${sector} - ${industry}${slot.facilityType ? `（${slot.facilityType}）` : ''}`,
-      `・勤務地：${publicArea}`,
-      slot.recruitCount ? `・募集人数：${slot.recruitCount}` : '',
-      `・仕事内容：${cleanJobDesc || '面接時に詳しくご説明いたします。'}`,
-      `・経験要件：${expText}${cleanExpDetail ? `（${cleanExpDetail}）` : ''}`,
-      `・日本語レベル：${slot.minJlpt || '応相談'}`,
+      `・対象ビザ・雇用形態：${sanitizeTextForJpOutput(visaEmploymentSummary)}`,
+      `・雇用形態：${jpEmpType}`,
+      `・分野 / 職種：${jpSector === jpIndustry ? jpIndustry : `${jpSector} - ${jpIndustry}`}${jpFacilityType ? `（${jpFacilityType}）` : ''}`,
+      `・勤務地：${sanitizeTextForJpOutput(publicArea)}`,
+      slot.recruitCount ? `・募集人数：${sanitizeTextForJpOutput(slot.recruitCount)}` : '',
+      `・仕事内容：${jpJobDesc || '面接時に詳しくご説明いたします。'}`,
+      `・経験要件：${expText}${jpExpDetail ? `（${jpExpDetail}）` : ''}`,
+      `・日本語レベル：${sanitizeTextForJpOutput(slot.minJlpt || '') || '応相談'}`,
       `・給与・待遇：${compPay}`,
-      `・住宅・寮：${slot.housingSupport || '要確認'}`,
+      `・住宅・寮：${jpHousing}`,
       shiftLineParts.length > 0 ? `・勤務時間・休日：${shiftLineParts.join(' / ')}` : '',
-      cleanInterview ? `・選考方法：${cleanInterview}` : '',
-      cleanBenefits ? `・特別手当・福利厚生：${cleanBenefits}` : '',
+      jpInterview ? `・選考方法：${jpInterview}` : '',
+      jpBenefits ? `・特別手当・福利厚生：${jpBenefits}` : '',
     ]
       .filter(Boolean)
       .join('\n');
@@ -2551,7 +2763,7 @@ export const buildAnonymousJobPostText = (
   const paySummaryVi = isBaito
     ? [
         slot.hourlyWage ? `Lương giờ: ${slot.hourlyWage}` : `Lương: ${slot.salary || 'Thỏa thuận'}`,
-        slot.commuteAllowance ? `Hỗ trợ đi lại: ${slot.commuteAllowance}` : '',
+        cleanCommute ? `Hỗ trợ đi lại: ${cleanCommute}` : '',
         slot.shiftsPerWeek ? `Số ca/tuần: ${slot.shiftsPerWeek}` : '',
       ]
         .filter(Boolean)
@@ -2561,6 +2773,7 @@ export const buildAnonymousJobPostText = (
         slot.nightShiftAllowance ? `Phụ cấp ca đêm: ${slot.nightShiftAllowance}` : '',
         slot.estimatedNetSalary ? `Thực nhận ước tính (手取り): ${slot.estimatedNetSalary}` : '',
         slot.annualSalary ? `Thu nhập năm (年収): ${slot.annualSalary}` : '',
+        cleanCommute ? `Hỗ trợ đi lại (交通費): ${cleanCommute}` : '',
         slot.bonus === '賞与あり'
           ? `Thưởng: Có${cleanBonusDetail ? ` (${cleanBonusDetail})` : ''}`
           : slot.bonus === '賞与なし'
@@ -2572,7 +2785,7 @@ export const buildAnonymousJobPostText = (
 
   const assembledVi = [
     `📢 [ĐƠN TUYỂN DỤNG ẨN DANH]`,
-    `• Hình thức: ${empType}`,
+    `• Đối tượng Visa & Hình thức: ${visaEmploymentSummary}`,
     `• Lĩnh vực - Ngành nghề: ${sector} - ${industry}${slot.facilityType ? ` (${slot.facilityType})` : ''}`,
     `• Khu vực làm việc: ${publicArea}`,
     slot.recruitCount ? `• Số lượng tuyển: ${slot.recruitCount}` : '',
@@ -2624,14 +2837,32 @@ export const detectSectorFromIndustryOrText = (industry = '', text = ''): string
 };
 
 export const detectEmploymentTypeFromText = (text = '', hint = ''): string => {
-  const combined = `${hint} ${text}`;
-  if (/アルバイト|パート|baito|làm thêm|時給/i.test(combined) && !/特定技能/i.test(combined)) {
+  const combinedRaw = `${hint} ${text}`;
+  // Strip trial-period notes (e.g. "試用期間3ヶ月アルバイト" / "研修期間中時給...") so full-time monthly jobs are NOT misclassified as Baito
+  const withoutTrialBaito = combinedRaw.replace(
+    /(?:試用期間|研修期間|見習い期間|試用)[^\n。]{0,45}(?:アルバイト|パート|時給[^\n。]{0,20})/gi,
+    ' '
+  );
+  const hasMonthlyOrFullTime =
+    /月給|基本給|想定月収|総支給|想定年収|モデル年収|正社員|正職員|社員登用|転籍/i.test(
+      withoutTrialBaito
+    );
+  const hasExplicitTokutei =
+    /特定技能|tokutei/i.test(withoutTrialBaito) &&
+    !/特定技能\s*(?:不可|NG|対象外)/i.test(withoutTrialBaito);
+
+  if (hasMonthlyOrFullTime) {
+    return hasExplicitTokutei
+      ? 'Tokutei Ginou (特定技能)'
+      : 'Nhân viên chính thức / Chuyển đổi visa (正社員・登用)';
+  }
+  if (/アルバイト|パート|baito|làm thêm|時給/i.test(withoutTrialBaito) && !hasExplicitTokutei) {
     return 'Baito / Làm thêm (アルバイト・パート)';
   }
-  if (/正社員|登用|chuyển đổi visa|nhân viên chính thức/i.test(combined) && !/特定技能/i.test(combined)) {
+  if (/正社員|登用|chuyển đổi visa|nhân viên chính thức/i.test(withoutTrialBaito) && !hasExplicitTokutei) {
     return 'Nhân viên chính thức / Chuyển đổi visa (正社員・登用)';
   }
-  if (/アルバイト・パート|baito/i.test(combined)) {
+  if (/アルバイト・パート|baito/i.test(withoutTrialBaito)) {
     return 'Baito / Làm thêm (アルバイト・パート)';
   }
   return 'Tokutei Ginou (特定技能)';
@@ -2643,7 +2874,8 @@ export const detectIndustryFromText = (text = '', hint = ''): string => {
 
   const matchFromSource = (src: string): string => {
     if (!src) return '';
-    if (/自動車運送|トラック|ドライバー|運行|配送|運転手|貨物/.test(src)) return '自動車運送業';
+    if (/自動車運送|一般貨物自動車|運送業|運送|トラック|ドライバー|運行|配送|運転手|貨物/.test(src))
+      return '自動車運送業';
     if (/外食|飲食業|レストラン|ホール|キッチン|調理|居酒屋|カフェ/.test(src)) return '外食業';
     if (/飲食料品製造|食品加工|弁当|惣菜|製パン|水産加工/.test(src)) return '飲食料品製造業';
     if (/介護|デイサービス|グループホーム|老人ホーム|特養|老健|訪問介護|ヘルパー/.test(src))
@@ -2894,7 +3126,7 @@ export const normalizeKyujinCompanyName = (rawName = ''): string => {
     .replace(/[（(]\s*(?:代表(?:者|取締役)?|更新日|法人番号)[^)）]*[)）]/gi, '')
     .replace(/[|｜]+/g, ' ')
     .replace(
-      /(?:^|\s)(?:代表(?:者|取締役|社員)?(?:名|氏名)?|理事長|施設長|更新日|作成日|法人番号|事業所番号|求人番号)(?=\s*[|｜:：]|\s+\S|$).*$/i,
+      /(?:^|\s)(?:代表(?:者|取締役|社員)?(?:名|氏名)?|理事長|施設長|更新日|作成日|法人番号|事業所番号|求人番号|案件番号)(?=\s*[|｜:：]|\s+\S|$).*$/i,
       ''
     )
     .replace(/\s*代表者.*$/i, '')
@@ -2911,6 +3143,8 @@ export const stripKyujinPdfNoise = (rawText = ''): string => {
     .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
     .replace(/-{2,}\s*(?:Trang|Page|ページ)\s*\d+(?:\s*\/\s*\d+)?\s*-{2,}/gi, ' ')
     .replace(/(?:^|[\s\n|｜])(?:Trang|Page|ページ)\s*\d+\s*\/\s*\d+(?=$|[\s\n|｜])/gim, ' ')
+    .replace(/(?:^|[\s\n|｜])(?:関係社外秘|社外秘|取扱注意|極秘)(?=$|[\s\n|｜。、])/g, ' ')
+    .replace(/写真掲載許可(?:を)?(?:もらう|取得|要|確認)?[^\n。]*/g, ' ')
     .replace(
       /(?:^|[\s\n|｜])求人票(?:\s*[（(][^）)\n]{0,24}[）)])?(?=$|[\s\n|｜])/g,
       ' '
@@ -2929,7 +3163,7 @@ export const stripKyujinPdfNoise = (rawText = ''): string => {
     )
     .replace(/[（(]\s*[)）]/g, ' ')
     .replace(
-      /(?:^|[\s\n|｜])(?:法人番号|事業所番号|求人番号|会社番号)\s*[|｜:：]\s*[A-Za-z0-9\-ー]{3,24}/gi,
+      /(?:^|[\s\n|｜])(?:法人番号|事業所番号|求人番号|案件番号|会社番号)\s*[|｜:：]\s*[A-Za-z0-9\-ー一-龠ァ-ヶー]{1,28}/gi,
       ' '
     )
     .replace(
@@ -2950,6 +3184,7 @@ export const sanitizeJobDescriptionForCandidate = (desc = ''): string => {
     .replace(/(?:写真掲載許可(?:をもらう|取得)[^\n。]*[。\n]?)/g, '')
     .replace(/(?:[※＊]\s*(?:社内用|内部メモ|担当メモ|紹介手数料)[^\n。]*[。\n]?)/g, '')
     .replace(/(?:[（(](?:社内メモ|担当用|内部用)[^)）]*[)）])/g, '')
+    .replace(/(?:^|[\s\n])(?:企業名|会社名)\s*[:：]\s*[^\s\n]{2,36}/g, ' ')
     .replace(
       /(?:受動喫煙|試用期間|選考方法|応募書類|連絡先|電話番号|FAX|メールアドレス)[\s\S]*$/i,
       ''
@@ -3480,6 +3715,15 @@ export const normalizeKyujinItem = (
       requiresTokutei: conds.requiresTokutei,
       requiredConditions: conds.requiredConditions,
       ngConditions: conds.ngConditions,
+      ...(cleanLegacyStr(sl.targetVisa ?? sl.target_visa)
+        ? { targetVisa: stripKyujinPdfNoise(cleanLegacyStr(sl.targetVisa ?? sl.target_visa)) }
+        : {}),
+      ...(cleanLegacyStr(sl.trialPeriodNote ?? sl.trial_period_note)
+        ? { trialPeriodNote: stripKyujinPdfNoise(cleanLegacyStr(sl.trialPeriodNote ?? sl.trial_period_note)) }
+        : {}),
+      ...(cleanLegacyStr(sl.overseasRecruitOk ?? sl.overseas_recruit_ok)
+        ? { overseasRecruitOk: cleanLegacyStr(sl.overseasRecruitOk ?? sl.overseas_recruit_ok) }
+        : {}),
       ...(sl.salaryManuallyEdited ? { salaryManuallyEdited: true } : {}),
       ...(Array.isArray(sl.manualProtectedFields) && sl.manualProtectedFields.length > 0
         ? { manualProtectedFields: toSafeStringArray(sl.manualProtectedFields) }
@@ -3821,10 +4065,21 @@ const extractDetailedKyujinSpecs = (
     }
   }
 
-  // 2) Text block extraction for numbered shifts (①...②...③...④...)
+  // 2) Text block extraction for numbered shifts (①...②...③...④...) and pipe-separated PDF lines
+  if (!shiftTime) {
+    const inlineShiftM = cleanedText.match(
+      /(?:就業時間|勤務時間)\s*[：:|｜\s]+([^\n]{4,90})/i
+    );
+    if (inlineShiftM && /\d{1,2}[:：]\d{2}|[①②③④]/.test(inlineShiftM[1])) {
+      shiftTime = inlineShiftM[1]
+        .split(/\s*[|｜]\s*(?=(?:休憩|時間外|残業|休日|年間休日|給与|月給))/)[0]
+        .replace(/[|｜]+/g, ' ')
+        .trim();
+    }
+  }
   if (!shiftTime) {
     const shiftBlockM = cleanedText.match(
-      /(?:就業時間|勤務時間|シフト)[：:\s]*([\s\S]{4,220}?)(?=\n(?:休憩|時間外|残業|休日|年間休日|給与|月給|時給|賞与|福利厚生|勤務地|応募|$))/i
+      /(?:就業時間|勤務時間|シフト)[：:|｜\s]*([\s\S]{4,220}?)(?=\n(?:休憩|時間外|残業|休日|年間休日|給与|月給|時給|賞与|福利厚生|勤務地|応募|$))/i
     );
     if (shiftBlockM) {
       shiftTime = shiftBlockM[1]
@@ -3841,23 +4096,27 @@ const extractDetailedKyujinSpecs = (
   }
 
   const holidayM =
-    cleanedText.match(/(?:年間休日日数|年間休日|休日(?:・休暇)?)[：:\s]*([^\n]{2,60})/i);
+    cleanedText.match(/(?:年間休日日数|年間休日|休日(?:・休暇)?)\s*[：:|｜\s]*([^\n|｜]{2,60})/i);
   const holidays = holidayM ? holidayM[1].trim() : '';
 
   const overtimeM =
-    cleanedText.match(/(?:残業(?:時間)?|時間外労働(?:時間)?)[：:\s]*([^\n]{2,45})/i);
+    cleanedText.match(/(?:残業(?:時間)?|時間外労働(?:時間)?)\s*[：:|｜\s]*([^\n|｜]{2,45})/i);
   const overtimeHours = overtimeM ? overtimeM[1].trim() : '';
+
+  const commuteM =
+    cleanedText.match(/(?:交通費|通勤手当)\s*[：:|｜\s]*([^\n|｜]{2,45})/i);
+  const commuteAllowance = commuteM ? commuteM[1].trim() : '';
 
   const estimatedNetSalary = extractEstimatedNetSalaryText(cleanedText);
   const annualSalary = extractAnnualSalaryText(cleanedText);
 
-  const recruitM = cleanedText.match(/(?:募集人数|採用予定人数|募集枠)[：:\s]*([^\n]{1,25})/i);
+  const recruitM = cleanedText.match(/(?:募集人数|採用予定人数|募集枠)\s*[：:|｜\s]*([^\n|｜]{1,25})/i);
   const recruitCount = recruitM ? recruitM[1].trim() : '';
 
-  const interviewM = cleanedText.match(/(?:選考方法|面接回数|選考プロセス)[：:\s]*([^\n]{2,60})/i);
+  const interviewM = cleanedText.match(/(?:選考方法|面接回数|選考プロセス)\s*[：:|｜\s]*([^\n|｜]{2,60})/i);
   const interviewProcess = interviewM ? interviewM[1].trim() : '';
 
-  const benefitsM = cleanedText.match(/(?:福利厚生|諸手当|特別待遇|資格取得支援)[：:\s]*([^\n]{2,120})/i);
+  const benefitsM = cleanedText.match(/(?:福利厚生|諸手当|特別待遇|資格取得支援)\s*[：:|｜\s]*([^\n]{2,120})/i);
   const specialBenefits = benefitsM ? benefitsM[1].trim() : '';
 
   const shiftType = detectKyujinShiftType(shiftTime, cleanedText);
@@ -3867,6 +4126,7 @@ const extractDetailedKyujinSpecs = (
     shiftType,
     holidays,
     overtimeHours,
+    commuteAllowance,
     estimatedNetSalary,
     annualSalary,
     recruitCount,
@@ -3951,8 +4211,13 @@ const parseExcelBlockToKyujin = (
   const hourlyM = fullText.match(/時給[：:\s]*([0-9,]+\s*円[^\n]*)/);
   const resolvedHourlyWage =
     salaryParsed.hourlyWage || (hourlyM ? extractKyujinSalaryInfo(`時給 ${hourlyM[1]}`).hourlyWage || hourlyM[1].trim() : '');
+  const hasMonthlyOrFullTime =
+    salaryParsed.salaryType === 'monthly' ||
+    /(?:月給|基本給|想定月収|総支給|想定年収|モデル年収|正社員|正職員|社員登用)/.test(fullText);
   const finalEmploymentType =
-    salaryParsed.salaryType === 'hourly' && !/tokutei|特定技能|正社員/i.test(fullText)
+    !hasMonthlyOrFullTime &&
+    salaryParsed.salaryType === 'hourly' &&
+    !/tokutei|特定技能|正社員/i.test(fullText)
       ? 'Baito / Làm thêm (アルバイト・パート)'
       : employmentType;
   const specs = extractDetailedKyujinSpecs(fullText, blockRows);
@@ -3994,6 +4259,7 @@ const parseExcelBlockToKyujin = (
       estimatedNetSalary: specs.estimatedNetSalary || (netM ? netM[1].trim() : ''),
       annualSalary: specs.annualSalary,
       hourlyWage: resolvedHourlyWage,
+      commuteAllowance: specs.commuteAllowance,
       bonus: bonusNorm.bonus,
       bonusDetail: bonusNorm.bonusDetail,
       minJlpt,
@@ -4153,7 +4419,11 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
     const industry = detectIndustryFromText(block, sourceTitle);
     const sector = detectSectorFromIndustryOrText(industry, block);
     let employmentType = detectEmploymentTypeFromText(block, sourceTitle);
+    const hasMonthlyPay =
+      salaryInfo.salaryType === 'monthly' ||
+      /月給|基本給|想定月収|総支給|正社員/i.test(block);
     if (
+      !hasMonthlyPay &&
       salaryInfo.salaryType === 'hourly' &&
       !/tokutei|特定技能|正社員/i.test(block)
     ) {
@@ -4167,10 +4437,36 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
       minJlpt: resolvedMinJlpt,
       employmentType,
     });
+    const jobDescM = block.match(/(?:主な仕事内容|業務内容|仕事内容)\s*[：:|｜\s]+([\s\S]{4,500}?)(?=\n(?:就業時間|勤務時間|給与|月給|時給|休日|年間休日|福利厚生|選考|$))/i);
+    const extractedDesc = jobDescM ? jobDescM[1] : block.slice(0, 800);
+    const housingMarked =
+      /[☑✓✔■●〇○レ]\s*提供無|提供無\s*[☑✓✔■●〇○レ]/.test(block)
+        ? '提供無'
+        : /[☑✓✔■●〇○レ]\s*借上げ|借上げ[^\n]{0,12}[☑✓✔■●〇○レ]/.test(block)
+        ? '借上げ宿舎あり'
+        : /[☑✓✔■●〇○レ]\s*自社寮|自社寮[^\n]{0,12}[☑✓✔■●〇○レ]/.test(block)
+        ? '自社寮あり'
+        : /提供無|寮なし|社宅なし/.test(block) && !/[☑✓✔■●〇○レ]\s*自社寮/.test(block)
+        ? '提供無'
+        : /自社寮/.test(block)
+        ? '自社寮あり'
+        : /借上げ|借り上げ/.test(block)
+        ? '借上げ宿舎あり'
+        : /寮あり|社宅/.test(block)
+        ? '寮・社宅あり'
+        : '要確認';
+    const trialM = block.match(/(?:試用期間|研修期間)[^\n。]{0,36}(?:アルバイト|パート)/);
+    const overseasOkM =
+      /海外招へい\s*[：:|｜\s]*(?:[〇○☑✓✔●]\s*可|可\s*[〇○☑✓✔●])/.test(block) ||
+      (!/海外招へい\s*[：:|｜\s]*(?:[〇○☑✓✔●]\s*不可|不可\s*[〇○☑✓✔●]|不可|NG|×)/.test(block) &&
+        /海外招へい\s*[：:|｜\s]*可/.test(block));
+    const overseasNgM = /海外招へい\s*[：:|｜\s]*(?:[〇○☑✓✔●]\s*不可|不可\s*[〇○☑✓✔●]|NG|×)/.test(block);
+    const overseasRecruitOk = overseasOkM ? '可' : overseasNgM ? '不可' : '';
+    const targetVisaM = block.match(/(?:対象ビザ|在留資格|ビザ要件)\s*[：:|｜\s]*([^\n|｜]{2,50})/i);
 
     return {
       companyName:
-        normalizeKyujinCompanyName(compM ? compM[1] : `${sourceTitle} #${idx + 1}`) ||
+        normalizeKyujinCompanyName(compM ? compM[1].split(/[|｜]/)[0] : `${sourceTitle} #${idx + 1}`) ||
         `${sourceTitle} #${idx + 1}`,
       sector,
       industry,
@@ -4185,29 +4481,25 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
       estimatedNetSalary: specs.estimatedNetSalary,
       annualSalary: specs.annualSalary,
       hourlyWage: salaryInfo.hourlyWage,
+      commuteAllowance: specs.commuteAllowance,
       minJlpt: resolvedMinJlpt,
-      housingSupport: /自社寮/.test(block)
-        ? '自社寮あり'
-        : /借上げ|借り上げ/.test(block)
-        ? '借上げ宿舎あり'
-        : /寮あり|社宅/.test(block)
-        ? '寮・社宅あり'
-        : /提供無|寮なし|社宅なし/.test(block)
-        ? '提供無'
-        : '要確認',
+      housingSupport: housingMarked,
       bonus: bonusNorm.bonus,
       bonusDetail: bonusNorm.bonusDetail,
       recruitCount: specs.recruitCount,
       interviewProcess: specs.interviewProcess,
       specialBenefits: specs.specialBenefits,
       experienceRequirement: normalizeKyujinExperienceRequirement('', block),
-      jobDescription: sanitizeJobDescriptionForCandidate(block.slice(0, 800)),
+      jobDescription: sanitizeJobDescriptionForCandidate(extractedDesc),
       excludedNationalities: conds.excludedNationalities,
       excludedGenders: conds.excludedGenders,
       requiresInJapan: conds.requiresInJapan,
       requiresTokutei: conds.requiresTokutei,
       requiredConditions: conds.requiredConditions,
       ngConditions: conds.ngConditions,
+      ...(trialM ? { trialPeriodNote: trialM[0].trim() } : {}),
+      ...(overseasRecruitOk ? { overseasRecruitOk } : {}),
+      ...(targetVisaM ? { targetVisa: stripKyujinPdfNoise(targetVisaM[1]) } : {}),
     };
   });
 };
@@ -4243,13 +4535,19 @@ export const extractKyujinViaServer = async (
       throw new Error(`File PDF "${file.name}" vượt quá giới hạn 30MB.`);
     }
 
-    const pdfResult = await extractPdfWithOcrFallback(file, onProgress);
+    const pdfResult = await extractPdfWithOcrFallback(file, onProgress, {
+      includeVisualImages: true,
+    });
 
     if (pdfResult.mode === 'text') {
-      onProgress?.(`Đang phân tích nội dung tiếng Nhật (${pdfResult.numPages} trang)...`);
+      onProgress?.(`Đang phân tích bảng biểu & tiếng Nhật (${pdfResult.numPages} trang)...`);
       try {
         const items = await callKyujinApi({
           rawText: pdfResult.text,
+          images: pdfResult.renderedImages.map((img) => ({
+            mimeType: img.mimeType,
+            base64Data: img.base64Data,
+          })),
           fileName: file.name,
         });
         if (items.length > 0) return items;
