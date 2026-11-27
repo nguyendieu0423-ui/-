@@ -572,6 +572,108 @@ const normNameKey = (v?: string): string =>
     .replace(/\s+/g, ' ')
     .toLowerCase();
 
+export const extractKintoneIdAndCleanName = (
+  rawName = '',
+  rawKintoneId = '',
+  extraNotes = ''
+): { kintoneId: string; cleanName: string } => {
+  const explicit = String(rawKintoneId || '').trim().toUpperCase();
+  const nameStr = String(rawName || '').trim();
+  const fromExplicit = explicit.match(/\b(ENT-\d{3,10})\b/i)?.[1]?.toUpperCase() || '';
+  const fromName = nameStr.match(/\b(ENT-\d{3,10})\b/i)?.[1]?.toUpperCase() || '';
+  const fromNotes = String(extraNotes || '').match(/\b(ENT-\d{3,10})\b/i)?.[1]?.toUpperCase() || '';
+  const kintoneId = fromExplicit || fromName || fromNotes;
+  const cleanName = nameStr
+    .replace(/\s*[\(（\[]?\s*ENT-\d{3,10}\s*[\)）\]]?\s*/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return { kintoneId, cleanName };
+};
+
+export const normalizeNameKeyForDuplicateMerge = (rawName = ''): string => {
+  const { cleanName } = extractKintoneIdAndCleanName(rawName);
+  return cleanName
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'd')
+    .replace(/[（(]\s*PT\s*[）)]/gi, ' ')
+    .replace(/(?:^|\s)PT$/i, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+};
+
+export const hasPtSignal = (c: Partial<Candidate> = {}): boolean => {
+  const rawCh = String(c.channel || '').trim().toLowerCase();
+  if (rawCh === 'pt') return true;
+  if (String(c.ptPartnerName || '').trim()) return true;
+  const nameStr = String(c.name || '').trim();
+  const fbStr = String(c.fbName || '').trim();
+  if (
+    /[（(]\s*PT\s*[）)]/i.test(nameStr) ||
+    /(?:^|\s)PT$/i.test(nameStr) ||
+    /[（(]\s*PT\s*[）)]/i.test(fbStr)
+  ) {
+    return true;
+  }
+  const notes = [c.memo, c.negotiationLog, c.conversionGoal].filter(Boolean).join(' ');
+  return /(?:PT提携|パートナー紹介|PT紹介|PT経由|đối\s*tác\s*PT)/i.test(notes);
+};
+
+export const VALID_CRM_PROGRESS_STATUSES = [
+  '新規相談',
+  'ヒアリング中',
+  '面談調整中',
+  '面談済み',
+  '保留・連絡待ち',
+  '企業提案中',
+  '面接調整中',
+  '1次面接予定',
+  '2次面接予定',
+  '内定',
+  '内定承諾',
+  '入社手続き中',
+  '入社済み',
+  '内定辞退',
+  '選考中辞退',
+  '不合格',
+  '辞退・終了',
+] as const;
+
+const VALID_PROGRESS_STATUS_SET = new Set<string>(VALID_CRM_PROGRESS_STATUSES);
+
+export const normalizePipelineStage6 = (
+  person: Partial<Candidate> | string = {}
+):
+  | '新規相談'
+  | '面談・調整中'
+  | '企業提案中'
+  | '面接選考中'
+  | '内定・入社準備'
+  | '保留・辞退・不合格' => {
+  const rawSt =
+    typeof person === 'string'
+      ? person.trim()
+      : String(person.progressStatus || '').trim();
+  if (!rawSt) return '新規相談';
+  if (rawSt === '新規相談') return '新規相談';
+  if (['ヒアリング中', '面談調整中', '面談済み'].includes(rawSt)) return '面談・調整中';
+  if (rawSt === '企業提案中') return '企業提案中';
+  if (['面接調整中', '1次面接予定', '2次面接予定'].includes(rawSt)) return '面接選考中';
+  if (['内定', '内定承諾', '入社手続き中', '入社済み'].includes(rawSt)) {
+    return '内定・入社準備';
+  }
+  if (
+    ['保留・連絡待ち', '内定辞退', '選考中辞退', '不合格', '辞退・終了'].includes(rawSt) ||
+    rawSt.includes('辞退') ||
+    rawSt.includes('不合格')
+  ) {
+    return '保留・辞退・不合格';
+  }
+  return '新規相談';
+};
+
 const isRealSocialUrl = (v?: string): boolean => {
   const s = String(v || '').trim();
   if (!s) return false;
@@ -594,6 +696,10 @@ const isFbNameSameOrSubsetOfName = (fbName?: string, legalName?: string): boolea
 const areCandidatesSamePerson = (a: Candidate, b: Candidate): boolean => {
   if (a.id && b.id && a.id === b.id) return true;
 
+  const kinA = String(a.kintoneId || '').trim().toUpperCase();
+  const kinB = String(b.kintoneId || '').trim().toUpperCase();
+  if (kinA && kinB && kinA === kinB) return true;
+
   const urlA = normUrlKey(a.fbProfileUrl);
   const urlB = normUrlKey(b.fbProfileUrl);
   if (urlA && urlB) {
@@ -609,7 +715,6 @@ const areCandidatesSamePerson = (a: Candidate, b: Candidate): boolean => {
   const nameA = normNameKey(a.name);
   const nameB = normNameKey(b.name);
   if (nameA.length >= 3 && nameB && nameA === nameB) {
-    // Do not merge if birth dates explicitly conflict
     const bdA = String(a.birthDate || '').trim();
     const bdB = String(b.birthDate || '').trim();
     if (bdA && bdB && bdA !== bdB) return false;
@@ -645,6 +750,7 @@ const mergeCandidateRecords = (primary: Candidate, secondary: Candidate): Candid
       secondary.channel === 'school' ||
       String(primary.schoolName || secondary.schoolName || '').trim()
   );
+  const isPt = !isSch && (hasPtSignal(primary) || hasPtSignal(secondary));
 
   const primaryStatus = String(primary.progressStatus || '').trim();
   const secondaryStatus = String(secondary.progressStatus || '').trim();
@@ -655,17 +761,42 @@ const mergeCandidateRecords = (primary: Candidate, secondary: Candidate): Candid
       ? secondaryStatus
       : primaryStatus || secondaryStatus || '新規相談';
 
+  const mergedHistoryMap = new Map<
+    string,
+    { companyName: string; jobCode?: string; slotId?: string; date: string }
+  >();
+  [...(secondary.proposalHistory || []), ...(primary.proposalHistory || [])].forEach((entry) => {
+    if (!entry || !entry.companyName) return;
+    const key = `${entry.companyName}__${entry.slotId || entry.jobCode || ''}`;
+    mergedHistoryMap.set(key, entry);
+  });
+
+  const bestName = (() => {
+    const a = String(primary.name || '').trim();
+    const b = String(secondary.name || '').trim();
+    const aHasAccent = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(a);
+    const bHasAccent = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(b);
+    if (!a) return b;
+    if (!b) return a;
+    if (bHasAccent && !aHasAccent) return b;
+    return a;
+  })();
+
   return {
     ...secondary,
     ...primary,
     id: primary.id || secondary.id,
     fbSenderId: pickStr(primary.fbSenderId, secondary.fbSenderId),
     fbProfileUrl: pickStr(primary.fbProfileUrl, secondary.fbProfileUrl),
-    name: pickStr(primary.name, secondary.name),
+    name: bestName,
     fbName: pickStr(primary.fbName, secondary.fbName),
     furigana: pickStr(primary.furigana, secondary.furigana),
+    kintoneId: pickStr(primary.kintoneId, secondary.kintoneId),
+    ptPartnerName: pickStr(primary.ptPartnerName, secondary.ptPartnerName),
     channel: isSch
       ? 'school'
+      : isPt
+      ? 'pt'
       : primary.channel === 'personal' && isRealSocialUrl(primary.fbProfileUrl)
       ? 'personal'
       : secondary.channel === 'personal' && isRealSocialUrl(secondary.fbProfileUrl)
@@ -692,7 +823,7 @@ const mergeCandidateRecords = (primary: Candidate, secondary: Candidate): Candid
     phone: pickStr(primary.phone, secondary.phone),
     email: pickStr(primary.email, secondary.email),
     address: pickStr(primary.address, secondary.address),
-    progressStatus: effectiveStatus,
+    progressStatus: VALID_PROGRESS_STATUS_SET.has(effectiveStatus) ? effectiveStatus : '新規相談',
     proposedCompany: pickStr(primary.proposedCompany, secondary.proposedCompany),
     proposalDate: pickStr(primary.proposalDate, secondary.proposalDate),
     naiteiCompany: pickStr(primary.naiteiCompany, secondary.naiteiCompany),
@@ -703,6 +834,7 @@ const mergeCandidateRecords = (primary: Candidate, secondary: Candidate): Candid
     lastContactDate: pickStr(primary.lastContactDate, secondary.lastContactDate),
     declineReason: pickStr(primary.declineReason, secondary.declineReason),
     memo: mergeUniqueText(primary.memo, secondary.memo),
+    proposalHistory: Array.from(mergedHistoryMap.values()),
     nationalityManuallyEdited: Boolean(
       primary.nationalityManuallyEdited || secondary.nationalityManuallyEdited
     ),
@@ -748,12 +880,72 @@ export const deduplicateCandidatesUnion = (
   return result;
 };
 
+export const mergeDuplicateCandidatesByName = (
+  candidatesList: Candidate[] = [],
+  schoolStudentsList: Candidate[] = []
+): {
+  candidates: Candidate[];
+  schoolStudents: Candidate[];
+  mergedCount: number;
+} => {
+  const combined: Array<{ cand: Candidate; isSchool: boolean }> = [
+    ...schoolStudentsList.map((cand) => ({ cand: { ...cand, _isSchool: true, channel: 'school' }, isSchool: true })),
+    ...candidatesList.map((cand) => ({
+      cand: { ...cand, _isSchool: Boolean(cand._isSchool || cand.channel === 'school') },
+      isSchool: Boolean(cand._isSchool || cand.channel === 'school'),
+    })),
+  ];
+
+  const mergedAll: Candidate[] = [];
+  let mergedCount = 0;
+
+  const isSameByFlexibleName = (a: Candidate, b: Candidate): boolean => {
+    if (areCandidatesSamePerson(a, b)) return true;
+    const keyA = normalizeNameKeyForDuplicateMerge(a.name || a.fbName || '');
+    const keyB = normalizeNameKeyForDuplicateMerge(b.name || b.fbName || '');
+    if (keyA.length >= 3 && keyB && keyA === keyB) {
+      const bdA = String(a.birthDate || '').trim();
+      const bdB = String(b.birthDate || '').trim();
+      if (bdA && bdB && bdA !== bdB) return false;
+      return true;
+    }
+    return false;
+  };
+
+  combined.forEach(({ cand }) => {
+    const idx = mergedAll.findIndex((existing) => isSameByFlexibleName(existing, cand));
+    if (idx >= 0) {
+      mergedAll[idx] = mergeCandidateRecords(mergedAll[idx], cand);
+      mergedCount += 1;
+    } else {
+      mergedAll.push(cand);
+    }
+  });
+
+  const nextSchool: Candidate[] = [];
+  const nextRegular: Candidate[] = [];
+  mergedAll.forEach((c) => {
+    if (c._isSchool || c.channel === 'school') {
+      nextSchool.push({ ...c, channel: 'school', _isSchool: true });
+    } else {
+      nextRegular.push({ ...c, _isSchool: false });
+    }
+  });
+
+  return {
+    candidates: nextRegular,
+    schoolStudents: nextSchool,
+    mergedCount,
+  };
+};
+
 export interface CleanupCandidatesResult {
   candidates: Candidate[];
   schoolStudents: Candidate[];
   movedToOther: number;
   movedToCompany: number;
   movedToLine: number;
+  movedToPt: number;
   movedToSchool: number;
   dedupedCount: number;
   changedCount: number;
@@ -762,9 +954,18 @@ export interface CleanupCandidatesResult {
 const classifyLegacyNonSchoolChannel = (c: Candidate): ChannelType => {
   const rawCh = String(c.channel || '').trim().toLowerCase();
   if (c.channelManuallyEdited) {
-    if (rawCh === 'company' || rawCh === 'line' || rawCh === 'other' || rawCh === 'personal') {
+    if (
+      rawCh === 'company' ||
+      rawCh === 'line' ||
+      rawCh === 'pt' ||
+      rawCh === 'other' ||
+      rawCh === 'personal'
+    ) {
       return rawCh as ChannelType;
     }
+  }
+  if (hasPtSignal(c)) {
+    return 'pt';
   }
   if (rawCh === 'company' || rawCh === 'line' || rawCh === 'other') {
     return rawCh as ChannelType;
@@ -831,6 +1032,7 @@ export const cleanupAndReclassifyCandidates = (
   let movedToOther = 0;
   let movedToCompany = 0;
   let movedToLine = 0;
+  let movedToPt = 0;
   let movedToSchool = 0;
 
   const isSchoolRec = (item: Candidate): boolean =>
@@ -877,6 +1079,7 @@ export const cleanupAndReclassifyCandidates = (
       if (nextChannel === 'other') movedToOther += 1;
       else if (nextChannel === 'company') movedToCompany += 1;
       else if (nextChannel === 'line') movedToLine += 1;
+      else if (nextChannel === 'pt') movedToPt += 1;
     }
     regularMerged.push({
       ...cand,
@@ -893,6 +1096,7 @@ export const cleanupAndReclassifyCandidates = (
       if (nextChannel === 'other') movedToOther += 1;
       else if (nextChannel === 'company') movedToCompany += 1;
       else if (nextChannel === 'line') movedToLine += 1;
+      else if (nextChannel === 'pt') movedToPt += 1;
     }
     return {
       ...cand,
@@ -906,6 +1110,7 @@ export const cleanupAndReclassifyCandidates = (
     movedToOther +
     movedToCompany +
     movedToLine +
+    movedToPt +
     movedToSchool +
     dedupedCount +
     (finalTotal !== initialTotal ? Math.abs(initialTotal - finalTotal) : 0);
@@ -916,6 +1121,7 @@ export const cleanupAndReclassifyCandidates = (
     movedToOther,
     movedToCompany,
     movedToLine,
+    movedToPt,
     movedToSchool,
     dedupedCount,
     changedCount,
@@ -941,8 +1147,8 @@ export const isStale7DayProposal = (
 
   const todayTs = parseFlexibleDateToTimestamp(todayIso, 2026);
   const refDate =
-    String(person.lastContactDate || '').trim() ||
-    String(person.proposalDate || '').trim();
+    String(person.proposalDate || '').trim() ||
+    String(person.lastContactDate || '').trim();
   const refTs = parseFlexibleDateToTimestamp(refDate, 2026);
   if (!refTs || !todayTs) return false;
   const diffDays = Math.floor((todayTs - refTs) / 86400000);
@@ -1001,23 +1207,49 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
   const fbProfileUrl = cleanLegacyStr(raw.fbProfileUrl ?? raw.fb_profile_url);
   const rawFbName = cleanLegacyStr(raw.fbName ?? raw.fb_name ?? raw.facebookName ?? raw.facebook_name);
   const fbName = isPlaceholderExtractionVal(rawFbName) ? '' : rawFbName;
-  const name = cleanLegacyStr(raw.name ?? raw.fullName ?? raw.full_name ?? raw.candidate_name);
+  const rawName = cleanLegacyStr(raw.name ?? raw.fullName ?? raw.full_name ?? raw.candidate_name);
   const phone = cleanLegacyStr(raw.phone ?? raw.tel);
-  const memo = cleanLegacyStr(raw.memo ?? raw.notes ?? raw.note);
+  let memo = cleanLegacyStr(raw.memo ?? raw.notes ?? raw.note);
   const negotiationLog = cleanLegacyStr(
     raw.negotiationLog ?? raw.rawLog ?? raw.negotiation_log ?? raw.raw_log
   );
+  const rawKintoneId = cleanLegacyStr(raw.kintoneId ?? raw.kintone_id ?? raw.kintoneNo ?? raw.kintone_no);
+  const ptPartnerName = cleanLegacyStr(raw.ptPartnerName ?? raw.pt_partner_name);
+  const { kintoneId, cleanName } = extractKintoneIdAndCleanName(
+    rawName,
+    rawKintoneId,
+    `${memo}\n${negotiationLog}`
+  );
+  const name = cleanName || rawName;
   const channelManuallyEdited = Boolean(
     raw.channelManuallyEdited ?? raw.channel_manually_edited
   );
 
+  const hasPtEvidence = hasPtSignal({
+    channel: rawChannel,
+    ptPartnerName,
+    name: rawName,
+    fbName,
+    memo,
+    negotiationLog,
+  });
+
   let channel: ChannelType | string = 'personal';
   if (isSchool) {
     channel = 'school';
+  } else if (
+    channelManuallyEdited &&
+    (rawChannel === 'personal' ||
+      rawChannel === 'company' ||
+      rawChannel === 'line' ||
+      rawChannel === 'pt' ||
+      rawChannel === 'other')
+  ) {
+    channel = rawChannel;
+  } else if (hasPtEvidence || rawChannel === 'pt') {
+    channel = 'pt';
   } else if (rawChannel === 'company' || rawChannel === 'line' || rawChannel === 'other') {
     channel = rawChannel;
-  } else if (channelManuallyEdited && rawChannel === 'personal') {
-    channel = 'personal';
   } else if (rawChannel === 'personal' || !rawChannel) {
     const distinctFbName = Boolean(fbName) && !isFbNameSameOrSubsetOfName(fbName, name);
     const hasFbSignal = Boolean(
@@ -1050,8 +1282,24 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
   const proposedCompany = cleanLegacyStr(raw.proposedCompany ?? raw.company ?? raw.proposed_company);
   const proposalDate = cleanLegacyStr(raw.proposalDate ?? raw.proposal_date);
   let naiteiCompany = cleanLegacyStr(raw.naiteiCompany ?? raw.naitei_company);
-  const progressStatus =
+
+  const rawProgressStatus =
     cleanLegacyStr(raw.progressStatus ?? raw.status ?? raw.progress_status) || '新規相談';
+  let progressStatus = rawProgressStatus;
+  let japanExperience = cleanLegacyStr(raw.japanExperience ?? raw.japan_experience);
+  if (!VALID_PROGRESS_STATUS_SET.has(rawProgressStatus)) {
+    progressStatus = '新規相談';
+    if (rawProgressStatus && !memo.includes(rawProgressStatus) && !japanExperience.includes(rawProgressStatus)) {
+      if (/(?:経験|年|ヶ月|かいご|介護|外食)/.test(rawProgressStatus)) {
+        japanExperience = japanExperience
+          ? `${japanExperience}／${rawProgressStatus}`
+          : rawProgressStatus;
+      } else {
+        memo = memo ? `${memo}\n[旧ステータスメモ] ${rawProgressStatus}` : `[旧ステータスメモ] ${rawProgressStatus}`;
+      }
+    }
+  }
+
   let declineReason = cleanLegacyStr(
     raw.declineReason ?? raw.decline_reason ?? raw.jitaiReason ?? raw.jitai_reason
   );
@@ -1075,6 +1323,18 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
   const rawSavedCv =
     raw.savedRirekisho ?? raw.saved_rirekisho ?? raw.saved_cv ?? raw.savedCv;
 
+  const proposalHistory = Array.isArray(raw.proposalHistory)
+    ? raw.proposalHistory
+        .filter((x): x is Record<string, unknown> => Boolean(x && typeof x === 'object'))
+        .map((x) => ({
+          companyName: cleanLegacyStr(x.companyName),
+          jobCode: cleanLegacyStr(x.jobCode) || undefined,
+          slotId: cleanLegacyStr(x.slotId) || undefined,
+          date: cleanLegacyStr(x.date),
+        }))
+        .filter((x) => Boolean(x.companyName))
+    : undefined;
+
   return {
     ...(raw as Partial<Candidate>),
     id:
@@ -1085,6 +1345,8 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
     name,
     fbName,
     furigana,
+    kintoneId,
+    ptPartnerName,
     channel,
     schoolName,
     graduationDate: cleanLegacyStr(raw.graduationDate ?? raw.graduation_date),
@@ -1104,7 +1366,7 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
     visaStatus,
     visaExpiry,
     passedExam: cleanLegacyStr(raw.passedExam ?? raw.certifications ?? raw.passed_exam),
-    japanExperience: cleanLegacyStr(raw.japanExperience ?? raw.japan_experience),
+    japanExperience,
     salaryExpectation: cleanLegacyStr(raw.salaryExpectation ?? raw.salary_expectation),
     negotiationLog,
     startDate: cleanLegacyStr(raw.startDate ?? raw.start_date),
@@ -1124,6 +1386,7 @@ export const migrateCandidateRecord = (rawInput: unknown): Candidate => {
     lastContactDate: cleanLegacyStr(raw.lastContactDate ?? raw.last_contact_date),
     declineReason,
     memo,
+    proposalHistory,
     nationalityManuallyEdited: Boolean(
       raw.nationalityManuallyEdited ?? raw.nationality_manually_edited
     ),
@@ -1621,6 +1884,35 @@ export const extractDeclineReason = (person: Partial<Candidate> = {}): string =>
   return st.includes('辞退') ? 'ステータス：辞退・終了（詳細メモ未記入）' : '';
 };
 
+export const getVisaExpiryBadgeMeta = (
+  visaExpiry = '',
+  lang: 'vi' | 'jp' = 'vi'
+): {
+  isUrgent: boolean;
+  isExpired: boolean;
+  daysLeft: number;
+  label: string;
+} => {
+  const ts = parseFlexibleDateToTimestamp(visaExpiry, 2026);
+  if (!ts) return { isUrgent: false, isExpired: false, daysLeft: 9999, label: '' };
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const daysLeft = Math.round((ts - todayStart) / 86400000);
+  if (daysLeft > 90) {
+    return { isUrgent: false, isExpired: false, daysLeft, label: '' };
+  }
+  const isExpired = daysLeft < 0;
+  const absDays = Math.abs(daysLeft);
+  const label = isExpired
+    ? lang === 'jp'
+      ? `🪪 在留期限超過${absDays}日`
+      : `🪪 Thẻ quá hạn ${absDays} ngày`
+    : lang === 'jp'
+    ? `🪪 在留期限残り${daysLeft}日`
+    : `🪪 Hạn thẻ còn ${daysLeft} ngày`;
+  return { isUrgent: true, isExpired, daysLeft, label };
+};
+
 export const getUrgentFollowUpReason = (
   person: Partial<Candidate> = {},
   lang: 'vi' | 'jp' = 'vi'
@@ -1638,6 +1930,11 @@ export const getUrgentFollowUpReason = (
   }
 
   const st = String(person.progressStatus || '').trim();
+  const visaMeta = getVisaExpiryBadgeMeta(person.visaExpiry, lang);
+  if (visaMeta.isUrgent && !['内定', '入社手続き中', '入社済み', '辞退・終了'].includes(st)) {
+    return visaMeta.label;
+  }
+
   if (['保留・連絡待ち', '面談調整中', '面接調整中', 'ヒアリング中'].includes(st)) {
     return lang === 'jp' ? `ステータス：${st}` : `Trạng thái: ${st}`;
   }
@@ -2481,6 +2778,76 @@ const sanitizeTextForJpOutput = (raw = ''): string => {
     .replace(/\(Ca xoay\s*-\s*không ca đêm\)/gi, '（夜勤なし）')
     .replace(/\(Ca xoay\)/gi, '')
     .replace(/\(Có ca đêm\)/gi, '')
+    .replace(/\bTrao đổi khi phỏng vấn\b/gi, '応相談')
+    .replace(/\bXác nhận khi phỏng vấn\b/gi, '要確認')
+    .replace(/\bThỏa thuận\b/gi, '応相談')
+    .replace(/\bKhông có\b|\bKhông\b/gi, 'なし')
+    .replace(/\btháng\b/gi, 'ヶ月')
+    .replace(/\bngày\/tuần\b/gi, '日/週')
+    .replace(/\s*[|｜]+\s*/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+};
+
+const sanitizeTextForViOutput = (raw = ''): string => {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  return s
+    .replace(/予定就労開始年月[^\n]*/g, '')
+    .replace(/未経験可・経験者優遇/g, 'Không yêu cầu kinh nghiệm / Ưu tiên có kinh nghiệm')
+    .replace(/未経験歓迎|未経験可|未経験OK|未経験者歓迎/g, 'Không yêu cầu kinh nghiệm')
+    .replace(/経験者必須/g, 'Yêu cầu có kinh nghiệm')
+    .replace(/経験者優遇|経験あれば尚可/g, 'Ưu tiên có kinh nghiệm')
+    .replace(/資格・経験優遇/g, 'Ưu tiên có chứng chỉ/kinh nghiệm')
+    .replace(/資格不問/g, 'Không yêu cầu bằng cấp')
+    .replace(/準中型(?:自動車)?免許(?:以上)?\s*必須/g, 'Bắt buộc có bằng lái xe bán tải trung trở lên')
+    .replace(/準中型(?:自動車)?免許/g, 'Bằng lái xe bán tải trung')
+    .replace(/中型(?:自動車)?免許(?:以上)?\s*必須/g, 'Bắt buộc có bằng lái xe tải trung trở lên')
+    .replace(/中型(?:自動車)?免許/g, 'Bằng lái xe tải trung')
+    .replace(/大型(?:自動車)?免許(?:以上)?\s*必須/g, 'Bắt buộc có bằng lái xe tải lớn trở lên')
+    .replace(/大型(?:自動車)?免許/g, 'Bằng lái xe tải lớn')
+    .replace(/普通(?:自動車)?免許(?:以上)?\s*必須/g, 'Bắt buộc có bằng lái xe phổ thông')
+    .replace(/普通(?:自動車)?免許/g, 'Có bằng lái xe phổ thông')
+    .replace(/（AT限定不可）|\(AT限定不可\)/g, ' (bằng số sàn)')
+    .replace(/（AT可）|\(AT可\)/g, ' (chấp nhận bằng tự động)')
+    .replace(/必須/g, 'bắt buộc')
+    .replace(/優遇/g, 'ưu tiên')
+    .replace(/歓迎/g, 'hoan nghênh')
+    .replace(/全額支給\s*[（(]?\s*上限あり\s*[)）]?/g, 'Hỗ trợ toàn bộ (có giới hạn)')
+    .replace(/全額支給/g, 'Hỗ trợ toàn bộ')
+    .replace(/実費支給/g, 'Hỗ trợ theo thực tế')
+    .replace(/支給なし|交通費なし/g, 'Không hỗ trợ')
+    .replace(/月額上限\s*/g, 'Tối đa/tháng ')
+    .replace(/上限\s*/g, 'Tối đa ')
+    .replace(/締め日[：:\s]*/g, 'Ngày chốt lương: ')
+    .replace(/支払日[：:\s]*/g, 'Ngày trả lương: ')
+    .replace(/求人数[：:\s]*/g, 'Số lượng tuyển: ')
+    .replace(/若干名/g, 'Số lượng ít')
+    .replace(/(\d+)\s*名/g, '$1 người')
+    .replace(/固定残業代/g, 'Phụ cấp tăng ca cố định')
+    .replace(/月平均/g, 'Trung bình/tháng ')
+    .replace(/完全週休(\d+)日制/g, 'Nghỉ đủ $1 ngày/tuần')
+    .replace(/週休(\d+)日制/g, 'Nghỉ $1 ngày/tuần')
+    .replace(/年間休日/g, 'Nghỉ năm ')
+    .replace(/年(\d+)日/g, '$1 ngày/năm')
+    .replace(/月(\d+(?:[〜~\-]\d+)?)日/g, '$1 ngày/tháng')
+    .replace(/(\d+)\s*時間/g, '$1 giờ')
+    .replace(/(\d+)\s*分/g, '$1 phút')
+    .replace(/程度/g, 'khoảng')
+    .replace(/自社寮あり/g, 'Có KTX công ty')
+    .replace(/借上げ宿舎あり/g, 'Có nhà thuê công ty hỗ trợ')
+    .replace(/寮・社宅あり/g, 'Có KTX / Nhà ở')
+    .replace(/提供無/g, 'Không cung cấp nhà ở')
+    .replace(/賞与あり/g, 'Có thưởng')
+    .replace(/賞与なし/g, 'Không có thưởng')
+    .replace(/日勤のみ/g, 'Chỉ ca ngày')
+    .replace(/シフト制[（(]夜勤なし[）)]/g, 'Ca xoay (không ca đêm)')
+    .replace(/シフト制/g, 'Ca xoay')
+    .replace(/夜勤あり/g, 'Có ca đêm')
+    .replace(/不問/g, 'Không yêu cầu')
+    .replace(/要確認/g, 'Xác nhận khi phỏng vấn')
+    .replace(/応相談/g, 'Trao đổi khi phỏng vấn')
+    .replace(/\s{2,}/g, ' ')
     .trim();
 };
 
@@ -2677,25 +3044,29 @@ export const buildAnonymousJobPostText = (
   const expText =
     lang === 'jp'
       ? formatKyujinExperienceForJp(slot.experienceRequirement, slot.careQualification)
-      : slot.experienceRequirement ||
-        (slot.careQualification && slot.careQualification !== '不問'
-          ? `Ưu tiên có chứng chỉ/kinh nghiệm (${slot.careQualification})`
-          : 'Không yêu cầu kinh nghiệm (未経験OK)');
+      : sanitizeTextForViOutput(
+          slot.experienceRequirement ||
+            (slot.careQualification && slot.careQualification !== '不問'
+              ? `Ưu tiên có chứng chỉ/kinh nghiệm (${slot.careQualification})`
+              : 'Không yêu cầu kinh nghiệm')
+        );
 
   const shiftLineParts = [
-    lang === 'jp' ? sanitizeTextForJpOutput(cleanShiftTime) : cleanShiftTime,
+    lang === 'jp' ? sanitizeTextForJpOutput(cleanShiftTime) : sanitizeTextForViOutput(cleanShiftTime),
     slot.shiftType
-      ? `(${lang === 'jp' ? sanitizeTextForJpOutput(slot.shiftType) : slot.shiftType})`
+      ? lang === 'jp'
+        ? `(${sanitizeTextForJpOutput(slot.shiftType)})`
+        : `(${sanitizeTextForViOutput(slot.shiftType)})`
       : '',
     cleanHolidays
       ? lang === 'jp'
         ? `休日：${sanitizeTextForJpOutput(cleanHolidays)}`
-        : `Ngày nghỉ: ${cleanHolidays}`
+        : `Ngày nghỉ: ${sanitizeTextForViOutput(cleanHolidays)}`
       : '',
     cleanOvertime
       ? lang === 'jp'
         ? `残業：${sanitizeTextForJpOutput(cleanOvertime)}`
-        : `Tăng ca: ${cleanOvertime}`
+        : `Tăng ca: ${sanitizeTextForViOutput(cleanOvertime)}`
       : '',
   ].filter(Boolean);
 
@@ -2714,21 +3085,22 @@ export const buildAnonymousJobPostText = (
     const jpInterview = sanitizeTextForJpOutput(cleanInterview);
     const jpBenefits = sanitizeTextForJpOutput(cleanBenefits);
     const jpFacilityType = sanitizeTextForJpOutput(slot.facilityType || '');
+    const jpRecruit = sanitizeTextForJpOutput(slot.recruitCount || '');
 
     const compPay = isBaito
       ? [
-          jpHourly ? `時給：${jpHourly}` : `給与：${jpSalary}`,
-          jpCommute ? `交通費：${jpCommute}` : '',
-          slot.shiftsPerWeek ? `シフト：${sanitizeTextForJpOutput(slot.shiftsPerWeek)}` : '',
+          jpHourly ? `時給 ${jpHourly}` : jpSalary,
+          jpCommute ? `交通費 ${jpCommute}` : '',
+          slot.shiftsPerWeek ? `シフト ${sanitizeTextForJpOutput(slot.shiftsPerWeek)}` : '',
         ]
           .filter(Boolean)
-          .join(' ／ ')
+          .join(' / ')
       : [
-          `基本給・総支給：${jpSalary}`,
-          slot.nightShiftAllowance ? `夜勤手当：${sanitizeTextForJpOutput(slot.nightShiftAllowance)}` : '',
-          jpNet ? `手取り目安：${jpNet}` : '',
-          jpAnnual ? `想定年収：${jpAnnual}` : '',
-          jpCommute ? `交通費：${jpCommute}` : '',
+          `月給・総支給 ${jpSalary}`,
+          slot.nightShiftAllowance ? `夜勤手当 ${sanitizeTextForJpOutput(slot.nightShiftAllowance)}` : '',
+          jpNet ? `手取り目安 ${jpNet}` : '',
+          jpAnnual ? `想定年収 ${jpAnnual}` : '',
+          jpCommute ? `交通費 ${jpCommute}` : '',
           slot.bonus === '賞与あり'
             ? `賞与あり${cleanBonusDetail ? `（${sanitizeTextForJpOutput(cleanBonusDetail)}）` : ''}`
             : slot.bonus === '賞与なし'
@@ -2736,23 +3108,18 @@ export const buildAnonymousJobPostText = (
             : '',
         ]
           .filter(Boolean)
-          .join(' ／ ');
+          .join(' / ');
 
+    const headerTitle = `【${sanitizeTextForJpOutput(visaEmploymentSummary)}｜${jpSector === jpIndustry ? jpIndustry : `${jpSector}・${jpIndustry}`}${jpFacilityType ? `（${jpFacilityType}）` : ''}】`;
     const assembledJp = [
-      `【求人案内（匿名）】`,
-      `・対象ビザ・雇用形態：${sanitizeTextForJpOutput(visaEmploymentSummary)}`,
-      `・雇用形態：${jpEmpType}`,
-      `・分野 / 職種：${jpSector === jpIndustry ? jpIndustry : `${jpSector} - ${jpIndustry}`}${jpFacilityType ? `（${jpFacilityType}）` : ''}`,
-      `・勤務地：${sanitizeTextForJpOutput(publicArea)}`,
-      slot.recruitCount ? `・募集人数：${sanitizeTextForJpOutput(slot.recruitCount)}` : '',
-      `・仕事内容：${jpJobDesc || '面接時に詳しくご説明いたします。'}`,
-      `・経験要件：${expText}${jpExpDetail ? `（${jpExpDetail}）` : ''}`,
-      `・日本語レベル：${sanitizeTextForJpOutput(slot.minJlpt || '') || '応相談'}`,
-      `・給与・待遇：${compPay}`,
-      `・住宅・寮：${jpHousing}`,
-      shiftLineParts.length > 0 ? `・勤務時間・休日：${shiftLineParts.join(' / ')}` : '',
-      jpInterview ? `・選考方法：${jpInterview}` : '',
-      jpBenefits ? `・特別手当・福利厚生：${jpBenefits}` : '',
+      `📢 ${headerTitle}`,
+      `📍 勤務地：${sanitizeTextForJpOutput(publicArea)}（${jpEmpType}${jpRecruit ? ` / 募集 ${jpRecruit}` : ''}）`,
+      `💼 仕事内容：${jpJobDesc || '面談時に詳しくご説明いたします。'}｜経験：${expText}${jpExpDetail ? `（${jpExpDetail}）` : ''}｜日本語：${sanitizeTextForJpOutput(slot.minJlpt || '') || '応相談'}`,
+      `💰 給与・待遇：${compPay}`,
+      shiftLineParts.length > 0
+        ? `⏰ 勤務時間・休日：${shiftLineParts.join(' / ')}`
+        : `⏰ 勤務時間・休日：シフト・休日応相談`,
+      `✅ 寮・特典・選考：住宅 ${jpHousing}${jpInterview ? ` / 選考 ${jpInterview}` : ''}${jpBenefits ? ` / ${jpBenefits}` : ''}\nご興味がございましたら、ぜひお気軽にお返信ください！`,
     ]
       .filter(Boolean)
       .join('\n');
@@ -2760,48 +3127,78 @@ export const buildAnonymousJobPostText = (
     return anonymizeKyujinTextForCandidate(assembledJp, comp, slot, 'jp');
   }
 
+  const cleanRecruitVi = sanitizeTextForViOutput(slot.recruitCount || '');
+  const cleanNetVi = sanitizeTextForViOutput(slot.estimatedNetSalary || '');
+  const cleanAnnualVi = sanitizeTextForViOutput(slot.annualSalary || '');
+  const cleanCommuteVi = sanitizeTextForViOutput(cleanCommute);
+  const cleanJobDescVi = sanitizeTextForViOutput(cleanJobDesc);
+  const cleanExpDetailVi = sanitizeTextForViOutput(cleanExpDetail);
+  const cleanInterviewVi = sanitizeTextForViOutput(cleanInterview);
+  const cleanBenefitsVi = sanitizeTextForViOutput(cleanBenefits);
+  const cleanHousingVi = sanitizeTextForViOutput(slot.housingSupport || '') || 'Xác nhận khi phỏng vấn';
+  const cleanBonusDetailVi = sanitizeTextForViOutput(cleanBonusDetail);
+  const cleanSalaryVi = sanitizeTextForViOutput(slot.salary || '') || 'Trao đổi khi phỏng vấn';
+  const cleanHourlyVi = sanitizeTextForViOutput(slot.hourlyWage || '');
+  const cleanNightVi = sanitizeTextForViOutput(slot.nightShiftAllowance || '');
+  const cleanJlptVi = sanitizeTextForViOutput(slot.minJlpt || '') || 'Trao đổi thêm';
+
   const paySummaryVi = isBaito
     ? [
-        slot.hourlyWage ? `Lương giờ: ${slot.hourlyWage}` : `Lương: ${slot.salary || 'Thỏa thuận'}`,
-        cleanCommute ? `Hỗ trợ đi lại: ${cleanCommute}` : '',
-        slot.shiftsPerWeek ? `Số ca/tuần: ${slot.shiftsPerWeek}` : '',
+        cleanHourlyVi ? `Lương giờ: ${cleanHourlyVi}` : `Lương: ${cleanSalaryVi}`,
+        cleanCommuteVi ? `Đi lại: ${cleanCommuteVi}` : '',
+        slot.shiftsPerWeek ? `Ca: ${sanitizeTextForViOutput(slot.shiftsPerWeek)}` : '',
       ]
         .filter(Boolean)
         .join(' / ')
     : [
-        `Lương cơ bản / Tổng nhận: ${slot.salary || 'Trao đổi khi phỏng vấn'}`,
-        slot.nightShiftAllowance ? `Phụ cấp ca đêm: ${slot.nightShiftAllowance}` : '',
-        slot.estimatedNetSalary ? `Thực nhận ước tính (手取り): ${slot.estimatedNetSalary}` : '',
-        slot.annualSalary ? `Thu nhập năm (年収): ${slot.annualSalary}` : '',
-        cleanCommute ? `Hỗ trợ đi lại (交通費): ${cleanCommute}` : '',
+        `Lương cơ bản/Tổng nhận: ${cleanSalaryVi}`,
+        cleanNightVi ? `Ca đêm: ${cleanNightVi}` : '',
+        cleanNetVi ? `Thực nhận: ${cleanNetVi}` : '',
+        cleanAnnualVi ? `Thu nhập năm: ${cleanAnnualVi}` : '',
+        cleanCommuteVi ? `Đi lại: ${cleanCommuteVi}` : '',
         slot.bonus === '賞与あり'
-          ? `Thưởng: Có${cleanBonusDetail ? ` (${cleanBonusDetail})` : ''}`
+          ? `Thưởng: Có${cleanBonusDetailVi ? ` (${cleanBonusDetailVi})` : ''}`
           : slot.bonus === '賞与なし'
-          ? `Thưởng: Không${cleanBonusDetail ? ` (${cleanBonusDetail})` : ''}`
+          ? `Thưởng: Không${cleanBonusDetailVi ? ` (${cleanBonusDetailVi})` : ''}`
           : '',
       ]
         .filter(Boolean)
         .join(' / ');
 
   const assembledVi = [
-    `📢 [ĐƠN TUYỂN DỤNG ẨN DANH]`,
-    `• Đối tượng Visa & Hình thức: ${visaEmploymentSummary}`,
-    `• Lĩnh vực - Ngành nghề: ${sector} - ${industry}${slot.facilityType ? ` (${slot.facilityType})` : ''}`,
-    `• Khu vực làm việc: ${publicArea}`,
-    slot.recruitCount ? `• Số lượng tuyển: ${slot.recruitCount}` : '',
-    `• Nội dung công việc: ${cleanJobDesc || 'Trao đổi chi tiết khi Mendan'}`,
-    `• Yêu cầu kinh nghiệm: ${expText}${cleanExpDetail ? ` — ${cleanExpDetail}` : ''}`,
-    `• Trình độ tiếng Nhật: ${slot.minJlpt || 'Trao đổi thêm'}`,
-    `• Chế độ lương thưởng: ${paySummaryVi}`,
-    `• Nhà ở / KTX: ${slot.housingSupport || 'Xác nhận khi phỏng vấn'}`,
-    shiftLineParts.length > 0 ? `• Thời gian & Ngày nghỉ: ${shiftLineParts.join(' / ')}` : '',
-    cleanInterview ? `• Quy trình phỏng vấn: ${cleanInterview}` : '',
-    cleanBenefits ? `• Phúc lợi đặc biệt: ${cleanBenefits}` : '',
+    `📢 [${visaEmploymentSummary}] ${sector} - ${industry}${slot.facilityType ? ` (${sanitizeTextForViOutput(slot.facilityType)})` : ''}`,
+    `📍 Khu vực làm việc: ${publicArea}${cleanRecruitVi ? ` · Tuyển ${cleanRecruitVi}` : ''}`,
+    `💼 Công việc: ${cleanJobDescVi || 'Trao đổi chi tiết khi Mendan'} | Kinh nghiệm: ${expText}${cleanExpDetailVi ? ` (${cleanExpDetailVi})` : ''} | Tiếng Nhật: ${cleanJlptVi}`,
+    `💰 Lương & Chế độ: ${paySummaryVi}`,
+    shiftLineParts.length > 0
+      ? `⏰ Giờ làm & Ngày nghỉ: ${shiftLineParts.join(' / ')}`
+      : `⏰ Giờ làm & Ngày nghỉ: Trao đổi theo ca làm thực tế`,
+    `✅ Nhà ở & Quy trình: ${cleanHousingVi}${cleanInterviewVi ? ` | Phỏng vấn: ${cleanInterviewVi}` : ''}${cleanBenefitsVi ? ` | Phúc lợi: ${cleanBenefitsVi}` : ''}\nBạn xem qua nếu thấy phù hợp thì nhắn lại để mình sắp xếp hỗ trợ nhé!`,
   ]
     .filter(Boolean)
     .join('\n');
 
   return anonymizeKyujinTextForCandidate(assembledVi, comp, slot, 'vi');
+};
+
+export const buildCandidateAnonJobInviteMessage = (
+  person: Partial<Candidate> = {},
+  comp: KyujinCompany,
+  slot: KyujinSlot,
+  lang: 'vi' | 'jp' = 'vi'
+): string => {
+  const displayName = String(person.fbName || person.name || '').trim();
+  const body = buildAnonymousJobPostText(comp, slot, lang);
+  if (lang === 'jp') {
+    const greeting = displayName
+      ? `${displayName}さん、こんにちは！ご希望条件に合いそうな非公開求人がございますのでご案内いたします。`
+      : 'こんにちは！ご希望条件に合いそうな非公開求人がございますのでご案内いたします。';
+    return `${greeting}\n\n${body}`;
+  }
+  const greetingVi = displayName
+    ? `Chào ${displayName}! Mình gửi bạn thông tin 1 đơn hàng ẩn danh mới rất phù hợp với nguyện vọng của bạn nhé:`
+    : 'Chào bạn! Mình gửi bạn thông tin 1 đơn hàng ẩn danh mới rất phù hợp với nguyện vọng của bạn nhé:';
+  return `${greetingVi}\n\n${body}`;
 };
 
 // ============================================================================
@@ -3178,15 +3575,39 @@ export const stripKyujinPdfNoise = (rawText = ''): string => {
 };
 
 export const sanitizeJobDescriptionForCandidate = (desc = ''): string => {
-  const cleaned = stripKyujinPdfNoise(String(desc || ''));
+  const rawStr = String(desc || '').trim();
+  if (!rawStr) return '';
+
+  // 1. If a polluted string contains an explicit "主な仕事内容 / 仕事内容 / 業務内容" section, slice strictly from AFTER it!
+  const explicitJobMarker = rawStr.match(
+    /(?:主な仕事内容|仕事内容|業務内容)\s*[：:|｜\s]+([\s\S]+)/
+  );
+  let targetText = explicitJobMarker ? explicitJobMarker[1] : rawStr;
+
+  // 2. If there was NO explicit job-content marker and the text starts with / is dominated by Kyujin sheet headers or 会社概要/事業内容, reject it cleanly!
+  const headerBannerPollutedRx =
+    /^(?:\s*(?:特定技能\s*[12]?\s*号?|在留資格|関係社外秘|社外秘|海外招へい|求人票|案件番号|企業名|会社名|代表者|法人番号|事業所番号|所在地|本社所在地|TEL|FAX|設立|資本金|従業員数|ホームページ|URL|会社概要|主な事業内容|事業内容)\b)/i;
+  if (!explicitJobMarker && headerBannerPollutedRx.test(targetText.trim())) {
+    return '';
+  }
+
+  // Strip stray leading lines if a company overview header slipped in
+  targetText = targetText
+    .replace(/(?:^|\n)\s*(?:会社概要|主な事業内容|事業内容)\s*[：:|｜\s][^\n]*/g, '\n')
+    .replace(
+      /(?:^|\n)\s*(?:海外招へい\s*(?:可|不可)?|特定技能\s*[12]?\s*号?\s*求人票?|在留資格\s*[：:|｜]?\s*[^\n]*|所在地\s*[：:|｜]?[^\n]*|TEL\s*[：:|｜]?[^\n]*|FAX\s*[：:|｜]?[^\n]*)/gi,
+      '\n'
+    );
+
+  const cleaned = stripKyujinPdfNoise(targetText);
   return cleaned
     .replace(/(?:家賃控除額は実費を上回る[^\n。]*[。\n]?)/g, '')
     .replace(/(?:写真掲載許可(?:をもらう|取得)[^\n。]*[。\n]?)/g, '')
     .replace(/(?:[※＊]\s*(?:社内用|内部メモ|担当メモ|紹介手数料)[^\n。]*[。\n]?)/g, '')
     .replace(/(?:[（(](?:社内メモ|担当用|内部用)[^)）]*[)）])/g, '')
-    .replace(/(?:^|[\s\n])(?:企業名|会社名)\s*[:：]\s*[^\s\n]{2,36}/g, ' ')
+    .replace(/(?:^|[\s\n])(?:企業名|会社名|代表者|所在地|TEL|FAX|主な事業内容|事業内容)\s*[:：]\s*[^\n]{1,60}/g, ' ')
     .replace(
-      /(?:受動喫煙|試用期間|選考方法|応募書類|連絡先|電話番号|FAX|メールアドレス)[\s\S]*$/i,
+      /(?:主な事業内容|会社概要|就業時間|勤務時間|受動喫煙|試用期間|選考方法|応募書類|連絡先|電話番号|FAX|メールアドレス)[\s\S]*$/i,
       ''
     )
     .replace(/\s+/g, ' ')
@@ -4149,13 +4570,22 @@ const parseExcelBlockToKyujin = (
   let jobDescription = '';
   let bonusText = '';
 
-  for (let r = 0; r < blockRows.length; r++) {
-    const row = blockRows[r] || [];
-    for (let c = 0; c < row.length; c++) {
-      const cell = String(row[c] || '').trim();
+  let currentSection: 'header' | 'company' | 'job' = 'header';
+  for (let rIdx = 0; rIdx < blockRows.length; rIdx += 1) {
+    const row = blockRows[rIdx] || [];
+    const nonEmptyRow = row.map((v) => sanitizeExcelFloatText(v)).filter(Boolean);
+    const rowJoined = nonEmptyRow.join(' ');
+    if (/^(?:会社概要|企業概要|法人概要)$/.test(nonEmptyRow[0] || '') || /\b会社概要\b/.test(rowJoined)) {
+      currentSection = 'company';
+    } else if (/^(?:求人内容|募集要項|求人詳細)$/.test(nonEmptyRow[0] || '') || /\b求人内容\b/.test(rowJoined)) {
+      currentSection = 'job';
+    }
+
+    for (let cIdx = 0; cIdx < row.length; cIdx += 1) {
+      const cell = sanitizeExcelFloatText(row[cIdx]);
       if (!cell) continue;
       const rightValues = row
-        .slice(c + 1)
+        .slice(cIdx + 1)
         .map((v) => sanitizeExcelFloatText(v))
         .filter(Boolean);
 
@@ -4171,8 +4601,34 @@ const parseExcelBlockToKyujin = (
       if (!fallbackLocation && /^所在地$/.test(cell) && rightValues.length > 0) {
         fallbackLocation = rightValues.join(' ').trim();
       }
-      if (!jobDescription && /主な仕事内容|仕事内容|業務内容/.test(cell) && rightValues.length > 0) {
-        jobDescription = rightValues.join(' ').trim();
+      if (
+        !jobDescription &&
+        currentSection !== 'company' &&
+        !/事業内容/.test(cell) &&
+        /^(?:主な仕事内容|仕事内容|業務内容)[：:\s]*$/.test(cell)
+      ) {
+        const descLines: string[] = [];
+        if (rightValues.length > 0) {
+          descLines.push(rightValues.join(' ').trim());
+        }
+        for (let nr = rIdx + 1; nr < Math.min(blockRows.length, rIdx + 8); nr += 1) {
+          const nextRow = (blockRows[nr] || []).map((v) => sanitizeExcelFloatText(v));
+          const nextFirst = nextRow.find(Boolean) || '';
+          if (
+            /^(?:給与|月給|基本給|時給|賃金|就業時間|勤務時間|休憩時間|休日|年間休日|残業|応募条件|資格|経験|日本語|福利厚生|賞与|交通費|勤務地|勤務先|会社概要|主な事業内容|選考|試用期間)/.test(
+              nextFirst
+            )
+          ) {
+            break;
+          }
+          const nextJoined = nextRow.slice(cIdx).filter(Boolean).join(' ').trim() || nextRow.filter(Boolean).join(' ').trim();
+          if (nextJoined && !/^[（(]?[①-⑩0-9]+[)）]?$/.test(nextJoined)) {
+            descLines.push(nextJoined);
+          }
+        }
+        if (descLines.length > 0) {
+          jobDescription = descLines.join(' ');
+        }
       }
       if (/賞与/.test(cell) && rightValues.length > 0) {
         bonusText += ' ' + rightValues.join(' ');
@@ -4437,8 +4893,14 @@ export const parseRawKyujinTextFallback = (rawText: string, sourceTitle = 'Text 
       minJlpt: resolvedMinJlpt,
       employmentType,
     });
-    const jobDescM = block.match(/(?:主な仕事内容|業務内容|仕事内容)\s*[：:|｜\s]+([\s\S]{4,500}?)(?=\n(?:就業時間|勤務時間|給与|月給|時給|休日|年間休日|福利厚生|選考|$))/i);
-    const extractedDesc = jobDescM ? jobDescM[1] : block.slice(0, 800);
+    const kyujinContentSliceM = block.match(
+      /(?:求人内容|募集要項)([\s\S]+?)(?=\n\s*(?:会社概要|企業概要)|$)/
+    );
+    const descSearchTarget = kyujinContentSliceM ? kyujinContentSliceM[1] : block;
+    const jobDescM = descSearchTarget.match(
+      /(?:主な仕事内容|仕事内容|業務内容)\s*[：:|｜\s]+([\s\S]{4,600}?)(?=\n\s*(?:就業時間|勤務時間|給与|月給|基本給|時給|休日|年間休日|福利厚生|選考|主な事業内容|会社概要|$))/i
+    );
+    const extractedDesc = jobDescM ? sanitizeJobDescriptionForCandidate(jobDescM[1]) : '';
     const housingMarked =
       /[☑✓✔■●〇○レ]\s*提供無|提供無\s*[☑✓✔■●〇○レ]/.test(block)
         ? '提供無'
@@ -5125,8 +5587,10 @@ export const parseChatIntoUpdates = (chatText = '') => {
     }
   }
 
-  // Channel detection across personal / company / line / other
-  if (/fanpage|page\s*công\s*ty|fb\s*công\s*ty|公式/i.test(text)) {
+  // Channel detection across personal / company / line / pt / other
+  if (hasPtSignal({ name: updates.name, fbName: updates.fbName, memo: text })) {
+    updates.channel = 'pt';
+  } else if (/fanpage|page\s*công\s*ty|fb\s*công\s*ty|公式/i.test(text)) {
     updates.channel = 'company';
   } else if (/\bline\b|ライン/i.test(text) && !updates.fbProfileUrl && !updates.fbName) {
     updates.channel = 'line';
@@ -5139,6 +5603,11 @@ export const parseChatIntoUpdates = (chatText = '') => {
     updates.channel = 'personal';
   } else {
     updates.channel = 'other';
+  }
+  const kintoneExtracted = extractKintoneIdAndCleanName(updates.name || '', '', text);
+  if (kintoneExtracted.kintoneId) {
+    updates.kintoneId = kintoneExtracted.kintoneId;
+    if (kintoneExtracted.cleanName) updates.name = kintoneExtracted.cleanName;
   }
   updates.progressStatus = '新規相談';
 
@@ -5914,3 +6383,58 @@ export const exportRirekishoToExcelFile = (draft: RirekishoDraft): string => {
   XLSX.writeFile(wb, fileName);
   return fileName;
 };
+
+export const splitDesiredIndustriesSafely = (raw = ''): string[] => {
+  const s = String(raw || '').trim();
+  if (!s) return [];
+  const tokens: string[] = [];
+  let buf = '';
+  let depth = 0;
+
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === '(' || ch === '（' || ch === '[' || ch === '【') {
+      depth += 1;
+      buf += ch;
+      continue;
+    }
+    if (ch === ')' || ch === '）' || ch === ']' || ch === '】') {
+      if (depth > 0) depth -= 1;
+      buf += ch;
+      continue;
+    }
+    if (depth === 0 && (ch === '/' || ch === '・' || ch === '、' || ch === ',' || ch === '，')) {
+      const piece = buf.trim();
+      if (piece) tokens.push(piece);
+      buf = '';
+      continue;
+    }
+    buf += ch;
+  }
+  const last = buf.trim();
+  if (last) tokens.push(last);
+
+  return tokens
+    .map((t) => t.replace(/\s+/g, ' ').trim())
+    .filter((t) => {
+      if (!t || t === '要確認' || t === '不明' || t === '未定') return false;
+      // Reject orphan parenthesis fragments like "ホール等）" or "アルバイト（飲食"
+      const openCount = (t.match(/[（(\[【]/g) || []).length;
+      const closeCount = (t.match(/[）)\]】]/g) || []).length;
+      if (openCount !== closeCount) return false;
+      return true;
+    });
+};
+
+export const isCleanProposedCompanyOption = (raw = ''): boolean => {
+  const s = String(raw || '').trim();
+  if (!s || s.length > 25) return false;
+  if (/^(?:求人票|送付|提案|紹介|確認|連絡|未定|なし|不明|要確認|ENT-\d+|-+$)/i.test(s)) {
+    return false;
+  }
+  if (/(?:しました|予定|済み|ため|ですが|ので|から|。\s*$|送付済)/.test(s)) {
+    return false;
+  }
+  return true;
+};
+

@@ -1,10 +1,11 @@
-export type ChannelType = 'personal' | 'company' | 'line' | 'other' | 'school';
+export type ChannelType = 'personal' | 'company' | 'line' | 'pt' | 'other' | 'school';
 
 export type MainTabId =
   | 'all'
   | 'personal'
   | 'company'
   | 'line'
+  | 'ptChannel'
   | 'other'
   | 'school'
   | 'mendan'
@@ -80,6 +81,14 @@ export interface Candidate {
   channelManuallyEdited?: boolean;
   googleCalendarEventId?: string;
   googleCalendarEventLink?: string;
+  kintoneId?: string;
+  ptPartnerName?: string;
+  proposalHistory?: Array<{
+    companyName: string;
+    jobCode?: string;
+    slotId?: string;
+    date: string;
+  }>;
   savedRirekisho?: SavedRirekishoRecord;
   _isSchool?: boolean;
 }

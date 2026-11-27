@@ -137,8 +137,11 @@ const KYUJIN_EXTRACTION_PROMPT = `あなたは日本の人材紹介会社（特�
 27. bonus / bonusDetail: 「賞与あり」「賞与なし」「要確認」＋詳細（例: 年2回 計2.5ヶ月分）。チェックボックス☑・✔・●や「無」「賞与なし」「退職金・賞与無」が指定されている場合は、選択肢に「賞与あり」の文字が並んでいても必ず「賞与なし」を優先すること。
 28. experienceRequirement: 必ず「Không yêu cầu kinh nghiệm (未経験OK)」「Yêu cầu có kinh nghiệm (経験者必須)」「Ưu tiên có kinh nghiệm (経験者歓迎)」の3分類から選択。
 29. experienceDetail: 必須資格や歓迎経験の詳細（例: 準中型免許以上必須 等）。
-30. jobDescription: 「主な仕事内容」「業務内容」欄の具体的な作業内容のみを記載。
-   ★厳守：「関係社外秘」「社外秘」「取扱注意」「極秘」「写真掲載許可もらう」「案件番号〜」「企業名〜」「--- Trang X/Y ---」「求人票」「更新日」「代表者」「法人番号」、表の「|」「｜」記号は絶対に混入させないこと！
+30. jobDescription: 必ず表内の「求人内容」ブロックにある「主な仕事内容」「仕事内容」「業務内容」欄の具体的な作業内容のみを抽出すること。
+   ★厳守：
+   - ページ上部のヘッダー（「求人票」「関係社外秘」「社外秘」「取扱注意」「極秘」「写真掲載許可もらう」「海外招へい 可/不可」「特定技能1号」「在留資格」「案件番号〜」「企業名〜」「代表者」「所在地」「TEL」「更新日」「法人番号」「--- Trang X/Y ---」）は絶対に jobDescription に含めないこと。
+   - 「会社概要」ブロックの「主な事業内容」「事業内容」と取り違えないこと（事業内容は jobDescription に混ぜない）。
+   - 表の「|」「｜」記号も絶対に混入させないこと。記載がない場合は "" を返すこと。
 31. excludedNationalities: 採用不可・NGと明記された国籍の配列（例: ["ネパール"], ["ベトナム"]）。記載がなければ []。
 32. excludedGenders: 採用不可・NGと明記された性別の配列（例: "男性NG" や "女性限定" なら ["男性"]、"女性NG" や "男性限定" なら ["女性"]）。記載がなければ []。
 33. requiresInJapan: "国内在住限定"、"日本在住のみ"、"在日限定"、"海外NG"、"海外招へい 不可" に丸印・チェックがあれば true、海外招へい「可」または記載なしなら false。
@@ -298,8 +301,8 @@ QUY TẮC BÓC TÁCH BẮT BUỘC (TUÂN THỦ TUYỆT ĐỐI):
    - **certifications** (合格済み試験・資格): Trích xuất bằng tay nghề Tokutei, JFT, bằng lái xe, sơ cấp cứu Kaigo... nếu có; không có thì \`""\`.
    - **goal** (Nhu cầu & Mục tiêu chuyển đổi): Tóm tắt ngắn gọn bằng tiếng Việt mục đích của ứng viên (bao gồm cả hình thức làm việc như Baito / Làm thêm hay Tokutei, mức lương/điều kiện của đơn mà ứng viên đang hỏi).
    - **rawLog** (Nhật ký & Tình trạng trao đổi nguyên văn): **BẮT BUỘC** trích xuất TOÀN BỘ chữ có trong ảnh (bao gồm CẢ nội dung văn bản trong ảnh bài đăng tuyển dụng mà ứng viên gửi kèm lẫn toàn bộ tin nhắn hội thoại kèm mốc giờ), giữ nguyên từng dòng không cắt bớt.
-4. CÁC TRƯỜNG BỔ SUNG (điền nếu có thực tế trong ảnh/chat; nếu không có thì trả về \`""\`, TUYỆT ĐỐI KHÔNG điền chuỗi giữ chỗ kiểu \`"(Chưa có...)"\`, \`"Chưa rõ"\`, \`"未定"\`, và KHÔNG tự suy đoán \`mendanDate\` / \`interviewDate\` từ câu hỏi giả định):
-   - \`fbProfileUrl\`, \`channel\` (\`"personal"\` FB cá nhân mặc định, \`"company"\` Fanpage công ty, \`"school"\` Trường Nhật ngữ / DHS, \`"line"\` nếu nguồn là LINE, \`"other"\` nếu nguồn khác / giới thiệu trực tiếp), \`age\`, \`birthDate\` (\`YYYY-MM-DD\`), \`phone\`, \`email\`, \`address\`, \`startDate\` (năm hiện tại 2026 -> "tháng X năm sau" là 2027), \`graduationDate\`, \`japanExperience\`, \`salaryExpectation\`, \`progressStatus\` (mặc định \`"新規相談"\`), \`proposedCompany\`, \`mendanDate\`, \`interviewDate\`.`;
+4. CÁC TRƯỜNG BỔ SUNG (điền nếu có thực tế trong ảnh/chat; nếu không có thì trả về \`""\`, TUYỆT ĐỐI KHÔNG điền chuỗi giữ chỗ kiểu \`"(Chưa có...)"\`, \`"Chưa rõ"\`, \`"未定"\`, \`"なし"\`, và KHÔNG tự suy đoán \`mendanDate\` / \`interviewDate\` / ngành \`宿泊\` hay ngày tháng không được nhắc tới):
+   - \`kintoneId\` (mã dạng \`ENT-001119\` nếu có), \`ptPartnerName\` (tên đối tác PT nếu nguồn PT), \`fbProfileUrl\`, \`channel\` (\`"personal"\` FB cá nhân mặc định, \`"company"\` Fanpage công ty, \`"school"\` Trường Nhật ngữ / DHS, \`"line"\` nếu nguồn là LINE, \`"pt"\` nếu nguồn là PT / đối tác giới thiệu, \`"other"\` nếu nguồn khác / giới thiệu trực tiếp), \`age\`, \`birthDate\` (\`YYYY-MM-DD\`), \`phone\`, \`email\`, \`address\`, \`startDate\` (năm hiện tại 2026 -> "tháng X năm sau" là 2027), \`graduationDate\`, \`japanExperience\`, \`salaryExpectation\`, \`progressStatus\` (mặc định \`"新規相談"\`), \`proposedCompany\`, \`mendanDate\`, \`interviewDate\`.`;
 
 async function startServer() {
   const app = express();
@@ -669,6 +672,8 @@ async function startServer() {
             properties: {
               fullName: { type: Type.STRING },
               name: { type: Type.STRING },
+              kintoneId: { type: Type.STRING },
+              ptPartnerName: { type: Type.STRING },
               fbName: { type: Type.STRING },
               fbProfileUrl: { type: Type.STRING },
               channel: { type: Type.STRING },
@@ -753,32 +758,53 @@ async function startServer() {
         return s;
       };
       const rawChan = pickStr(raw.channel).toLowerCase();
+      const rawLogAll = pickStr(raw.rawLog, raw.negotiationLog);
+      const rawNameJoined = pickStr(raw.fullName, raw.name);
+      const hasPtHint =
+        rawChan === 'pt' ||
+        Boolean(cleanOptionalField(raw.ptPartnerName)) ||
+        /[（(]\s*PT\s*[）)]|(?:^|\s)PT$/i.test(rawNameJoined) ||
+        /(?:PT提携|パートナー紹介|PT紹介)/i.test(rawLogAll);
       const normalizedChannel =
-        rawChan === 'company' ||
-        rawChan === 'school' ||
-        rawChan === 'line' ||
-        rawChan === 'other' ||
-        rawChan === 'personal'
+        hasPtHint
+          ? 'pt'
+          : rawChan === 'company' ||
+            rawChan === 'school' ||
+            rawChan === 'line' ||
+            rawChan === 'other' ||
+            rawChan === 'personal'
           ? rawChan
-          : /line/i.test(pickStr(raw.rawLog, raw.negotiationLog))
+          : /line/i.test(rawLogAll)
           ? 'line'
           : 'personal';
 
-      const resolvedArea = pickStr(raw.desiredArea)
+      const kintoneMatch =
+        cleanOptionalField(raw.kintoneId).match(/\b(ENT-\d{3,10})\b/i)?.[1]?.toUpperCase() ||
+        rawNameJoined.match(/\b(ENT-\d{3,10})\b/i)?.[1]?.toUpperCase() ||
+        rawLogAll.match(/\b(ENT-\d{3,10})\b/i)?.[1]?.toUpperCase() ||
+        '';
+      const cleanedDisplayName = cleanOptionalField(rawNameJoined)
+        .replace(/\s*[\(（\[]?\s*ENT-\d{3,10}\s*[\)）\]]?\s*/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const resolvedArea = cleanOptionalField(raw.desiredArea)
         .replace(/都内/g, '東京都')
         .replace(/^関東$/g, '関東エリア');
 
       const candidate: Record<string, unknown> = {
         ...raw,
-        name: cleanOptionalField(pickStr(raw.fullName, raw.name)),
-        fullName: cleanOptionalField(pickStr(raw.fullName, raw.name)),
+        name: cleanedDisplayName,
+        fullName: cleanedDisplayName,
+        kintoneId: kintoneMatch,
+        ptPartnerName: cleanOptionalField(raw.ptPartnerName),
         fbName: cleanFbName(raw.fbName),
         fbProfileUrl: cleanOptionalField(pickStr(raw.fbProfileUrl, raw.fbUrl)),
         fbUrl: cleanOptionalField(pickStr(raw.fbProfileUrl, raw.fbUrl)),
         channel: normalizedChannel,
         nationality: cleanNat(raw.nationality),
-        jlpt: pickStr(raw.japaneseLevel, raw.jlpt) || '要確認',
-        japaneseLevel: pickStr(raw.japaneseLevel, raw.jlpt) || '要確認',
+        jlpt: cleanOptionalField(pickStr(raw.japaneseLevel, raw.jlpt)) || '要確認',
+        japaneseLevel: cleanOptionalField(pickStr(raw.japaneseLevel, raw.jlpt)) || '要確認',
         desiredIndustry: normalizeIndustryStr(pickStr(raw.desiredField, raw.desiredIndustry)),
         desiredField: normalizeIndustryStr(pickStr(raw.desiredField, raw.desiredIndustry)),
         desiredArea: resolvedArea,
@@ -792,11 +818,17 @@ async function startServer() {
         phone: cleanOptionalField(raw.phone),
         email: cleanOptionalField(raw.email),
         address: cleanOptionalField(raw.address),
+        age: cleanOptionalField(raw.age),
+        birthDate: cleanOptionalField(raw.birthDate),
+        startDate: cleanOptionalField(raw.startDate),
+        graduationDate: cleanOptionalField(raw.graduationDate),
+        japanExperience: cleanOptionalField(raw.japanExperience),
+        salaryExpectation: cleanOptionalField(raw.salaryExpectation),
         mendanDate: cleanOptionalField(raw.mendanDate),
         interviewDate: cleanOptionalField(raw.interviewDate),
         proposedCompany: cleanOptionalField(raw.proposedCompany),
-        negotiationLog: pickStr(raw.rawLog, raw.negotiationLog),
-        rawLog: pickStr(raw.rawLog, raw.negotiationLog),
+        negotiationLog: rawLogAll,
+        rawLog: rawLogAll,
       };
       res.json({ candidate });
     } catch (err) {
@@ -991,13 +1023,33 @@ async function startServer() {
           sanitizeExcelFloatText(stripKyujinFormBoilerplate(String(v ?? '').trim()))
         );
 
+      const sanitizeServerJobDesc = (rawDesc: unknown): string => {
+        const str = String(rawDesc ?? '').trim();
+        if (!str) return '';
+        const explicitMarker = str.match(/(?:主な仕事内容|仕事内容|業務内容)\s*[：:|｜\s]+([\s\S]+)/);
+        let body = explicitMarker ? explicitMarker[1] : str;
+        if (
+          !explicitMarker &&
+          /^(?:\s*(?:特定技能\s*[12]?\s*号?|在留資格|関係社外秘|社外秘|海外招へい|求人票|案件番号|企業名|会社名|代表者|法人番号|所在地|TEL|FAX|会社概要|主な事業内容|事業内容)\b)/i.test(
+            body.trim()
+          )
+        ) {
+          return '';
+        }
+        body = body
+          .replace(/(?:主な事業内容|会社概要|就業時間|勤務時間|受動喫煙|試用期間|選考方法|応募書類|連絡先)[\s\S]*$/i, '')
+          .trim();
+        return cleanKyujinField(body);
+      };
+
       const normalizedItems = rawItems.map((item) => {
         const aiSal = cleanKyujinField(item.salary);
         const aiHourly = cleanKyujinField(item.hourlyWage);
+        const cleanedJobDescription = sanitizeServerJobDesc(item.jobDescription);
         const combinedHint = [
           aiSal && !/要確認/.test(aiSal) ? aiSal : '',
           aiHourly && !/要確認/.test(aiHourly) ? `時給 ${aiHourly}` : '',
-          cleanKyujinField(item.jobDescription),
+          cleanedJobDescription,
         ]
           .filter(Boolean)
           .join('\n');
@@ -1049,7 +1101,7 @@ async function startServer() {
 
         const rawEmp = cleanKyujinField(item.employmentType);
         const rawTextCheck = typeof rawText === 'string' ? rawText : '';
-        const fullContextForEmp = `${rawEmp} ${finalSalary} ${cleanAnnual} ${cleanKyujinField(item.targetVisa)} ${cleanKyujinField(item.jobDescription)} ${rawTextCheck}`;
+        const fullContextForEmp = `${rawEmp} ${finalSalary} ${cleanAnnual} ${cleanKyujinField(item.targetVisa)} ${cleanedJobDescription} ${rawTextCheck}`;
         const hasMonthlyOrFullTimeSignals =
           salaryParsed.salaryType === 'monthly' ||
           /(?:月給|基本給|想定月収|総支給|想定年収|モデル年収|正社員|正職員|社員登用)/.test(fullContextForEmp);
@@ -1092,7 +1144,7 @@ async function startServer() {
           bonus: finalBonus || item.bonus,
           bonusDetail: bonusDetailRaw,
           experienceDetail: cleanKyujinField(item.experienceDetail),
-          jobDescription: cleanKyujinField(item.jobDescription),
+          jobDescription: cleanedJobDescription,
         };
       });
 

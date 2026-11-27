@@ -63,6 +63,7 @@ export const CRM_I18N = {
       personal: 'FB cá nhân',
       company: 'Fanpage công ty',
       line: 'LINE',
+      ptChannel: 'PT提携',
       other: 'Nguồn khác',
       school: 'Trường Nhật ngữ / DHS',
       schoolMobile: 'Trường Nhật ngữ',
@@ -81,7 +82,7 @@ export const CRM_I18N = {
     homeLink: 'Trang chủ',
 
     // Filters
-    searchPlaceholder: 'Tìm nhanh (Họ tên, FB, Quốc tịch, Ngành nghề, Công ty)...',
+    searchPlaceholder: 'Tìm nhanh (Họ tên, FB, Mã Kintone, Quốc tịch, Ngành, Công ty)...',
     allStatuses: 'Tất cả tiến độ',
     allIndustries: 'Ngành nghề (Tất cả)',
     allNationalities: 'Quốc tịch (Tất cả)',
@@ -100,14 +101,20 @@ export const CRM_I18N = {
       movedLine: number,
       movedSchool: number,
       deduped: number,
-      totalUnique: number
+      totalUnique: number,
+      movedPt = 0
     ) => {
-      const totalChanges = movedOther + movedCompany + movedLine + movedSchool + deduped;
+      const totalChanges = movedOther + movedCompany + movedLine + movedSchool + movedPt + deduped;
       if (totalChanges === 0) {
         return `ℹ️ Dữ liệu đã gọn gàng (${totalUnique} ứng viên, không có trùng lặp hay sai kênh).`;
       }
-      return `✅ Đã dọn dữ liệu (${totalUnique} hồ sơ): Khác +${movedOther}, Fanpage +${movedCompany}, LINE +${movedLine}, Trường +${movedSchool}, gộp trùng ${deduped}.`;
+      return `✅ Đã dọn dữ liệu (${totalUnique} hồ sơ): Khác +${movedOther}, Fanpage +${movedCompany}, LINE +${movedLine}, PT +${movedPt}, Trường +${movedSchool}, gộp trùng ${deduped}.`;
     },
+    mergeDupBtn: 'Gộp hồ sơ trùng tên',
+    mergeDupToast: (mergedCount: number, totalAfter: number) =>
+      mergedCount > 0
+        ? `✅ Đã gộp ${mergedCount} hồ sơ trùng tên thành công (Còn ${totalAfter} ứng viên duy nhất).`
+        : `ℹ️ Không phát hiện hồ sơ trùng tên nào (Tổng ${totalAfter} ứng viên).`,
     fbChatRegister: 'Đăng ký từ chat FB / LINE',
     newCandidate: '+ Thêm ứng viên',
     careFilters: {
@@ -134,8 +141,15 @@ export const CRM_I18N = {
     channelPersonal: 'FB cá nhân',
     channelCompany: 'Fanpage cty',
     channelLine: 'LINE',
+    channelPt: 'PT提携',
     channelOther: 'Nguồn khác',
     channelSchool: 'Du học sinh',
+    kintoneLabel: 'Mã Kintone',
+    ptPartnerLabel: 'Tên đối tác PT',
+    ptPartnerPlaceholder: 'Chọn hoặc nhập tên đối tác PT...',
+    proposalDateLabel: 'Ngày đề xuất',
+    visaRemainBadge: (days: number) => `🪪 Hạn thẻ còn ${days} ngày`,
+    visaExpiredBadge: (days: number) => `🪪 Thẻ quá hạn ${days} ngày`,
     quickChannelTitle: 'Chuyển nhanh kênh nguồn',
     contactedPrefix: 'ĐÃ LIÊN HỆ',
     lastContactPrefix: 'LIÊN HỆ CUỐI:',
@@ -185,6 +199,8 @@ export const CRM_I18N = {
       matchPct: (score: number) => `Khớp ${score}%`,
       hourlyPrefix: 'Lương giờ',
       createInviteBtn: 'Tạo tin mời ứng tuyển',
+      copyAnonInviteBtn: '📩 Copy tin ẩn danh',
+      alreadySentTag: 'Đã gửi tin',
       previewAnonBtn: 'Xem ẩn danh',
       proposeBtn: 'Đề xuất',
       alreadyProposedTag: '✅ Đã tiến cử',
@@ -287,9 +303,10 @@ export const CRM_I18N = {
       ptCount: 'Số đối tác PT liên kết',
       channelDist: (n: number) => `Cơ cấu nguồn ứng viên & Quốc tịch (Tổng ${n} người)`,
       lineChannel: 'LINE',
+      ptChannel: 'PT提携',
       otherChannel: 'Nguồn khác / Giới thiệu',
       nationalityBreakdown: 'Chi tiết theo quốc tịch',
-      statusPipeline: 'Phễu tiến độ tuyển chọn',
+      statusPipeline: 'Phễu tiến độ tuyển chọn (6 giai đoạn chuẩn)',
       peopleUnit: 'người',
       companiesUnit: 'công ty',
       slotsUnit: 'vị trí',
@@ -304,6 +321,16 @@ export const CRM_I18N = {
       copyGasCode: 'Sao chép mã GAS CalendarApp',
       syncToGas: 'Đồng bộ lên GAS',
       sending: 'Đang gửi...',
+      copyBossSummaryBtn: '📋 Copy báo cáo tóm tắt cho sếp',
+      copiedBossSummaryToast: '✅ Đã sao chép báo cáo tóm tắt gửi sếp!',
+      monthlyStatsTitle: 'Thống kê Naitei & Nhập công ty theo tháng',
+      channelSummaryTitle: 'Cơ cấu nguồn ứng viên (6 kênh)',
+      sourceLabel: 'Kênh nguồn',
+      countLabel: 'Số lượng',
+      ratioLabel: 'Tỷ lệ',
+      totalLabel: 'Tổng cộng',
+      naiteiCountLabel: 'Naitei (Đậu)',
+      joinedCountLabel: 'Nhập công ty / Chuẩn bị',
     },
 
     // View Switcher & List View & Drawer & Naitei/Jitai
@@ -436,6 +463,7 @@ export const CRM_I18N = {
       personal: 'FB個人',
       company: 'FB会社公式',
       line: 'LINE',
+      ptChannel: 'PT提携',
       other: 'その他・直接紹介',
       school: '日本語学校・留学生',
       schoolMobile: '日本語学校',
@@ -454,7 +482,7 @@ export const CRM_I18N = {
     homeLink: 'ホーム',
 
     // Filters
-    searchPlaceholder: 'クイック検索（氏名・FB名・国籍・希望分野・企業名）...',
+    searchPlaceholder: 'クイック検索（氏名・FB名・Kintone番号・国籍・分野・企業名）...',
     allStatuses: 'すべての進捗',
     allIndustries: '希望分野（すべて）',
     allNationalities: '国籍（すべて）',
@@ -473,14 +501,20 @@ export const CRM_I18N = {
       movedLine: number,
       movedSchool: number,
       deduped: number,
-      totalUnique: number
+      totalUnique: number,
+      movedPt = 0
     ) => {
-      const totalChanges = movedOther + movedCompany + movedLine + movedSchool + deduped;
+      const totalChanges = movedOther + movedCompany + movedLine + movedSchool + movedPt + deduped;
       if (totalChanges === 0) {
         return `ℹ️ 重複や流入経路の誤分類はありません（全${totalUnique}名）。`;
       }
-      return `✅ データ整理完了（合計${totalUnique}名）: その他へ ${movedOther}名 / FB会社公式へ ${movedCompany}名 / LINEへ ${movedLine}名 / 日本語学校へ ${movedSchool}名 / 重複統合 ${deduped}件`;
+      return `✅ データ整理完了（合計${totalUnique}名）: その他へ ${movedOther}名 / FB会社公式へ ${movedCompany}名 / LINEへ ${movedLine}名 / PT提携へ ${movedPt}名 / 日本語学校へ ${movedSchool}名 / 重複統合 ${deduped}件`;
     },
+    mergeDupBtn: '重複プロフィール統合',
+    mergeDupToast: (mergedCount: number, totalAfter: number) =>
+      mergedCount > 0
+        ? `✅ ${mergedCount}件の重複プロフィールを統合しました（現在 ${totalAfter}名）。`
+        : `ℹ️ 重複する氏名のプロフィールはありませんでした（全${totalAfter}名）。`,
     fbChatRegister: 'FB / LINEチャット登録',
     newCandidate: '+ 新規相談者登録',
     careFilters: {
@@ -507,8 +541,15 @@ export const CRM_I18N = {
     channelPersonal: 'FB個人',
     channelCompany: 'FB会社公式',
     channelLine: 'LINE',
+    channelPt: 'PT提携',
     channelOther: 'その他',
     channelSchool: '留学生',
+    kintoneLabel: 'Kintone管理番号',
+    ptPartnerLabel: 'PTパートナー名',
+    ptPartnerPlaceholder: 'PTパートナー名を選択または入力...',
+    proposalDateLabel: '提案日',
+    visaRemainBadge: (days: number) => `🪪 在留期限残り${days}日`,
+    visaExpiredBadge: (days: number) => `🪪 在留期限超過${days}日`,
     quickChannelTitle: 'チャネルを切り替え',
     contactedPrefix: '連絡済',
     lastContactPrefix: '最終連絡:',
@@ -558,6 +599,8 @@ export const CRM_I18N = {
       matchPct: (score: number) => `一致 ${score}%`,
       hourlyPrefix: '時給',
       createInviteBtn: '応募案内文を作成',
+      copyAnonInviteBtn: '📩 匿名求人をコピー',
+      alreadySentTag: '既提案',
       previewAnonBtn: '匿名プレビュー',
       proposeBtn: '推薦する',
       alreadyProposedTag: '✅ 推薦済み',
@@ -660,9 +703,10 @@ export const CRM_I18N = {
       ptCount: '提携PT機関数',
       channelDist: (n: number) => `チャネル別・国籍別 登録人材構成（計 ${n} 名）`,
       lineChannel: 'LINE',
+      ptChannel: 'PT提携',
       otherChannel: 'その他・直接紹介',
       nationalityBreakdown: '国籍別内訳',
-      statusPipeline: '進捗ステータス別 選考パイプライン',
+      statusPipeline: '選考パイプライン（6段階）',
       peopleUnit: '名',
       companiesUnit: '社',
       slotsUnit: '枠',
@@ -677,6 +721,16 @@ export const CRM_I18N = {
       copyGasCode: 'GAS CalendarAppコードをコピー',
       syncToGas: 'GASへ同期送信',
       sending: '送信中...',
+      copyBossSummaryBtn: '📋 上司報告用サマリーをコピー',
+      copiedBossSummaryToast: '✅ 上司報告用サマリーをコピーしました！',
+      monthlyStatsTitle: '月別 内定・入社実績',
+      channelSummaryTitle: '流入チャネル別内訳（全6チャネル）',
+      sourceLabel: 'チャネル',
+      countLabel: '人数',
+      ratioLabel: '構成比',
+      totalLabel: '合計',
+      naiteiCountLabel: '内定',
+      joinedCountLabel: '入社・準備',
     },
 
     // View Switcher & List View & Drawer & Naitei/Jitai
